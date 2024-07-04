@@ -93,16 +93,16 @@ AgoraRTC.onCameraChanged = async changedDevice => {
   }
 };
 async function initDevices() {
-  if (!localTracks.audioTrack) {
-    localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-      encoderConfig: "music_standard"
-    });
-  }
-  if (!localTracks.videoTrack) {
-    localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
-      encoderConfig: curVideoProfile.value
-    });
-  }
+  // if (!localTracks.audioTrack) {
+  //   localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
+  //     encoderConfig: "music_standard"
+  //   });
+  // }
+  // if (!localTracks.videoTrack) {
+  //   localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
+  //     encoderConfig: curVideoProfile.value
+  //   });
+  // }
   // get mics
   mics = await AgoraRTC.getMicrophones();
   const audioTrackLabel = localTracks.audioTrack.getTrackLabel();
@@ -226,27 +226,29 @@ async function join() {
   // Add an event listener to play remote tracks when remote user publishes.
   client.on("user-published", handleUserPublished);
   client.on("user-unpublished", handleUserUnpublished);
-  // Join the channel.
   options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
-  if (!localTracks.audioTrack) {
-    localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-      encoderConfig: "music_standard"
-    });
-  }
-  if (!localTracks.videoTrack) {
-    localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
-      encoderConfig: curVideoProfile.value
-    });
-  }
+
+  // Join the channel.
+  // options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
+  // if (!localTracks.audioTrack) {
+  //   localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
+  //     encoderConfig: "music_standard"
+  //   });
+  // }
+  // if (!localTracks.videoTrack) {
+  //   localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
+  //     encoderConfig: curVideoProfile.value
+  //   });
+  // }
 
   // Play the local video track to the local browser and update the UI with the user ID.
-  localTracks.videoTrack.play("local-player");
-  $("#local-player-name").text(`localVideo(${options.uid})`);
-  $("#joined-setup").css("display", "flex");
+  // localTracks.videoTrack.play("local-player");
+  // $("#local-player-name").text(`localVideo(${options.uid})`);
+  // $("#joined-setup").css("display", "flex");
 
   // Publish the local video and audio tracks to the channel.
-  await client.publish(Object.values(localTracks));
-  console.log("publish success");
+  // await client.publish(Object.values(localTracks));
+  // console.log("publish success");
 }
 
 /*
@@ -289,7 +291,7 @@ async function subscribe(user, mediaType) {
   if (mediaType === "video") {
     const player = $(`
       <div id="player-wrapper-${uid}">
-        <p class="player-name">remoteUser(${uid})</p>
+        <p class="player-name">(${uid})</p>
         <div id="player-${uid}" class="player"></div>
       </div>
     `);
