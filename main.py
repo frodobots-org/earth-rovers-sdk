@@ -1,83 +1,42 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-import agora
-import time
-from agora_token_builder import RtcTokenBuilder
-import os
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
+from fastapi.staticfiles import StaticFiles
+
+# from rtm_client import RtmClient
 
 load_dotenv()
 
 app = FastAPI()
-# Replace with your Agora App ID and Certificate
-AGORA_APP_ID = os.getenv('AGORA_APP_ID')
-AGORA_APP_CERTIFICATE = os.getenv('AGORA_APP_CERTIFICATE')
 
-def generate_agora_token(channel_name, uid):
-    current_time = int(time.time())
-    expire_time = current_time + 3600  # Token valid for 1 hour
-    return RtcTokenBuilder.buildTokenWithUid(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel_name, uid, 0, expire_time)
-
-@app.get("/token")
-def get_token(channel_name: str, uid: int):
-    token = generate_agora_token(channel_name, uid)
-    return {"token": token}
+app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 @app.get("/")
 def get_index():
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Agora WebRTC</title>
-        <script src="https://cdn.agora.io/sdk/release/AgoraRTC_N.js"></script>
-    </head>
-    <body>
-        <div id="video" style="width: 640px; height: 480px;"></div>
-        <script>
-            const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+    with open("index.html", "r") as file:
+        html_content = file.read()
+    return HTMLResponse(content=html_content, status_code=200)
 
-            async function startCall() {
-                const response = await fetch('/token?channel_name=test&uid=1234');
-                const data = await response.json();
-                const token = data.token;
+@app.post("/control")
+async def control(request: Request):
+    body = await request.json()
+    command = body.get("command")
+    if not command:
+        raise HTTPException(status_code=400, detail="Command not provided")
 
-                client.init("YOUR_AGORA_APP_ID", () => {
-                    console.log("AgoraRTC client initialized");
+    # Here you would send the command via RTM session
+    # For example:
+    # agora_client.send_rtm_message(command)
 
-                    client.join(token, "test", 1234, (uid) => {
-                        console.log("User " + uid + " join channel successfully");
+    return {"message": "Command sent successfully"}
 
-                        const localStream = AgoraRTC.createStream({
-                            streamID: uid,
-                            audio: true,
-                            video: true,
-                            screen: false
-                        });
+@app.get("/screenshot")
+def get_screenshot():
+    # This functionality depends on your application's architecture
+    # If you have a way to capture screenshots from the video stream, implement it here
+    # For example, returning a placeholder response
+    return JSONResponse(content={"image": "BLOB_PLACEHOLDER", "timestamp": "2021-07-13T20:00:00Z"})
 
-                        localStream.init(() => {
-                            console.log("getUserMedia successfully");
-                            localStream.play('video');
-                            client.publish(localStream, (err) => {
-                                console.log("Publish local stream error: " + err);
-                            });
-                        }, (err) => {
-                            console.log("getUserMedia failed", err);
-                        });
-                    }, (err) => {
-                        console.log("Join channel failed", err);
-                    });
-                }, (err) => {
-                    console.log("AgoraRTC client init failed", err);
-                });
-            }
-
-            startCall();
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
 
 if __name__ == "__main__":
     import uvicorn
