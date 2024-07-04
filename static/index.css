@@ -1,8 +1,11 @@
+.sso-hidden {
+  display: block;
+}
+
 .banner {
   padding: 0;
   background-color: #52575c;
   color: white;
-  margin-bottom: 20px;
 }
 
 .banner-text {
@@ -10,17 +13,42 @@
   margin: 0;
 }
 
-.card.demo-card {
-  margin-bottom: 15px;
-  flex: 0 0 300px;
+
+#join-form {
+  margin-top: 10px;
 }
 
-.demo-card-btn {
-  position: absolute;
-  right: 15px;
-  bottom: 15px;
+.tips {
+  font-size: 12px;
+  margin-bottom: 2px;
+  color: gray;
 }
 
-.card-text {
-  margin-bottom: 50px;
+.join-info-text {
+  margin-bottom: 2px;
+}
+
+input {
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.player {
+  width: 480px;
+  height: 320px;
+}
+
+.player-name {
+  margin: 8px 0;
+}
+
+#success-alert, #success-alert-with-token {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .player {
+    width: 320px;
+    height: 240px;
+  }
 }
