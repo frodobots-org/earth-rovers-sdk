@@ -76,7 +76,8 @@ async def auth():
 @app.get("/")
 async def get_index(request: Request):
     # Ensure auth() is called asynchronously
-    await auth()
+    if not auth_response_data:
+        await auth()
 
     # Ensure auth_response_data is accessed after auth() has been called
     app_id = auth_response_data.get("APP_ID", "3b64a6f5683d4abe9a7f3f72b7e7e9c8")
@@ -99,12 +100,15 @@ async def get_index(request: Request):
 
 @app.post("/control")
 async def control(request: Request):
+    if not auth_response_data:
+        await auth()
+
     body = await request.json()
     command = body.get("command")
     if not command:
         raise HTTPException(status_code=400, detail="Command not provided")
 
-    RtmClient("APP_ID", "APP_TOKEN", "CHANNEL").send_message("")
+    RtmClient(auth_response_data).send_message(command)
 
     return {"message": "Command sent successfully"}
 

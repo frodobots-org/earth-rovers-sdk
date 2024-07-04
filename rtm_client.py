@@ -1,46 +1,37 @@
 import requests
+import json
 
-"""
-    RTM Client for handling real time messages send to the Bot
-"""
 class RtmClient:
-    APP_ID = "3b64a6f5683d4abe9a7f3f72b7e7e9c8"
-    BASE_URL = f"https://api.agora.io/dev/v2/project/{APP_ID}"
+    def __init__(self, auth_response_data):
+        self.app_id = auth_response_data.get("APP_ID")
+        self.channel = auth_response_data.get("CHANNEL_NAME")
+        self.token = auth_response_data.get("RTM_TOKEN")
+        self.uid = str(auth_response_data.get("USERID"))
 
-    def __init__(self, token: str, uid: int, channel: str):
-        self.app_id = "3b64a6f5683d4abe9a7f3f72b7e7e9c8"
-        self.channel = channel
-        self.token = token
-        self.uid = uid
+    def send_message(self, message: dict):
+        # Convert the message dictionary to a JSON string
+        message_json = json.dumps(message, separators=(',', ':'))
 
-    @staticmethod
-    def create_client(app_id: str, token: str):
-        client = RtmClient(app_id, token)
-        return client
-
-
-    def send_message(self, message: str):
-        url = f"{RtmClient.BASE_URL}/rtm/users/{self.token}/peer_messages"
+        url = f"https://api.agora.io/dev/v2/project/{self.app_id}/rtm/users/{self.uid}/peer_messages"
         headers = {
             "x-agora-uid": self.uid,
             "x-agora-token": self.token
         }
+
         payload = {
             "destination": self.channel,
             "enable_offline_messaging": False,
             "enable_historical_messaging": False,
-            "payload": message
+            "payload": message_json
         }
+
         response = requests.post(url, headers=headers, json=payload)
+
+        print(response)
+        print(response.status_code)
+        print(response.json())
+
         if response.status_code == 200:
             print("Message sent successfully")
         else:
-            print("Failed to send message")
-
-if __name__ == "__main__":
-    rtm_token = "0063b64a6f5683d4abe9a7f3f72b7e7e9c8IAAwmb8LnqPemSKNisjDrsOUzLaKP3ruecLPV7o+ijq7uqQcwhgh39v0IgDgF+rIatCHZgQAAQAqt4ZmAgAqt4ZmAwAqt4ZmBAAqt4Zm"
-    channel = "frodobot_1947bf"
-    uid=4857
-
-    rtm_client = RtmClient(rtm_token, channel, uid)
-    rtm_client.send_message("{linear: 0, angular: 0, lamp: 1}")
+            print(response.json())
