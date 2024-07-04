@@ -1,173 +1,272 @@
 <!DOCTYPE html>
 <html lang="en">
-
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="X-UA-Compatible" content="ie=edge">
-  <title>Basic Video Call -- Frodobots</title>
-  <link rel="stylesheet" href="/static/bootstrap.min.css" />
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Frodobots SDK - Stream</title>
+    <link rel="stylesheet" href="/static/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/index.css" />
-</head>
+  </head>
 
-<body>
-  <div class="container-fluid banner">
-    <p class="banner-text">Basic Video Call - Frodobots</p>
-  </div>
+  <body>
+    <div class="container-fluid banner">
+      <p class="banner-text">Frodobots SDK - Stream</p>
+    </div>
 
-  <!--
-  When a user tries to join a Video Call without supplying an AccessToken, this button
-  calls #success-alert in cloudProxy.js. #success-alert refreshes this page with the
-  user information.
--->
-  <div id="success-alert" class="alert alert-success alert-dismissible fade show" role="alert">
-    <strong>Congratulations!</strong><span> You can invite others join this channel by click </span><a href="index.html"
-      target="_blank">here</a>
-    <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-      <span aria-hidden="true">&times;</span>
-    </button>
-  </div>
+    <div
+      id="success-alert"
+      class="alert alert-success alert-dismissible fade show"
+      role="alert"
+    >
+      <strong>Congratulations!</strong
+      ><span> You can invite others join this channel by click </span
+      ><a href="index.html" target="_blank">here</a>
+      <button
+        type="button"
+        class="close"
+        data-dismiss="alert"
+        aria-label="Close"
+      >
+        <span aria-hidden="true">&times;</span>
+      </button>
+    </div>
 
-  <!--
-  When a user successfully joins a Video Call channel with an AccessToken, this section displays
-  a banner with a close button.
--->
-  <div id="success-alert-with-token" class="alert alert-success alert-dismissible fade show" role="alert">
-    <strong>Congratulations!</strong><span> Joined room successfully. </span>
-    <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-      <span aria-hidden="true">&times;</span>
-    </button>
-  </div>
+    <div
+      id="success-alert-with-token"
+      class="alert alert-success alert-dismissible fade show"
+      role="alert"
+    >
+      <strong>Congratulations!</strong
+      ><span> Joined room successfully. </span>
+      <button
+        type="button"
+        class="close"
+        data-dismiss="alert"
+        aria-label="Close"
+      >
+        <span aria-hidden="true">&times;</span>
+      </button>
+    </div>
 
-  <!--
-  When a user successfully joins a Video Call channel with an AccessToken, this section displays
-  a banner with a close button.
--->
-  <div id="success-alert-with-token" class="alert alert-success alert-dismissible fade show" role="alert">
-    <strong>Congratulations!</strong><span> Joined room successfully. </span>
-    <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-      <span aria-hidden="true">&times;</span>
-    </button>
-  </div>
+    <div
+      id="success-alert-with-token"
+      class="alert alert-success alert-dismissible fade show"
+      role="alert"
+    >
+      <strong>Congratulations!</strong
+      ><span> Joined room successfully. </span>
+      <button
+        type="button"
+        class="close"
+        data-dismiss="alert"
+        aria-label="Close"
+      >
+        <span aria-hidden="true">&times;</span>
+      </button>
+    </div>
 
-  <div class="container">
-    <!--
-    Input fields so the user can securely join a Video Call channel.
-  -->
-    <form id="join-form">
-      <div class="row join-info-group">
-        <div class="col-sm sso-hidden">
-          <p class="join-info-text">APP ID</p>
-          <input id="appid" type="text" placeholder="Enter the appid" value="{{ appid }}">
+    <div class="container">
+      <form id="join-form">
+        <div class="row join-info-group">
+          <div class="col-sm sso-hidden">
+            <p class="join-info-text">APP ID</p>
+            <input
+              id="appid"
+              type="text"
+              placeholder="Enter the appid"
+              value="{{ appid }}"
+            />
+          </div>
+          <div class="col-sm sso-hidden">
+            <p class="join-info-text">Token(optional)</p>
+            <input
+              id="token"
+              type="text"
+              placeholder="Enter the app token"
+              value="{{ token }}"
+            />
+          </div>
+          <div class="col-sm">
+            <p class="join-info-text">Channel Name</p>
+            <input
+              id="channel"
+              type="text"
+              placeholder="Enter the channel name"
+              value="{{ channel }}"
+              required
+            />
+          </div>
+          <div class="col-sm">
+            <p class="join-info-text">User ID(optional)</p>
+            <input
+              id="uid"
+              type="text"
+              onkeyup="this.value=this.value.replace(/[^0-9]/g,'')"
+              onafterpaste="this.value=this.value.replace(/[^0-9]/g,'')"
+              placeholder="Enter the user ID"
+            />
+          </div>
         </div>
-        <div class="col-sm sso-hidden">
-          <p class="join-info-text">Token(optional)</p>
-          <input id="token" type="text" placeholder="Enter the app token" value="{{ token }}">
-        </div>
-        <div class="col-sm">
-          <p class="join-info-text">Channel Name</p>
-          <input id="channel" type="text" placeholder="Enter the channel name" value="{{ channel }}" required>
-        </div>
-        <div class="col-sm">
-          <p class="join-info-text">User ID(optional)</p>
-          <input id="uid" type="text" onkeyup="this.value=this.value.replace(/[^0-9]/g,'')"
-            onafterpaste="this.value=this.value.replace(/[^0-9]/g,'')" placeholder="Enter the user ID">
-        </div>
-      </div>
 
-      <!--
-      Join or leave a Video Call channel.
-    -->
-      <div class="button-group" style="display:inline-block">
-        <button id="join" type="submit" class="btn btn-primary btn-sm" style="height: 30px;">Join</button>
-        <button id="leave" type="button" class="btn btn-primary btn-sm" style="height: 30px;" disabled>Leave</button>
+        <div class="button-group" style="display: inline-block">
+          <button
+            id="join"
+            type="submit"
+            class="btn btn-primary btn-sm"
+            style="height: 30px"
+          >
+            Join
+          </button>
+          <button
+            id="leave"
+            type="button"
+            class="btn btn-primary btn-sm"
+            style="height: 30px"
+            disabled
+          >
+            Leave
+          </button>
 
-        <div class="collapse-wrapper" style="height: 30px;">
-          <div class="collapse-content">
-            <!-- collapse -->
-            <div class="collapse" id="agora-collapse" style="width: 100%;z-index: 9999;">
-              <div class="card card-body">
-                <!-- Microphone -->
-                <h6 class="device-name">Microphone</h6>
-                <div class="input-group mb-3">
-                  <div class="input-group-prepend">
-                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-toggle="dropdown"
-                      aria-haspopup="true" aria-expanded="false">Mics</button>
-                    <div class="mic-list dropdown-menu"></div>
+          <div class="collapse-wrapper" style="height: 30px">
+            <div class="collapse-content">
+              <!-- collapse -->
+              <div
+                class="collapse"
+                id="agora-collapse"
+                style="width: 100%; z-index: 9999"
+              >
+                <div class="card card-body">
+                  <!-- Microphone -->
+                  <h6 class="device-name">Microphone</h6>
+                  <div class="input-group mb-3">
+                    <div class="input-group-prepend">
+                      <button
+                        class="btn btn-outline-secondary dropdown-toggle"
+                        type="button"
+                        data-toggle="dropdown"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                      >
+                        Mics
+                      </button>
+                      <div class="mic-list dropdown-menu"></div>
+                    </div>
+                    <input
+                      type="text"
+                      class="mic-input form-control"
+                      aria-label="Text input with dropdown button"
+                      readonly
+                    />
                   </div>
-                  <input type="text" class="mic-input form-control" aria-label="Text input with dropdown button"
-                    readonly>
-                </div>
-                <!-- Camera -->
-                <h6 class="device-name">Camera</h6>
-                <div class="input-group mb-3">
-                  <div class="input-group-prepend">
-                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-toggle="dropdown"
-                      aria-haspopup="true" aria-expanded="false">Cams</button>
-                    <div class="cam-list dropdown-menu"></div>
+                  <!-- Camera -->
+                  <h6 class="device-name">Camera</h6>
+                  <div class="input-group mb-3">
+                    <div class="input-group-prepend">
+                      <button
+                        class="btn btn-outline-secondary dropdown-toggle"
+                        type="button"
+                        data-toggle="dropdown"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                      >
+                        Cams
+                      </button>
+                      <div class="cam-list dropdown-menu"></div>
+                    </div>
+                    <input
+                      type="text"
+                      class="cam-input form-control"
+                      aria-label="Text input with dropdown button"
+                      readonly
+                    />
                   </div>
-                  <input type="text" class="cam-input form-control" aria-label="Text input with dropdown button"
-                    readonly>
-                </div>
-                <!-- CODEC -->
-                <h6 class="device-name">CODEC</h6>
-                <span style="padding-left: 1.25rem;">
-                  <input class="form-check-input" type="radio" name="radios" id="vp8" value="vp8"
-                    checked>
-                  <label class="form-check-label" for="vp8">
-                    vp8
-                  </label>
-                </span>
-                <span style="padding-left: 1.25rem;">
-                  <input class="form-check-input" type="radio" name="radios" id="vp9" value="vp9">
-                  <label class="form-check-label" for="vp9">
-                    vp9
-                  </label>
-                </span>
-                <span style="padding-left: 1.25rem;" class="mb-3">
-                  <input class="form-check-input" type="radio" name="radios" id="h264" value="h264">
-                  <label class="form-check-label" for="h264">
-                    h264
-                  </label>
-                </span>
-                <!-- profile -->
-                <h6 class="device-name">Video Profiles</h6>
-                <div class="input-group">
-                  <div class="input-group-prepend">
-                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-toggle="dropdown"
-                      aria-haspopup="true" aria-expanded="false">Profiles</button>
-                    <div class="profile-list dropdown-menu"></div>
+                  <!-- CODEC -->
+                  <h6 class="device-name">CODEC</h6>
+                  <span style="padding-left: 1.25rem">
+                    <input
+                      class="form-check-input"
+                      type="radio"
+                      name="radios"
+                      id="vp8"
+                      value="vp8"
+                      checked
+                    />
+                    <label class="form-check-label" for="vp8">
+                      vp8
+                    </label>
+                  </span>
+                  <span style="padding-left: 1.25rem">
+                    <input
+                      class="form-check-input"
+                      type="radio"
+                      name="radios"
+                      id="vp9"
+                      value="vp9"
+                    />
+                    <label class="form-check-label" for="vp9">
+                      vp9
+                    </label>
+                  </span>
+                  <span style="padding-left: 1.25rem" class="mb-3">
+                    <input
+                      class="form-check-input"
+                      type="radio"
+                      name="radios"
+                      id="h264"
+                      value="h264"
+                    />
+                    <label class="form-check-label" for="h264">
+                      h264
+                    </label>
+                  </span>
+                  <!-- profile -->
+                  <h6 class="device-name">Video Profiles</h6>
+                  <div class="input-group">
+                    <div class="input-group-prepend">
+                      <button
+                        class="btn btn-outline-secondary dropdown-toggle"
+                        type="button"
+                        data-toggle="dropdown"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                      >
+                        Profiles
+                      </button>
+                      <div class="profile-list dropdown-menu"></div>
+                    </div>
+                    <input
+                      type="text"
+                      class="profile-input form-control"
+                      aria-label="Text input with dropdown button"
+                      readonly
+                    />
                   </div>
-                  <input type="text" class="profile-input form-control" aria-label="Text input with dropdown button"
-                    readonly>
                 </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
-    </form>
+      </form>
 
-    <!--
+      <!--
     This local media splayer is enabled when the user has successfully joined a Video Call channel.
   -->
-    <div class="row video-group">
-      <div class="w-100"></div>
-      <div class="col">
-        <div id="remote-playerlist"></div>
+      <div class="row video-group">
+        <div class="w-100"></div>
+        <div class="col">
+          <div id="remote-playerlist"></div>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!--
-  Import the Agora Video Call SDK for Web and local calls to it.
--->
-
-  <script src="/static/jquery-3.4.1.min.js"></script>
-  <script src="/static/bootstrap.bundle.min.js"></script>
-  <script src="/static/AgoraRTC_N-4.1.0.js"></script>
-  <script src="/static/basicVideoCall.js"></script>
-  <script src="/static/agora-rtm-sdk-1.4.0.js"></script>
-</body>
-
+    <script src="/static/jquery-3.4.1.min.js"></script>
+    <script src="/static/bootstrap.bundle.min.js"></script>
+    <script src="/static/AgoraRTC_N-4.1.0.js"></script>
+    <script src="/static/basicVideoCall.js"></script>
+    <script src="/static/agora-rtm-sdk-1.4.0.js"></script>
+  </body>
 </html>
