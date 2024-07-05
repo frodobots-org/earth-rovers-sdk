@@ -27,7 +27,7 @@ app.mount("/static", StaticFiles(directory="./static"), name="static")
 @app.post("/auth")
 async def auth():
     # Read the authorization header from environment variables
-    auth_header = os.getenv("FRODOBOTS_API_SDK")
+    auth_header = os.getenv("SDK_API_TOKEN")
     bot_name = os.getenv("BOT_NAME")
 
     if not auth_header:
