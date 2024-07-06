@@ -12,7 +12,7 @@ from rtm_client import RtmClient
 load_dotenv()
 
 app = FastAPI()
-FRODOBOTS_API_URL = "https://frodobots-web-api.onrender.com/api"
+FRODOBOTS_API_URL = "https://frodobots-web-api.onrender.com/api/v1"
 
 class AuthResponse(BaseModel):
     CHANNEL_NAME: str
