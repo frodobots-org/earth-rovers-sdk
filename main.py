@@ -1,7 +1,10 @@
 import os
 import requests
+import subprocess
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +15,15 @@ from rtm_client import RtmClient
 load_dotenv()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 FRODOBOTS_API_URL = "https://frodobots-web-api.onrender.com/api/v1"
 
 class AuthResponse(BaseModel):
@@ -104,10 +116,10 @@ async def control(request: Request):
 
     return {"message": "Command sent successfully"}
 
-@app.get("/screenshot")
+@app.get("/get-screenshot")
 def get_screenshot():
-    print("")
-
+    subprocess.run(["node", "static/capture_screenshot.js"])
+    return FileResponse("screenshot.png")
 
 if __name__ == "__main__":
     import uvicorn
