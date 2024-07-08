@@ -158,6 +158,10 @@ async def get_screenshot():
         "timestamp": current_timestamp
     })
 
+@app.get("/get-data")
+async def get_data():
+    print("GPS - TODO")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
