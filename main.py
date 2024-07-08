@@ -103,7 +103,7 @@ async def auth():
 
         return JSONResponse(content=response_data)
 
-@app.get("/static")
+@app.get("/")
 async def get_index(request: Request):
     if not auth_response_data:
         await auth()
