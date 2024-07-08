@@ -93,17 +93,6 @@ AgoraRTC.onCameraChanged = async changedDevice => {
   }
 };
 async function initDevices() {
-  // if (!localTracks.audioTrack) {
-  //   localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-  //     encoderConfig: "music_standard"
-  //   });
-  // }
-  // if (!localTracks.videoTrack) {
-  //   localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
-  //     encoderConfig: curVideoProfile.value
-  //   });
-  // }
-  // get mics
   mics = await AgoraRTC.getMicrophones();
   const audioTrackLabel = localTracks.audioTrack.getTrackLabel();
   currentMic = mics.find(item => item.label === audioTrackLabel);
@@ -113,7 +102,6 @@ async function initDevices() {
     $(".mic-list").append(`<a class="dropdown-item" href="#">${mic.label}</a>`);
   });
 
-  // get cameras
   cams = await AgoraRTC.getCameras();
   const videoTrackLabel = localTracks.videoTrack.getTrackLabel();
   currentCam = cams.find(item => item.label === videoTrackLabel);
