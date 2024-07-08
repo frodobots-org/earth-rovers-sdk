@@ -12,7 +12,7 @@ from rtm_client import RtmClient
 load_dotenv()
 
 app = FastAPI()
-FRODOBOTS_API_URL = os.getenv("FRODOBOTS_API_URL")
+FRODOBOTS_API_URL = "https://frodobots-web-api.onrender.com/api/v1"
 
 class AuthResponse(BaseModel):
     CHANNEL_NAME: str
@@ -91,25 +91,19 @@ async def get_index(request: Request):
         await auth()
 
     app_id = auth_response_data.get("APP_ID", "")
-    token = auth_response_data.get("RTC_TOKEN", "")
+    rtc_token= auth_response_data.get("RTC_TOKEN", "")
     rtm_token = auth_response_data.get("RTM_TOKEN", "")
     channel = auth_response_data.get("CHANNEL_NAME", "")
-    token= auth_response_data.get("RTC_TOKEN", "")
-    userid= auth_response_data.get("USERID", "")
-
-    app_id = str(app_id)
-    token = str(token)
-    channel = str(channel)
+    uid= auth_response_data.get("USERID", "")
 
     with open("index.html", "r") as file:
         html_content = file.read()
 
     html_content = html_content.replace("{{ appid }}", app_id)
-    html_content = html_content.replace("{{ token }}", token)
+    html_content = html_content.replace("{{ rtc_token }}", rtc_token)
     html_content = html_content.replace("{{ rtm_token }}", rtm_token)
     html_content = html_content.replace("{{ channel }}", channel)
-    html_content = html_content.replace("{{ token }}", token)
-    html_content = html_content.replace("{{ uid }}", userid)
+    html_content = html_content.replace("{{ uid }}", str(uid))
 
 
     return HTMLResponse(content=html_content, status_code=200)

@@ -87,7 +87,7 @@
               id="token"
               type="text"
               placeholder="Enter the app token"
-              value="{{ token }}"
+              value="{{ rtc_token }}"
             />
           </div>
           <div class="col-sm sso-hidden">
@@ -267,10 +267,8 @@
         <div class="col">
           <div id="remote-playerlist"></div>
         </div>
-        <div id="messages">
-        </div>
+        <div id="messages"></div>
       </div>
-      
     </div>
 
     <script src="/static/jquery-3.4.1.min.js"></script>
@@ -279,6 +277,5 @@
     <script src="/static/basicVideoCall.js"></script>
     <script src="/static/agora-rtm-sdk-1.4.0.js"></script>
     <script src="/static/basicRtm.js" defer></script>
-
   </body>
 </html>
