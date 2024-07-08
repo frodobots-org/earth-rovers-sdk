@@ -1,8 +1,9 @@
 import os
 import requests
 import subprocess
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel
 
 from rtm_client import RtmClient
 from screenshot_service import ScreenshotService
+
+import base64
 
 load_dotenv()
 
@@ -38,6 +41,8 @@ class AuthResponse(BaseModel):
 auth_response_data = {}
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
+
+screenshot_service = ScreenshotService()
 
 @app.post("/auth")
 async def auth():
@@ -98,7 +103,7 @@ async def auth():
 
         return JSONResponse(content=response_data)
 
-@app.get("/")
+@app.get("/static")
 async def get_index(request: Request):
     if not auth_response_data:
         await auth()
@@ -118,7 +123,6 @@ async def get_index(request: Request):
     html_content = html_content.replace("{{ channel }}", channel)
     html_content = html_content.replace("{{ uid }}", str(uid))
 
-
     return HTMLResponse(content=html_content, status_code=200)
 
 @app.post("/control")
@@ -137,9 +141,22 @@ async def control(request: Request):
 
 @app.get("/get-screenshot")
 async def get_screenshot():
-    screenshot_service = ScreenshotService()
-    output_path = await screenshot_service.take_screenshot('http://localhost:8000')
-    return FileResponse(output_path)
+    print("Received request for screenshot")
+    output_path = await screenshot_service.take_screenshot('screenshot.png')
+    print(f"Screenshot saved to {output_path}")
+
+    # Read the image file and encode it in base64
+    with open(output_path, "rb") as image_file:
+        encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+
+    # Get the current Unix UTC timestamp (epoch time)
+    current_timestamp = int(datetime.utcnow().timestamp())
+
+    # Return JSON response with base64 image and timestamp
+    return JSONResponse(content={
+        "image_base64": encoded_image,
+        "timestamp": current_timestamp
+    })
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,27 +1,35 @@
 from pyppeteer import launch
 
 class ScreenshotService:
-    async def take_screenshot(self, url: str, output_path: str = 'screenshot.png') -> FileResponse:
-        browser = await launch(
-            executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            headless=True,
-            args=['--ignore-certificate-errors']
-        )
-        page = await browser.newPage()
+    def __init__(self):
+        self.browser = None
+        self.page = None
 
-        await page.setExtraHTTPHeaders({'Accept-Language': 'en-US,en;q=0.9'})
+    async def initialize_browser(self):
+        if not self.browser:
+            self.browser = await launch(
+                executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                headless=True,
+                args=['--ignore-certificate-errors']
+            )
+            self.page = await self.browser.newPage()
+            await self.page.setViewport({'width': 1280, 'height': 800})
+            await self.page.setExtraHTTPHeaders({'Accept-Language': 'en-US,en;q=0.9'})
+            await self.page.goto('http://localhost:8000', {'waitUntil': 'networkidle2'})
+            await self.page.click('#join')
+            await self.page.waitForSelector('video')
+            await self.page.waitFor(2000)
 
-        page.on('console', lambda msg: print('PAGE LOG:', msg.text))
-        page.on('error', lambda err: print('PAGE ERROR:', err))
-        page.on('pageerror', lambda pageErr: print('PAGE ERROR:', pageErr))
+    async def take_screenshot(self, output_path: str = 'screenshot.png') -> str:
+        await self.initialize_browser()
 
-        await page.goto(url, {'waitUntil': 'networkidle2'})
-        await page.click('#join')
-        await page.waitForSelector('video')
-        await page.waitFor(2000)  # Wait for 2 seconds
-
-        video_element = await page.querySelector('video')
+        video_wrapper = await self.page.querySelector('#player-1000')
+        video_element = await video_wrapper.querySelector('video')
         await video_element.screenshot({'path': output_path})
-
-        await browser.close()
         return output_path
+
+    async def close_browser(self):
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+            self.page = None
