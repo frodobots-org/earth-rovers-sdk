@@ -1,6 +1,6 @@
 from pyppeteer import launch
 
-class ScreenshotService:
+class BrowserService:
     def __init__(self):
         self.browser = None
         self.page = None
@@ -27,6 +27,15 @@ class ScreenshotService:
         video_element = await video_wrapper.querySelector('video')
         await video_element.screenshot({'path': output_path})
         return output_path
+
+    async def data(self) -> dict:
+        await self.initialize_browser()
+
+        valor_de_mi_variable = await self.page.evaluate('''() => {
+        return window.rtm_data;
+        }''')
+
+        return valor_de_mi_variable
 
     async def close_browser(self):
         if self.browser:

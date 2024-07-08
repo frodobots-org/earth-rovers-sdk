@@ -25,6 +25,7 @@ $(document).ready(function () {
   rtmClient.on("MessageFromPeer", function (message, peerId) {
     const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
     const event = new CustomEvent("message-from-peer", { detail: controls });
+    window.rtm_data = controls
     const formattedMessage = formatMessage(controls);
     $("#messages").html(formattedMessage);
     document.dispatchEvent(event);
