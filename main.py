@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from rtm_client import RtmClient
+from screenshot_service import ScreenshotService
 
 load_dotenv()
 
@@ -135,9 +136,10 @@ async def control(request: Request):
     return {"message": "Command sent successfully"}
 
 @app.get("/get-screenshot")
-def get_screenshot():
-    subprocess.run(["node", "static/capture_screenshot.js"])
-    return FileResponse("screenshot.png")
+async def get_screenshot():
+    screenshot_service = ScreenshotService()
+    output_path = await screenshot_service.take_screenshot('http://localhost:8000')
+    return FileResponse(output_path)
 
 if __name__ == "__main__":
     import uvicorn
