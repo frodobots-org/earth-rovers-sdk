@@ -28,45 +28,62 @@ app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 @app.post("/auth")
 async def auth():
-    auth_header = os.getenv("SDK_API_TOKEN")
-    bot_name = os.getenv("BOT_NAME")
+    global auth_response_data  # Declare global at the start of the function
+    channel_name = os.getenv("CHANNEL_NAME")
+    rtc_token = os.getenv("RTC_TOKEN")
+    rtm_token = os.getenv("RTM_TOKEN")
+    userid = os.getenv("USERID")
+    app_id = os.getenv("APP_ID")
 
-    if not auth_header:
-        raise HTTPException(status_code=500, detail="Authorization header not configured")
-    if not bot_name:
-        raise HTTPException(status_code=500, detail="Bot name not configured")
+    if all([channel_name, rtc_token, rtm_token, userid, app_id]):
+        auth_response_data = {
+            "CHANNEL_NAME": channel_name,
+            "RTC_TOKEN": rtc_token,
+            "RTM_TOKEN": rtm_token,
+            "USERID": userid,
+            "APP_ID": app_id,
+        }
+        print(auth_response_data)
+        return JSONResponse(content=auth_response_data)
+    else:
+        auth_header = os.getenv("SDK_API_TOKEN")
+        bot_name = os.getenv("BOT_NAME")
 
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {auth_header}'
-    }
+        if not auth_header:
+            raise HTTPException(status_code=500, detail="Authorization header not configured")
+        if not bot_name:
+            raise HTTPException(status_code=500, detail="Bot name not configured")
 
-    data = {
-        "bot_name": bot_name
-    }
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {auth_header}'
+        }
 
-    response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/token",
-        headers=headers,
-        json=data
-    )
+        data = {
+            "bot_name": bot_name
+        }
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Failed to retrieve tokens")
+        response = requests.post(
+            FRODOBOTS_API_URL + "/sdk/token",
+            headers=headers,
+            json=data
+        )
 
-    response_data = response.json()
-    global auth_response_data
-    auth_response_data = {
-        "CHANNEL_NAME": response_data.get("CHANNEL_NAME"),
-        "RTC_TOKEN": response_data.get("RTC_TOKEN"),
-        "RTM_TOKEN": response_data.get("RTM_TOKEN"),
-        "USERID": response_data.get("USERID"),
-        "APP_ID": response_data.get("APP_ID"),
-    }
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Failed to retrieve tokens")
 
-    print(auth_response_data)
+        response_data = response.json()
+        auth_response_data = {
+            "CHANNEL_NAME": response_data.get("CHANNEL_NAME"),
+            "RTC_TOKEN": response_data.get("RTC_TOKEN"),
+            "RTM_TOKEN": response_data.get("RTM_TOKEN"),
+            "USERID": response_data.get("USERID"),
+            "APP_ID": response_data.get("APP_ID"),
+        }
 
-    return JSONResponse(content=response_data)
+        print(auth_response_data)
+
+        return JSONResponse(content=response_data)
 
 @app.get("/")
 async def get_index(request: Request):
@@ -74,19 +91,20 @@ async def get_index(request: Request):
         await auth()
 
     app_id = auth_response_data.get("APP_ID", "")
-    token = auth_response_data.get("RTC_TOKEN", "")
+    rtc_token= auth_response_data.get("RTC_TOKEN", "")
+    rtm_token = auth_response_data.get("RTM_TOKEN", "")
     channel = auth_response_data.get("CHANNEL_NAME", "")
-
-    app_id = str(app_id)
-    token = str(token)
-    channel = str(channel)
+    uid= auth_response_data.get("USERID", "")
 
     with open("index.html", "r") as file:
         html_content = file.read()
 
     html_content = html_content.replace("{{ appid }}", app_id)
-    html_content = html_content.replace("{{ token }}", token)
+    html_content = html_content.replace("{{ rtc_token }}", rtc_token)
+    html_content = html_content.replace("{{ rtm_token }}", rtm_token)
     html_content = html_content.replace("{{ channel }}", channel)
+    html_content = html_content.replace("{{ uid }}", str(uid))
+
 
     return HTMLResponse(content=html_content, status_code=200)
 
@@ -107,7 +125,6 @@ async def control(request: Request):
 @app.get("/screenshot")
 def get_screenshot():
     print("")
-
 
 if __name__ == "__main__":
     import uvicorn

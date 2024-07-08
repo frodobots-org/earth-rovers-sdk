@@ -82,12 +82,21 @@
             />
           </div>
           <div class="col-sm sso-hidden">
-            <p class="join-info-text">Token(optional)</p>
+            <p class="join-info-text">RTC Token</p>
             <input
               id="token"
               type="text"
               placeholder="Enter the app token"
-              value="{{ token }}"
+              value="{{ rtc_token }}"
+            />
+          </div>
+          <div class="col-sm sso-hidden">
+            <p class="join-info-text">RTM Token</p>
+            <input
+              id="rtm_token"
+              type="text"
+              placeholder="Enter the app token"
+              value="{{ rtm_token }}"
             />
           </div>
           <div class="col-sm">
@@ -107,6 +116,7 @@
               type="text"
               onkeyup="this.value=this.value.replace(/[^0-9]/g,'')"
               onafterpaste="this.value=this.value.replace(/[^0-9]/g,'')"
+              value="{{ uid }}"
               placeholder="Enter the user ID"
             />
           </div>
@@ -252,14 +262,12 @@
         </div>
       </form>
 
-      <!--
-    This local media splayer is enabled when the user has successfully joined a Video Call channel.
-  -->
       <div class="row video-group">
         <div class="w-100"></div>
         <div class="col">
           <div id="remote-playerlist"></div>
         </div>
+        <div id="messages"></div>
       </div>
     </div>
 
@@ -268,5 +276,6 @@
     <script src="/static/AgoraRTC_N-4.1.0.js"></script>
     <script src="/static/basicVideoCall.js"></script>
     <script src="/static/agora-rtm-sdk-1.4.0.js"></script>
+    <script src="/static/basicRtm.js" defer></script>
   </body>
 </html>
