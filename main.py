@@ -1,20 +1,19 @@
+import base64
+from datetime import datetime
 import os
 import requests
-import subprocess
-from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from dotenv import load_dotenv
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from rtm_client import RtmClient
-from screenshot_service import ScreenshotService
+from browser_service import BrowserService
 
-import base64
 
 load_dotenv()
 
@@ -42,11 +41,11 @@ auth_response_data = {}
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
-screenshot_service = ScreenshotService()
+browser_service = BrowserService()
 
 @app.post("/auth")
 async def auth():
-    global auth_response_data  # Declare global at the start of the function
+    global auth_response_data
     channel_name = os.getenv("CHANNEL_NAME")
     rtc_token = os.getenv("RTC_TOKEN")
     rtm_token = os.getenv("RTM_TOKEN")
@@ -61,7 +60,6 @@ async def auth():
             "USERID": userid,
             "APP_ID": app_id,
         }
-        print(auth_response_data)
         return JSONResponse(content=auth_response_data)
     else:
         auth_header = os.getenv("SDK_API_TOKEN")
@@ -142,7 +140,7 @@ async def control(request: Request):
 @app.get("/get-screenshot")
 async def get_screenshot():
     print("Received request for screenshot")
-    output_path = await screenshot_service.take_screenshot('screenshot.png')
+    output_path = await browser_service.take_screenshot('screenshot.png')
     print(f"Screenshot saved to {output_path}")
 
     # Read the image file and encode it in base64
@@ -160,7 +158,9 @@ async def get_screenshot():
 
 @app.get("/get-data")
 async def get_data():
-    print("GPS - TODO")
+    data = await browser_service.data()
+
+    return JSONResponse(content=data)
 
 if __name__ == "__main__":
     import uvicorn
