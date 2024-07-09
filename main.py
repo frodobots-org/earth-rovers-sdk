@@ -137,7 +137,7 @@ async def control(request: Request):
 
     return {"message": "Command sent successfully"}
 
-@app.get("/get-screenshot")
+@app.get("/screenshot")
 async def get_screenshot():
     print("Received request for screenshot")
     output_path = await browser_service.take_screenshot('screenshot.png')
@@ -152,11 +152,11 @@ async def get_screenshot():
 
     # Return JSON response with base64 image and timestamp
     return JSONResponse(content={
-        "image_base64": encoded_image,
+        "frame": encoded_image,
         "timestamp": current_timestamp
     })
 
-@app.get("/get-data")
+@app.get("/data")
 async def get_data():
     data = await browser_service.data()
 

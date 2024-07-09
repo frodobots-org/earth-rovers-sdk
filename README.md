@@ -31,7 +31,7 @@ uvicorn main:app --reload
 
 This SDK is meant to control the bot and at the same time monitor its status. The SDK has the following open endpoints:
 
-### /control
+### POST /control
 
 With this endpoint you can send linear and angular values to move the bot. The values are between -1 and 1.
 
@@ -43,14 +43,48 @@ curl --location 'http://localhost:8000/control' \
 }'
 ```
 
-### /data
+Example response:
+```
+{
+    "message": "Command sent successfully"
+}
+```
 
-With this endpoint you can retrieve the data of the bot.
+### GET /data
 
-[TBD]
+With this endpoint you can retrieve the latest data from the bot. (e.g. battery level, position, etc.)
 
-### /screenshot
+```bash
+curl --location 'http://localhost:8000/data'
+```
 
-With this endpoint you can retrieve the latest emitted frame from the bot.
+Example Response:
+```
+{
+    "battery": 100,
+    "signal_level": 5,
+    "orientation": 128,
+    "lamp": 0,
+    "speed": 0,
+    "gps_signal": 31.25,
+    "latitude": 22.753774642944336,
+    "longitude": 114.09095001220703,
+    "vibration": 0.31
+}
+```
 
-[TBD]
+### GET /screenshot
+
+With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
+
+```bash
+curl --location 'http://localhost:8000/screenshot'
+```
+
+Example Response:
+```
+{
+    "frame": "base64_encoded_image",
+    "timestamp": 1720458328
+}
+```
