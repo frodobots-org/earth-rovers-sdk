@@ -1,4 +1,4 @@
-# Earth Rovers SDK v2.0
+# Earth Rovers SDK v2.1
 
 ## Requirements
 In order to use or run this SDK you need to have an account registered with Frodobots. This is meant for research purposes, if you are interested please reach us here: [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
