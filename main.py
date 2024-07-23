@@ -2,6 +2,7 @@ import base64
 from datetime import datetime
 import os
 import requests
+import asyncio
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -13,7 +14,6 @@ from pydantic import BaseModel
 
 from rtm_client import RtmClient
 from browser_service import BrowserService
-
 
 load_dotenv()
 
@@ -66,27 +66,27 @@ async def auth():
         bot_name = os.getenv("BOT_NAME")
 
         if not auth_header:
-            raise HTTPException(status_code=500, detail="Authorization header not configured")
+            raise HTTPException(
+                status_code=500, detail="Authorization header not configured"
+            )
         if not bot_name:
             raise HTTPException(status_code=500, detail="Bot name not configured")
 
         headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {auth_header}'
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {auth_header}",
         }
 
-        data = {
-            "bot_name": bot_name
-        }
+        data = {"bot_name": bot_name}
 
         response = requests.post(
-            FRODOBOTS_API_URL + "/sdk/token",
-            headers=headers,
-            json=data
+            FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data
         )
 
         if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Failed to retrieve tokens")
+            raise HTTPException(
+                status_code=response.status_code, detail="Failed to retrieve tokens"
+            )
 
         response_data = response.json()
         auth_response_data = {
@@ -107,10 +107,10 @@ async def get_index(request: Request):
         await auth()
 
     app_id = auth_response_data.get("APP_ID", "")
-    rtc_token= auth_response_data.get("RTC_TOKEN", "")
+    rtc_token = auth_response_data.get("RTC_TOKEN", "")
     rtm_token = auth_response_data.get("RTM_TOKEN", "")
     channel = auth_response_data.get("CHANNEL_NAME", "")
-    uid= auth_response_data.get("USERID", "")
+    uid = auth_response_data.get("USERID", "")
 
     with open("index.html", "r") as file:
         html_content = file.read()
@@ -140,28 +140,36 @@ async def control(request: Request):
 @app.get("/screenshot")
 async def get_screenshot():
     print("Received request for screenshot")
-    output_path = await browser_service.take_screenshot('screenshot.png')
-    print(f"Screenshot saved to {output_path}")
+    video_output_path, map_output_path = await browser_service.take_screenshot(
+        "screenshot.png", "map.png"
+    )
+    print(f"Screenshot saved to {video_output_path} and {map_output_path}")
 
-    # Read the image file and encode it in base64
-    with open(output_path, "rb") as image_file:
-        encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+    # Read the image files and encode them in base64
+    with open(video_output_path, "rb") as video_file:
+        encoded_video = base64.b64encode(video_file.read()).decode("utf-8")
+
+    with open(map_output_path, "rb") as map_file:
+        encoded_map = base64.b64encode(map_file.read()).decode("utf-8")
 
     # Get the current Unix UTC timestamp (epoch time)
     current_timestamp = int(datetime.utcnow().timestamp())
 
-    # Return JSON response with base64 image and timestamp
-    return JSONResponse(content={
-        "frame": encoded_image,
-        "timestamp": current_timestamp
-    })
+    # Return JSON response with base64 images and timestamp
+    return JSONResponse(
+        content={
+            "video_frame": encoded_video,
+            "map_frame": encoded_map,
+            "timestamp": current_timestamp,
+        }
+    )
 
 @app.get("/data")
 async def get_data():
     data = await browser_service.data()
-
     return JSONResponse(content=data)
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -9,8 +9,8 @@ class BrowserService:
         if not self.browser:
             self.browser = await launch(
                 executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-                headless=True,
-                args=['--ignore-certificate-errors']
+                headless=False,  # Cambia a False para ver el navegador
+                args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
             )
             self.page = await self.browser.newPage()
             await self.page.setViewport({'width': 1280, 'height': 800})
@@ -20,22 +20,28 @@ class BrowserService:
             await self.page.waitForSelector('video')
             await self.page.waitFor(2000)
 
-    async def take_screenshot(self, output_path: str = 'screenshot.png') -> str:
+    async def take_screenshot(self, video_output_path: str, map_output_path: str):
         await self.initialize_browser()
 
+        # Take screenshot of the video element
         video_wrapper = await self.page.querySelector('#player-1000')
         video_element = await video_wrapper.querySelector('video')
-        await video_element.screenshot({'path': output_path})
-        return output_path
+        await video_element.screenshot({'path': video_output_path})
+
+        # Take screenshot of the Mapbox map element
+        map_element = await self.page.querySelector('#map')
+        await map_element.screenshot({'path': map_output_path})
+
+        return video_output_path, map_output_path
 
     async def data(self) -> dict:
         await self.initialize_browser()
 
-        valor_de_mi_variable = await self.page.evaluate('''() => {
+        bot_data = await self.page.evaluate('''() => {
         return window.rtm_data;
         }''')
 
-        return valor_de_mi_variable
+        return bot_data
 
     async def close_browser(self):
         if self.browser:

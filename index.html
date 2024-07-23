@@ -10,6 +10,10 @@
     <title>Frodobots SDK - Stream</title>
     <link rel="stylesheet" href="/static/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/index.css" />
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
+    <style>
+        #map { width: 500px; height: 500px; }
+    </style>
   </head>
 
   <body>
@@ -267,10 +271,16 @@
         <div class="col">
           <div id="remote-playerlist"></div>
         </div>
-        <div id="messages"></div>
+        <div id="messages">
+        </div>
       </div>
-    </div>
 
+      <div class="row mt-3">
+        <div id="map"></div>
+      </div>
+
+    </div>
+    <script src="/static/mapbpx-gl.js"></script>
     <script src="/static/jquery-3.4.1.min.js"></script>
     <script src="/static/bootstrap.bundle.min.js"></script>
     <script src="/static/AgoraRTC_N-4.1.0.js"></script>

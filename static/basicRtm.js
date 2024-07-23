@@ -12,63 +12,97 @@ $(document).ready(function () {
 
   // Event listener for connection state changes
   rtmClient.on("ConnectionStateChange", (newState, reason) => {
-    console.log(
-      "on connection state changed to " + newState + " reason: " + reason
-    );
+      console.log(
+          "on connection state changed to " + newState + " reason: " + reason
+      );
   });
 
   // Event listener for receiving a channel message
   rtmChannel.on("ChannelMessage", ({ text }, senderId) => {
-    console.log("AgoraRTM msg from user " + senderId + " received: \n" + text);
+      console.log("AgoraRTM msg from user " + senderId + " received: \n" + text);
   });
 
-  rtmClient.on("MessageFromPeer", function (message, peerId) {
-    const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
-    const event = new CustomEvent("message-from-peer", { detail: controls });
-    window.rtm_data = controls
-    const formattedMessage = formatMessage(controls);
-    $("#messages").html(formattedMessage);
-    document.dispatchEvent(event);
+  // Initialize Mapbox
+  mapboxgl.accessToken = 'pk.eyJ1Ijoic2FuYXRlbSIsImEiOiJjbHl4YzM5eXEwODd0MnJweXZ5dXh1MTg1In0.WjPAxzNMkHLwp5thyarUwQ';
+  let map;
+  let marker;
 
-    console.log(
-      "AgoraRTM peer msg from user " + peerId + " received: \n",
-      controls
-    );
+  function initializeMap(latitude, longitude) {
+      map = new mapboxgl.Map({
+          container: 'map',
+          style: 'mapbox://styles/mapbox/streets-v11',
+          center: [longitude, latitude],
+          zoom: 12
+      });
+
+      marker = new mapboxgl.Marker()
+          .setLngLat([longitude, latitude])
+          .addTo(map);
+  }
+
+  function updateMarker(latitude, longitude) {
+      if (marker) {
+          marker.setLngLat([longitude, latitude]);
+          map.setCenter([longitude, latitude]);
+      }
+  }
+
+  rtmClient.on("MessageFromPeer", function (message, peerId) {
+      const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
+      const event = new CustomEvent("message-from-peer", { detail: controls });
+      window.rtm_data = controls;
+      const formattedMessage = formatMessage(controls);
+      $("#messages").html(formattedMessage);
+      document.dispatchEvent(event);
+
+      if (controls.latitude && controls.longitude) {
+          const latitude = parseFloat(controls.latitude);
+          const longitude = parseFloat(controls.longitude);
+          if (!map) {
+              initializeMap(latitude, longitude);
+          } else {
+              updateMarker(latitude, longitude);
+          }
+      }
+
+      console.log(
+          "AgoraRTM peer msg from user " + peerId + " received: \n",
+          controls
+      );
   });
 
   function formatMessage(jsonData) {
-    let formattedMessage =
-      '<div class="card"><div class="card-body"><h5 class="card-title">Message from Peer</h5><ul class="list-group">';
-    for (const [key, value] of Object.entries(jsonData)) {
-      formattedMessage += `<li class="list-group-item"><strong>${key}:</strong> ${value}</li>`;
-    }
-    formattedMessage += "</ul></div></div>";
-    return formattedMessage;
+      let formattedMessage =
+          '<div class="card"><div class="card-body"><h5 class="card-title">Message from Peer</h5><ul class="list-group">';
+      for (const [key, value] of Object.entries(jsonData)) {
+          formattedMessage += `<li class="list-group-item"><strong>${key}:</strong> ${value}</li>`;
+      }
+      formattedMessage += "</ul></div></div>";
+      return formattedMessage;
   }
 
   // Function to join the RTM channel
   function joinRTMChannel(uid) {
-    rtmClient
-      .login({ token: TOKEN, uid: String(uid) })
-      .then(() => {
-        console.log("AgoraRTM client login success");
-        // Join a channel
-        rtmChannel
-          .join()
+      rtmClient
+          .login({ token: TOKEN, uid: String(uid) })
           .then(() => {
-            console.log("RTM Channel join success");
-            // You can now send messages or set up more event listeners
+              console.log("AgoraRTM client login success");
+              // Join a channel
+              rtmChannel
+                  .join()
+                  .then(() => {
+                      console.log("RTM Channel join success");
+                      // You can now send messages or set up more event listeners
+                  })
+                  .catch((error) => {
+                      console.log("Failed to join channel for error: " + error);
+                  });
           })
-          .catch((error) => {
-            console.log("Failed to join channel for error: " + error);
+          .catch((err) => {
+              console.log("AgoraRTM client login failure", err);
           });
-      })
-      .catch((err) => {
-        console.log("AgoraRTM client login failure", err);
-      });
   }
 
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);
 });
-
