@@ -17,7 +17,7 @@ class RtmClient:
             "x-agora-uid": self.uid,
             "x-agora-token": self.token
         }
-
+        print("IMPORTANT: destination is the remote user for example: frodobot_72b943 (not the channel)")
         payload = {
             "destination": self.channel,
             "enable_offline_messaging": False,

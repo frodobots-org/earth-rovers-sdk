@@ -7,18 +7,25 @@ class BrowserService:
 
     async def initialize_browser(self):
         if not self.browser:
-            self.browser = await launch(
-                executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-                headless=False,  # Cambia a False para ver el navegador
-                args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
-            )
-            self.page = await self.browser.newPage()
-            await self.page.setViewport({'width': 1280, 'height': 800})
-            await self.page.setExtraHTTPHeaders({'Accept-Language': 'en-US,en;q=0.9'})
-            await self.page.goto('http://localhost:8000', {'waitUntil': 'networkidle2'})
-            await self.page.click('#join')
-            await self.page.waitForSelector('video')
-            await self.page.waitFor(2000)
+            try:
+                self.browser = await launch(
+                    executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                    headless=False,
+                    args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
+                )
+                self.page = await self.browser.newPage()
+                await self.page.setViewport({'width': 1280, 'height': 800})
+                await self.page.setExtraHTTPHeaders({'Accept-Language': 'en-US,en;q=0.9'})
+                await self.page.goto('http://localhost:8000', {'waitUntil': 'networkidle2'})
+                await self.page.click('#join')
+                await self.page.waitForSelector('video')
+                await self.page.waitFor(2000)
+            except Exception as e:
+                print(f"Error initializing browser: {e}")
+                self.browser = None
+                self.page = None
+                await self.close_browser()
+                raise
 
     async def take_screenshot(self, video_output_path: str, map_output_path: str):
         await self.initialize_browser()
