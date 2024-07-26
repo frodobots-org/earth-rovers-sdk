@@ -13,10 +13,76 @@
     <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
     <style>
         #map { width: 500px; height: 500px; }
+
+        .marker {
+          background-color: green;
+          width: 30px;
+          height: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: white;
+          font-weight: bold;
+          border-radius: 5px;
+        }
+
+        .main-marker {
+          width: 30px;
+          height: 30px;
+          position: relative;
+          background-color: #ffcc00;
+          border-radius: 5px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .main-marker::before,
+        .main-marker::after {
+          content: '';
+          position: absolute;
+          width: 6px;
+          height: 6px;
+          background-color: #333;
+          border-radius: 50%;
+          top: 5px;
+        }
+
+        .main-marker::before {
+          left: 3px;
+        }
+
+        .main-marker::after {
+          right: 3px;
+        }
+
+        .main-marker .antenna {
+          position: absolute;
+          top: -5px;
+          width: 2px;
+          height: 5px;
+          background-color: #333;
+        }
+
+        .main-marker .antenna::after {
+          content: '';
+          position: absolute;
+          top: -3px;
+          left: -2px;
+          width: 6px;
+          height: 6px;
+          background-color: #333;
+          border-radius: 50%;
+        }
     </style>
   </head>
 
   <body>
+    <script>
+      const checkpointsList = JSON.parse('{{ checkpoints_list }}');
+
+      console.log(checkpointsList);
+    </script>
     <div class="container-fluid banner">
       <p class="banner-text">Frodobots SDK - Stream</p>
     </div>
