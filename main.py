@@ -1,14 +1,14 @@
-import base64
-from datetime import datetime
-import os
-import requests
-import asyncio
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-
+import asyncio
+import signal
+import sys
+import os
+import requests
+import base64
+from datetime import datetime
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -27,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRODOBOTS_API_URL = "https://frodobots-web-api.onrender.com/api/v1"
+FRODOBOTS_API_URL = os.getenv('FRODOBOTS_API_URL', 'https://frodobots-web-api.onrender.com/api/v1')
 
 class AuthResponse(BaseModel):
     CHANNEL_NAME: str
@@ -170,6 +170,8 @@ async def get_data():
     return JSONResponse(content=data)
 
 if __name__ == "__main__":
-    import uvicorn
+    # import hypercorn.asyncio
+    from hypercorn.config import Config
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    config = Config()
+    config.bind = ["0.0.0.0:8000"]

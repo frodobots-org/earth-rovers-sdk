@@ -1,3 +1,4 @@
+import os
 from pyppeteer import launch
 
 class BrowserService:
@@ -8,8 +9,9 @@ class BrowserService:
     async def initialize_browser(self):
         if not self.browser:
             try:
+                executable_path = os.getenv('CHROME_EXECUTABLE_PATH', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
                 self.browser = await launch(
-                    executablePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                    executablePath=executable_path,
                     headless=False,
                     args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
                 )
