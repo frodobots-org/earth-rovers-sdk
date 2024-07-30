@@ -12,7 +12,7 @@ class BrowserService:
                 executable_path = os.getenv('CHROME_EXECUTABLE_PATH', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
                 self.browser = await launch(
                     executablePath=executable_path,
-                    headless=False,
+                    headless=True,
                     args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
                 )
                 self.page = await self.browser.newPage()
