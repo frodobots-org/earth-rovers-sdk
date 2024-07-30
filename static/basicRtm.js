@@ -22,13 +22,124 @@ $(document).ready(function () {
     console.log("AgoraRTM msg from user " + senderId + " received: \n" + text);
   });
 
+  function addCheckpointsToMap(checkpoints) {
+    // nano
+    checkpoints = [
+      {
+        id: 3780,
+        sequence: 1,
+        latitude: "22.7537",
+        longitude: "114.0908",
+      },
+      {
+        id: 3781,
+        sequence: 2,
+        latitude: "22.7540",
+        longitude: "114.0911",
+      },
+      {
+        id: 3782,
+        sequence: 3,
+        latitude: "22.7543",
+        longitude: "114.0914",
+      },
+      {
+        id: 3783,
+        sequence: 4,
+        latitude: "22.7546",
+        longitude: "114.0917",
+      },
+      {
+        id: 3784,
+        sequence: 5,
+        latitude: "22.7549",
+        longitude: "114.0920",
+      },
+      {
+        id: 3785,
+        sequence: 6,
+        latitude: "22.7552",
+        longitude: "114.0923",
+      },
+      {
+        id: 3786,
+        sequence: 7,
+        latitude: "22.7555",
+        longitude: "114.0926",
+      },
+      {
+        id: 3787,
+        sequence: 8,
+        latitude: "22.7558",
+        longitude: "114.0929",
+      },
+    ];
+    checkpoints.forEach((checkpoint) => {
+      const el = document.createElement("div");
+      el.className = "marker";
+      el.innerHTML = checkpoint.sequence;
+
+      new mapboxgl.Marker(el)
+        .setLngLat([
+          parseFloat(checkpoint.longitude),
+          parseFloat(checkpoint.latitude),
+        ])
+        .addTo(map);
+    });
+  }
+
+  // Initialize Mapbox
+  mapboxgl.accessToken =
+    "pk.eyJ1Ijoic2FuYXRlbSIsImEiOiJjbHl4YzM5eXEwODd0MnJweXZ5dXh1MTg1In0.WjPAxzNMkHLwp5thyarUwQ";
+  let map;
+  let marker;
+
+  function initializeMap(latitude, longitude) {
+    map = new mapboxgl.Map({
+      container: "map",
+      style: "mapbox://styles/mapbox/streets-v11",
+      center: [longitude, latitude],
+      zoom: 22,
+    });
+
+    // Create the main marker with a robot style
+    const mainMarkerEl = document.createElement("div");
+    mainMarkerEl.className = "main-marker";
+    const antenna = document.createElement("div");
+    antenna.className = "antenna";
+    mainMarkerEl.appendChild(antenna);
+    new mapboxgl.Marker(mainMarkerEl)
+      .setLngLat([longitude, latitude])
+      .addTo(map);
+
+    // Add checkpoints to the map
+    addCheckpointsToMap(checkpointsList);
+  }
+
+  function updateMarker(latitude, longitude) {
+    if (marker) {
+      marker.setLngLat([longitude, latitude]);
+      map.setCenter([longitude, latitude]);
+    }
+  }
+
   rtmClient.on("MessageFromPeer", function (message, peerId) {
     const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
     const event = new CustomEvent("message-from-peer", { detail: controls });
-    window.rtm_data = controls
+    window.rtm_data = controls;
     const formattedMessage = formatMessage(controls);
     $("#messages").html(formattedMessage);
     document.dispatchEvent(event);
+
+    if (controls.latitude && controls.longitude) {
+      const latitude = parseFloat(controls.latitude);
+      const longitude = parseFloat(controls.longitude);
+      if (!map) {
+        initializeMap(latitude, longitude);
+      } else {
+        updateMarker(latitude, longitude);
+      }
+    }
 
     console.log(
       "AgoraRTM peer msg from user " + peerId + " received: \n",

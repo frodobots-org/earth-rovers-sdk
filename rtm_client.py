@@ -19,7 +19,7 @@ class RtmClient:
         }
 
         payload = {
-            "destination": self.channel,
+            "destination": self.channel.replace('sdk_', '', 1),
             "enable_offline_messaging": False,
             "enable_historical_messaging": False,
             "payload": message_json

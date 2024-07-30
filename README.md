@@ -1,10 +1,12 @@
-# Earth Rovers SDK v2.1
+# Earth Rovers SDK v3.0
 
 ## Requirements
+
 In order to use or run this SDK you need to have an account registered with Frodobots. This is meant for research purposes, if you are interested please reach us here: [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
 
 - Python 3.9 or higher
 - Frodobots API key
+- Google Chrome installed
 
 ## Getting Started
 
@@ -12,17 +14,20 @@ In order to use or run this SDK you need to have an account registered with Frod
 
 ```bash
 SDK_API_TOKEN=
-BOT_NAME=
+BOT_SLUG=
+CHROME_EXECUTABLE_PATH=
 ```
 
 2. Install the SDK
+
 ```bash
 pip3 install -r requirements.txt
 ```
 
 3. Run the SDK
+
 ```bash
-uvicorn main:app --reload
+hypercorn main:app --reload
 ```
 
 4. Now you can check the live streaming of the bot in the following URL: http://localhost:8000
@@ -44,6 +49,7 @@ curl --location 'http://localhost:8000/control' \
 ```
 
 Example response:
+
 ```
 {
     "message": "Command sent successfully"
@@ -59,6 +65,7 @@ curl --location 'http://localhost:8000/data'
 ```
 
 Example Response:
+
 ```
 {
     "battery": 100,
@@ -82,9 +89,11 @@ curl --location 'http://localhost:8000/screenshot'
 ```
 
 Example Response:
+
 ```
 {
     "frame": "base64_encoded_image",
     "timestamp": 1720458328
 }
 ```
+

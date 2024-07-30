@@ -10,9 +10,79 @@
     <title>Frodobots SDK - Stream</title>
     <link rel="stylesheet" href="/static/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/index.css" />
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
+    <style>
+        #map { width: 500px; height: 500px; }
+
+        .marker {
+          background-color: green;
+          width: 30px;
+          height: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: white;
+          font-weight: bold;
+          border-radius: 5px;
+        }
+
+        .main-marker {
+          width: 30px;
+          height: 30px;
+          position: relative;
+          background-color: #ffcc00;
+          border-radius: 5px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .main-marker::before,
+        .main-marker::after {
+          content: '';
+          position: absolute;
+          width: 6px;
+          height: 6px;
+          background-color: #333;
+          border-radius: 50%;
+          top: 5px;
+        }
+
+        .main-marker::before {
+          left: 3px;
+        }
+
+        .main-marker::after {
+          right: 3px;
+        }
+
+        .main-marker .antenna {
+          position: absolute;
+          top: -5px;
+          width: 2px;
+          height: 5px;
+          background-color: #333;
+        }
+
+        .main-marker .antenna::after {
+          content: '';
+          position: absolute;
+          top: -3px;
+          left: -2px;
+          width: 6px;
+          height: 6px;
+          background-color: #333;
+          border-radius: 50%;
+        }
+    </style>
   </head>
 
   <body>
+    <script>
+      const checkpointsList = JSON.parse('{{ checkpoints_list }}');
+
+      console.log(checkpointsList);
+    </script>
     <div class="container-fluid banner">
       <p class="banner-text">Frodobots SDK - Stream</p>
     </div>
@@ -267,10 +337,16 @@
         <div class="col">
           <div id="remote-playerlist"></div>
         </div>
-        <div id="messages"></div>
+        <div id="messages">
+        </div>
       </div>
-    </div>
 
+      <div class="row mt-3">
+        <div id="map"></div>
+      </div>
+
+    </div>
+    <script src="/static/mapbpx-gl.js"></script>
     <script src="/static/jquery-3.4.1.min.js"></script>
     <script src="/static/bootstrap.bundle.min.js"></script>
     <script src="/static/AgoraRTC_N-4.1.0.js"></script>
