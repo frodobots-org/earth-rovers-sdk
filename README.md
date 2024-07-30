@@ -50,7 +50,7 @@ curl --location 'http://localhost:8000/control' \
 
 Example response:
 
-```
+```JSON
 {
     "message": "Command sent successfully"
 }
@@ -66,7 +66,7 @@ curl --location 'http://localhost:8000/data'
 
 Example Response:
 
-```
+```JSON
 {
     "battery": 100,
     "signal_level": 5,
@@ -90,7 +90,7 @@ curl --location 'http://localhost:8000/screenshot'
 
 Example Response:
 
-```
+```JSON
 {
     "frame": "base64_encoded_image",
     "timestamp": 1720458328
