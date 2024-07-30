@@ -1,11 +1,12 @@
-# Earth Rovers SDK v2.1
+# Earth Rovers SDK v3.0
 
 ## Requirements
 
 In order to use or run this SDK you need to have an account registered with Frodobots. This is meant for research purposes, if you are interested please reach us here: [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
 
-- Python 3.6 or higher
+- Python 3.9 or higher
 - Frodobots API key
+- Google Chrome installed
 
 ## Getting Started
 
@@ -13,7 +14,8 @@ In order to use or run this SDK you need to have an account registered with Frod
 
 ```bash
 SDK_API_TOKEN=
-BOT_NAME=
+BOT_SLUG=
+CHROME_EXECUTABLE_PATH=
 ```
 
 2. Install the SDK

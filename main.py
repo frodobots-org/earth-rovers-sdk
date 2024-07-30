@@ -130,7 +130,7 @@ async def get_checkpoints_list():
         "Authorization": f"Bearer {auth_header}",
     }
 
-    data = {"bot_slug": bot_slug, "mission_name": mission_name}
+    data = { "bot_slug": bot_slug, "mission_name": mission_name }
 
     response = requests.post(
         FRODOBOTS_API_URL + "/sdk/checkpoints_list",
@@ -152,8 +152,8 @@ async def get_checkpoints_list():
 @app.post("/auth")
 async def auth():
     await auth_common()
-    if not checkpoints_list_data:
-        await get_checkpoints_list()
+    # if not checkpoints_list_data:
+    #     await get_checkpoints_list()
     return JSONResponse(
         content={
             "auth_response_data": auth_response_data,
