@@ -115,6 +115,9 @@ async def get_checkpoints_list():
     bot_slug = os.getenv("BOT_SLUG")
     mission_name = os.getenv("MISSION_NAME")
 
+    if not mission_name:
+            return
+
     if not auth_header:
         raise HTTPException(
             status_code=500, detail="Authorization header not configured"
