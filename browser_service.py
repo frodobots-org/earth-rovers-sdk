@@ -13,7 +13,7 @@ class BrowserService:
                 self.browser = await launch(
                     executablePath=executable_path,
                     headless=True,
-                    args=['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage']
+                    args=['--ignore-certificate-errors', '--no-sandbox']
                 )
                 self.page = await self.browser.newPage()
                 await self.page.setViewport({'width': 1280, 'height': 800})
