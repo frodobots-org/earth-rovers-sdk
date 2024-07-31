@@ -13,8 +13,9 @@
     />
     <style>
       #map {
-        width: 500px;
-        height: 500px;
+        width: 1000px;
+        height: 1000px;
+        margin-top: 100px;
       }
 
       .marker {
@@ -63,58 +64,7 @@
 
   <body>
     <script>
-      let checkpointsList;
-      // checkpointsList = JSON.parse("{{ checkpoints_list }}");
-      checkpointsList = [
-        {
-          id: 3780,
-          sequence: 1,
-          latitude: "22.7537",
-          longitude: "114.0908",
-        },
-        {
-          id: 3781,
-          sequence: 2,
-          latitude: "22.7540",
-          longitude: "114.0911",
-        },
-        {
-          id: 3782,
-          sequence: 3,
-          latitude: "22.7543",
-          longitude: "114.0914",
-        },
-        {
-          id: 3783,
-          sequence: 4,
-          latitude: "22.7546",
-          longitude: "114.0917",
-        },
-        {
-          id: 3784,
-          sequence: 5,
-          latitude: "22.7549",
-          longitude: "114.0920",
-        },
-        {
-          id: 3785,
-          sequence: 6,
-          latitude: "22.7552",
-          longitude: "114.0923",
-        },
-        {
-          id: 3786,
-          sequence: 7,
-          latitude: "22.7555",
-          longitude: "114.0926",
-        },
-        {
-          id: 3787,
-          sequence: 8,
-          latitude: "22.7558",
-          longitude: "114.0929",
-        },
-      ];
+      window.checkpointsList = {{ checkpoints_list }};
     </script>
 
     <div class="container-fluid banner">
@@ -361,7 +311,10 @@
       <div class="row video-group">
         <div class="w-100"></div>
         <div class="col">
-          <div id="remote-playerlist"></div>
+          <div
+            id="remote-playerlist"
+            style="display: flex; flex-wrap: wrap"
+          ></div>
         </div>
         <div id="map"></div>
       </div>

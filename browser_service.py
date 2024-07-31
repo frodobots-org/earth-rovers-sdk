@@ -17,15 +17,9 @@ class BrowserService:
                 self.browser = await launch(
                     executablePath=executable_path,
                     headless=True,
-                    args=[
-                        "--ignore-certificate-errors",
-                        "--no-sandbox",
-                        "--disable-gpu",
-                        "--window-size=1280,800",
-                    ],
+                    args=["--ignore-certificate-errors", "--no-sandbox"],
                 )
                 self.page = await self.browser.newPage()
-                await self.page.setViewport({"width": 1280, "height": 800})
                 await self.page.setExtraHTTPHeaders(
                     {"Accept-Language": "en-US,en;q=0.9"}
                 )
@@ -47,19 +41,24 @@ class BrowserService:
     async def take_screenshot(self, video_output_path: str, map_output_path: str):
         await self.initialize_browser()
 
-        # Take screenshot of the video element
-        video_wrapper = await self.page.querySelector("#player-1000")
-        video_element = await video_wrapper.querySelector("video")
-        await video_element.screenshot({"path": video_output_path})
+        video_wrapper_front = await self.page.querySelector("#player-1000")
+        video_element_front = await video_wrapper_front.querySelector("video")
+        await video_element_front.screenshot({"path": video_output_path + "_front.png"})
 
-        # Wait for the map element to be fully initialized
+        video_wrapper_rear = await self.page.querySelector("#player-1001")
+        video_element_rear = await video_wrapper_rear.querySelector("video")
+        await video_element_rear.screenshot({"path": video_output_path + "_rear.png"})
+
         await self.page.waitForSelector("#map")
 
-        # Take screenshot of the Map element
         map_element = await self.page.querySelector("#map")
         await map_element.screenshot({"path": map_output_path})
 
-        return video_output_path, map_output_path
+        return (
+            video_output_path + "_front.png",
+            video_output_path + "_rear.png",
+            map_output_path,
+        )
 
     async def data(self) -> dict:
         await self.initialize_browser()

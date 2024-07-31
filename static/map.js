@@ -2,7 +2,17 @@ let map;
 let marker;
 
 function initMap() {
-  map = L.map("map").setView([0, 0], 2);
+  let initialLat = 0;
+  let initialLng = 0;
+  let zoomLevel = 2;
+  let checkpointsList = window.checkpointsList;
+  if (checkpointsList && checkpointsList.length > 0) {
+    initialLat = parseFloat(checkpointsList[0].latitude);
+    initialLng = parseFloat(checkpointsList[0].longitude);
+    zoomLevel = 22;
+  }
+
+  map = L.map("map").setView([initialLat, initialLng], zoomLevel);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution:

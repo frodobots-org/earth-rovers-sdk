@@ -16,7 +16,7 @@ var client;
  */
 var localTracks = {
   videoTrack: null,
-  audioTrack: null
+  audioTrack: null,
 };
 
 /*
@@ -31,63 +31,77 @@ var options = {
   appid: null,
   channel: null,
   uid: null,
-  token: null
+  token: null,
 };
 
 // you can find all the agora preset video profiles here https://docs.agora.io/en/Voice/API%20Reference/web_ng/globals.html#videoencoderconfigurationpreset
-var videoProfiles = [{
-  label: "360p_7",
-  detail: "480×360, 15fps, 320Kbps",
-  value: "360p_7"
-}, {
-  label: "360p_8",
-  detail: "480×360, 30fps, 490Kbps",
-  value: "360p_8"
-}, {
-  label: "480p_1",
-  detail: "640×480, 15fps, 500Kbps",
-  value: "480p_1"
-}, {
-  label: "480p_2",
-  detail: "640×480, 30fps, 1000Kbps",
-  value: "480p_2"
-}, {
-  label: "720p_1",
-  detail: "1280×720, 15fps, 1130Kbps",
-  value: "720p_1"
-}, {
-  label: "720p_2",
-  detail: "1280×720, 30fps, 2000Kbps",
-  value: "720p_2"
-}, {
-  label: "1080p_1",
-  detail: "1920×1080, 15fps, 2080Kbps",
-  value: "1080p_1"
-}, {
-  label: "1080p_2",
-  detail: "1920×1080, 30fps, 3000Kbps",
-  value: "1080p_2"
-}];
+var videoProfiles = [
+  {
+    label: "360p_7",
+    detail: "480×360, 15fps, 320Kbps",
+    value: "360p_7",
+  },
+  {
+    label: "360p_8",
+    detail: "480×360, 30fps, 490Kbps",
+    value: "360p_8",
+  },
+  {
+    label: "480p_1",
+    detail: "640×480, 15fps, 500Kbps",
+    value: "480p_1",
+  },
+  {
+    label: "480p_2",
+    detail: "640×480, 30fps, 1000Kbps",
+    value: "480p_2",
+  },
+  {
+    label: "720p_1",
+    detail: "1280×720, 15fps, 1130Kbps",
+    value: "720p_1",
+  },
+  {
+    label: "720p_2",
+    detail: "1280×720, 30fps, 2000Kbps",
+    value: "720p_2",
+  },
+  {
+    label: "1080p_1",
+    detail: "1920×1080, 15fps, 2080Kbps",
+    value: "1080p_1",
+  },
+  {
+    label: "1080p_2",
+    detail: "1920×1080, 30fps, 3000Kbps",
+    value: "1080p_2",
+  },
+];
 var curVideoProfile;
 AgoraRTC.onAutoplayFailed = () => {
   alert("click to start autoplay!");
 };
-AgoraRTC.onMicrophoneChanged = async changedDevice => {
+AgoraRTC.onMicrophoneChanged = async (changedDevice) => {
   // When plugging in a device, switch to a device that is newly plugged in.
   if (changedDevice.state === "ACTIVE") {
     localTracks.audioTrack.setDevice(changedDevice.device.deviceId);
     // Switch to an existing device when the current device is unplugged.
-  } else if (changedDevice.device.label === localTracks.audioTrack.getTrackLabel()) {
+  } else if (
+    changedDevice.device.label === localTracks.audioTrack.getTrackLabel()
+  ) {
     const oldMicrophones = await AgoraRTC.getMicrophones();
-    oldMicrophones[0] && localTracks.audioTrack.setDevice(oldMicrophones[0].deviceId);
+    oldMicrophones[0] &&
+      localTracks.audioTrack.setDevice(oldMicrophones[0].deviceId);
   }
 };
-AgoraRTC.onCameraChanged = async changedDevice => {
+AgoraRTC.onCameraChanged = async (changedDevice) => {
   // When plugging in a device, switch to a device that is newly plugged in.
   if (changedDevice.state === "ACTIVE") {
     localTracks.videoTrack.setDevice(changedDevice.device.deviceId);
     // Switch to an existing device when the current device is unplugged.
-  } else if (changedDevice.device.label === localTracks.videoTrack.getTrackLabel()) {
+  } else if (
+    changedDevice.device.label === localTracks.videoTrack.getTrackLabel()
+  ) {
     const oldCameras = await AgoraRTC.getCameras();
     oldCameras[0] && localTracks.videoTrack.setDevice(oldCameras[0].deviceId);
   }
@@ -95,46 +109,51 @@ AgoraRTC.onCameraChanged = async changedDevice => {
 async function initDevices() {
   mics = await AgoraRTC.getMicrophones();
   const audioTrackLabel = localTracks.audioTrack.getTrackLabel();
-  currentMic = mics.find(item => item.label === audioTrackLabel);
+  currentMic = mics.find((item) => item.label === audioTrackLabel);
   $(".mic-input").val(currentMic.label);
   $(".mic-list").empty();
-  mics.forEach(mic => {
+  mics.forEach((mic) => {
     $(".mic-list").append(`<a class="dropdown-item" href="#">${mic.label}</a>`);
   });
 
   cams = await AgoraRTC.getCameras();
   const videoTrackLabel = localTracks.videoTrack.getTrackLabel();
-  currentCam = cams.find(item => item.label === videoTrackLabel);
+  currentCam = cams.find((item) => item.label === videoTrackLabel);
   $(".cam-input").val(currentCam.label);
   $(".cam-list").empty();
-  cams.forEach(cam => {
+  cams.forEach((cam) => {
     $(".cam-list").append(`<a class="dropdown-item" href="#">${cam.label}</a>`);
   });
 }
 async function switchCamera(label) {
-  currentCam = cams.find(cam => cam.label === label);
+  currentCam = cams.find((cam) => cam.label === label);
   $(".cam-input").val(currentCam.label);
   // switch device of local video track.
   await localTracks.videoTrack.setDevice(currentCam.deviceId);
 }
 async function switchMicrophone(label) {
-  currentMic = mics.find(mic => mic.label === label);
+  currentMic = mics.find((mic) => mic.label === label);
   $(".mic-input").val(currentMic.label);
   // switch device of local audio track.
   await localTracks.audioTrack.setDevice(currentMic.deviceId);
 }
 function initVideoProfiles() {
-  videoProfiles.forEach(profile => {
-    $(".profile-list").append(`<a class="dropdown-item" label="${profile.label}" href="#">${profile.label}: ${profile.detail}</a>`);
+  videoProfiles.forEach((profile) => {
+    $(".profile-list").append(
+      `<a class="dropdown-item" label="${profile.label}" href="#">${profile.label}: ${profile.detail}</a>`
+    );
   });
-  curVideoProfile = videoProfiles.find(item => item.label == '480p_1');
+  curVideoProfile = videoProfiles.find((item) => item.label == "480p_1");
   $(".profile-input").val(`${curVideoProfile.detail}`);
 }
 async function changeVideoProfile(label) {
-  curVideoProfile = videoProfiles.find(profile => profile.label === label);
+  curVideoProfile = videoProfiles.find((profile) => profile.label === label);
   $(".profile-input").val(`${curVideoProfile.detail}`);
   // change the local video track`s encoder configuration
-  localTracks.videoTrack && (await localTracks.videoTrack.setEncoderConfiguration(curVideoProfile.value));
+  localTracks.videoTrack &&
+    (await localTracks.videoTrack.setEncoderConfiguration(
+      curVideoProfile.value
+    ));
 }
 
 /*
@@ -171,7 +190,7 @@ $("#join-form").submit(async function (e) {
   try {
     client = AgoraRTC.createClient({
       mode: "rtc",
-      codec: getCodec()
+      codec: getCodec(),
     });
     options.channel = $("#channel").val();
     options.uid = Number($("#uid").val());
@@ -181,7 +200,10 @@ $("#join-form").submit(async function (e) {
     if (options.token) {
       $("#success-alert-with-token").css("display", "block");
     } else {
-      $("#success-alert a").attr("href", `index.html?appid=${options.appid}&channel=${options.channel}&token=${options.token}`);
+      $("#success-alert a").attr(
+        "href",
+        `index.html?appid=${options.appid}&channel=${options.channel}&token=${options.token}`
+      );
       $("#success-alert").css("display", "block");
     }
   } catch (error) {
@@ -197,7 +219,7 @@ $("#join-form").submit(async function (e) {
 $("#leave").click(function (e) {
   leave();
 });
-$('#agora-collapse').on('show.bs.collapse	', function () {
+$("#agora-collapse").on("show.bs.collapse	", function () {
   initDevices();
 });
 $(".cam-list").delegate("a", "click", function (e) {
@@ -214,7 +236,12 @@ async function join() {
   // Add an event listener to play remote tracks when remote user publishes.
   client.on("user-published", handleUserPublished);
   client.on("user-unpublished", handleUserUnpublished);
-  options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
+  options.uid = await client.join(
+    options.appid,
+    options.channel,
+    options.token || null,
+    options.uid || null
+  );
 
   // Join the channel.
   // options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
@@ -280,7 +307,11 @@ async function subscribe(user, mediaType) {
     const player = $(`
       <div id="player-wrapper-${uid}">
         <p class="player-name">(${uid})</p>
-        <div id="player-${uid}" class="player"></div>
+        <div id="player-${uid}" class="player" style="width: ${
+      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto"
+    }; height: ${
+      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto"
+    };"></div>
       </div>
     `);
     $("#remote-playerlist").append(player);
@@ -325,3 +356,4 @@ function getCodec() {
   }
   return value;
 }
+
