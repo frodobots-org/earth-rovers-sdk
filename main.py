@@ -26,11 +26,11 @@ logger = logging.getLogger("http_logger")
 app = FastAPI()
 
 
-# Middleware para registrar solicitudes y respuestas
+# Middleware
 def log_request(method):
     @functools.wraps(method)
     def wrapper(*args, **kwargs):
-        debug_mode = os.getenv("DEBUG") == "true"  # Verifica si DEBUG está en true
+        debug_mode = os.getenv("DEBUG") == "true"
         if debug_mode:
             params = kwargs.get("params", {})
             json_data = kwargs.get("json", {})
