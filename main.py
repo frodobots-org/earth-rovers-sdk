@@ -1,7 +1,10 @@
 import base64
+import functools
+import html
+import json
+import logging
 import os
 from datetime import datetime
-import json
 
 import requests
 from dotenv import load_dotenv
@@ -16,7 +19,48 @@ from rtm_client import RtmClient
 
 load_dotenv()
 
+# Configurar el logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("http_logger")
+
 app = FastAPI()
+
+
+# Middleware
+def log_request(method):
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        debug_mode = os.getenv("DEBUG") == "true"
+        if debug_mode:
+            params = kwargs.get("params", {})
+            json_data = kwargs.get("json", {})
+            data = kwargs.get("data", {})
+            logger.info(
+                "=== External Request ===\nMethod: %s\nURL: %s\nParams: %s\nJSON: %s\nData: %s",
+                method.__name__.upper(),
+                args[0],
+                params,
+                json_data,
+                data,
+            )
+
+        response = method(*args, **kwargs)
+
+        if debug_mode:
+            logger.info(
+                "=== External Response ===\nStatus Code: %s\nResponse: %s",
+                response.status_code,
+                response.text,
+            )
+
+        return response
+
+    return wrapper
+
+
+requests.get = log_request(requests.get)
+requests.post = log_request(requests.post)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,10 +157,10 @@ async def get_checkpoints_list():
     global checkpoints_list_data
     auth_header = os.getenv("SDK_API_TOKEN")
     bot_slug = os.getenv("BOT_SLUG")
-    mission_name = os.getenv("MISSION_NAME")
+    mission_slug = os.getenv("MISSION_SLUG")
 
-    if not mission_name:
-            return
+    if not mission_slug:
+        return
 
     if not auth_header:
         raise HTTPException(
@@ -130,7 +174,7 @@ async def get_checkpoints_list():
         "Authorization": f"Bearer {auth_header}",
     }
 
-    data = { "bot_slug": bot_slug, "mission_name": mission_name }
+    data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
 
     response = requests.post(
         FRODOBOTS_API_URL + "/sdk/checkpoints_list",
@@ -152,8 +196,8 @@ async def get_checkpoints_list():
 @app.post("/auth")
 async def auth():
     await auth_common()
-    # if not checkpoints_list_data:
-    #     await get_checkpoints_list()
+    if not checkpoints_list_data:
+        await get_checkpoints_list()
     return JSONResponse(
         content={
             "auth_response_data": auth_response_data,
@@ -172,8 +216,7 @@ async def get_index(request: Request):
     rtm_token = auth_response_data.get("RTM_TOKEN", "")
     channel = auth_response_data.get("CHANNEL_NAME", "")
     uid = auth_response_data.get("USERID", "")
-    checkpoints_json = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
-
+    checkpoints_list = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
     with open("index.html", "r", encoding="utf-8") as file:
         html_content = file.read()
 
@@ -182,7 +225,7 @@ async def get_index(request: Request):
     html_content = html_content.replace("{{ rtm_token }}", rtm_token)
     html_content = html_content.replace("{{ channel }}", channel)
     html_content = html_content.replace("{{ uid }}", str(uid))
-    html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_json)
+    html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_list)
 
     return HTMLResponse(content=html_content, status_code=200)
 
@@ -205,14 +248,19 @@ async def control(request: Request):
 @app.get("/screenshot")
 async def get_screenshot():
     print("Received request for screenshot")
-    video_output_path, map_output_path = await browser_service.take_screenshot(
-        "screenshot.png", "map.png"
+    front_video_output_path, rear_video_output_path, map_output_path = (
+        await browser_service.take_screenshot("screenshots")
     )
-    print(f"Screenshot saved to {video_output_path} and {map_output_path}")
+    print(
+        f"Screenshot saved to {front_video_output_path}, {rear_video_output_path}, and {map_output_path}"
+    )
 
     # Read the image files and encode them in base64
-    with open(video_output_path, "rb") as video_file:
-        encoded_video = base64.b64encode(video_file.read()).decode("utf-8")
+    with open(front_video_output_path, "rb") as front_video_file:
+        encoded_front_video = base64.b64encode(front_video_file.read()).decode("utf-8")
+
+    with open(rear_video_output_path, "rb") as rear_video_file:
+        encoded_rear_video = base64.b64encode(rear_video_file.read()).decode("utf-8")
 
     with open(map_output_path, "rb") as map_file:
         encoded_map = base64.b64encode(map_file.read()).decode("utf-8")
@@ -223,7 +271,8 @@ async def get_screenshot():
     # Return JSON response with base64 images and timestamp
     return JSONResponse(
         content={
-            "video_frame": encoded_video,
+            "front_video_frame": encoded_front_video,
+            "rear_video_frame": encoded_rear_video,
             "map_frame": encoded_map,
             "timestamp": current_timestamp,
         }
@@ -237,7 +286,6 @@ async def get_data():
 
 
 if __name__ == "__main__":
-    # import hypercorn.asyncio
     from hypercorn.config import Config
 
     config = Config()

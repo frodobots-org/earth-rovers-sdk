@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    environment:
+      - DEBUG=true
+      - BOT_SLUG=yout-bot-name
+      - SDK_API_TOKEN=y0ur4p1tok3n
+      - CHROME_EXECUTABLE_PATH=/usr/bin/chromium
+    ports:
+      - "8000:8000"
+      - "9222:9222"
+    volumes:
+      - ./screenshots:/app/screenshots

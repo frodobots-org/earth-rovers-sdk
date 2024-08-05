@@ -4,5 +4,4 @@ __pycache__/
 .vscode/
 
 node_modules/
-screenshot.png
-map.png
+screenshots/*.png

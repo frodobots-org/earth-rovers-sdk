@@ -2,87 +2,71 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <title>Frodobots SDK - Stream</title>
     <link rel="stylesheet" href="/static/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/index.css" />
-    <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
+    />
     <style>
-        #map { width: 500px; height: 500px; }
+      #map {
+        width: 1000px;
+        height: 1000px;
+        margin-top: 100px;
+      }
 
-        .marker {
-          background-color: green;
-          width: 30px;
-          height: 30px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: white;
-          font-weight: bold;
-          border-radius: 5px;
-        }
+      .marker {
+        background-color: green;
+        width: 30px;
+        height: 30px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-weight: bold;
+        border-radius: 5px;
+      }
 
-        .main-marker {
-          width: 30px;
-          height: 30px;
-          position: relative;
-          background-color: #ffcc00;
-          border-radius: 5px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
+      .main-marker {
+        width: 30px;
+        height: 30px;
+        position: relative;
+        background-color: #ffcc00;
+        border-radius: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
 
-        .main-marker::before,
-        .main-marker::after {
-          content: '';
-          position: absolute;
-          width: 6px;
-          height: 6px;
-          background-color: #333;
-          border-radius: 50%;
-          top: 5px;
-        }
+      .main-marker .antenna {
+        position: absolute;
+        top: -5px;
+        width: 2px;
+        height: 5px;
+        background-color: #333;
+      }
 
-        .main-marker::before {
-          left: 3px;
-        }
-
-        .main-marker::after {
-          right: 3px;
-        }
-
-        .main-marker .antenna {
-          position: absolute;
-          top: -5px;
-          width: 2px;
-          height: 5px;
-          background-color: #333;
-        }
-
-        .main-marker .antenna::after {
-          content: '';
-          position: absolute;
-          top: -3px;
-          left: -2px;
-          width: 6px;
-          height: 6px;
-          background-color: #333;
-          border-radius: 50%;
-        }
+      .main-marker .antenna::after {
+        content: "";
+        position: absolute;
+        top: -3px;
+        left: -2px;
+        width: 6px;
+        height: 6px;
+        background-color: #333;
+        border-radius: 50%;
+      }
     </style>
   </head>
 
   <body>
     <script>
-      const checkpointsList = JSON.parse('{{ checkpoints_list }}');
-
-      console.log(checkpointsList);
+      window.checkpointsList = {{ checkpoints_list }};
     </script>
+
     <div class="container-fluid banner">
       <p class="banner-text">Frodobots SDK - Stream</p>
     </div>
@@ -110,8 +94,7 @@
       class="alert alert-success alert-dismissible fade show"
       role="alert"
     >
-      <strong>Congratulations!</strong
-      ><span> Joined room successfully. </span>
+      <strong>Congratulations!</strong><span> Joined room successfully. </span>
       <button
         type="button"
         class="close"
@@ -127,8 +110,7 @@
       class="alert alert-success alert-dismissible fade show"
       role="alert"
     >
-      <strong>Congratulations!</strong
-      ><span> Joined room successfully. </span>
+      <strong>Congratulations!</strong><span> Joined room successfully. </span>
       <button
         type="button"
         class="close"
@@ -275,9 +257,7 @@
                       value="vp8"
                       checked
                     />
-                    <label class="form-check-label" for="vp8">
-                      vp8
-                    </label>
+                    <label class="form-check-label" for="vp8"> vp8 </label>
                   </span>
                   <span style="padding-left: 1.25rem">
                     <input
@@ -287,9 +267,7 @@
                       id="vp9"
                       value="vp9"
                     />
-                    <label class="form-check-label" for="vp9">
-                      vp9
-                    </label>
+                    <label class="form-check-label" for="vp9"> vp9 </label>
                   </span>
                   <span style="padding-left: 1.25rem" class="mb-3">
                     <input
@@ -299,9 +277,7 @@
                       id="h264"
                       value="h264"
                     />
-                    <label class="form-check-label" for="h264">
-                      h264
-                    </label>
+                    <label class="form-check-label" for="h264"> h264 </label>
                   </span>
                   <!-- profile -->
                   <h6 class="device-name">Video Profiles</h6>
@@ -335,18 +311,20 @@
       <div class="row video-group">
         <div class="w-100"></div>
         <div class="col">
-          <div id="remote-playerlist"></div>
+          <div
+            id="remote-playerlist"
+            style="display: flex; flex-wrap: wrap"
+          ></div>
         </div>
-        <div id="messages">
-        </div>
-      </div>
-
-      <div class="row mt-3">
         <div id="map"></div>
       </div>
 
+      <div class="row mt-3">
+        <div id="messages"></div>
+      </div>
     </div>
-    <script src="/static/mapbpx-gl.js"></script>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="/static/map.js"></script>
     <script src="/static/jquery-3.4.1.min.js"></script>
     <script src="/static/bootstrap.bundle.min.js"></script>
     <script src="/static/AgoraRTC_N-4.1.0.js"></script>
@@ -355,3 +333,4 @@
     <script src="/static/basicRtm.js" defer></script>
   </body>
 </html>
+

@@ -83,6 +83,7 @@ Example Response:
 ### GET /screenshot
 
 With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
+Inside the folder screenshots/ you can find the images.
 
 ```bash
 curl --location 'http://localhost:8000/screenshot'
@@ -92,7 +93,9 @@ Example Response:
 
 ```JSON
 {
-    "frame": "base64_encoded_image",
+    "front_video_frame": "base64_encoded_image",
+    "rear_video_frame": "base64_encoded_image",
+    "mapmap_frame": "base64_encoded_image",
     "timestamp": 1720458328
 }
 ```
