@@ -249,7 +249,7 @@ async def control(request: Request):
 async def get_screenshot():
     print("Received request for screenshot")
     front_video_output_path, rear_video_output_path, map_output_path = (
-        await browser_service.take_screenshot("data/screenshot", "data/map.png")
+        await browser_service.take_screenshot("screenshots")
     )
     print(
         f"Screenshot saved to {front_video_output_path}, {rear_video_output_path}, and {map_output_path}"

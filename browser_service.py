@@ -45,7 +45,7 @@ class BrowserService:
                 await self.close_browser()
                 raise
 
-    async def take_screenshot(self, video_output_path: str, map_output_path: str):
+    async def take_screenshot(self, video_output_folder: str):
         await self.initialize_browser()
 
         # Get the full page dimensions
@@ -70,9 +70,9 @@ class BrowserService:
 
         # Capture individual elements
         for element_id, output_path in [
-            ("#player-1000", video_output_path + "_front.png"),
-            ("#player-1001", video_output_path + "_rear.png"),
-            ("#map", map_output_path),
+            ("#player-1000", f"{video_output_folder}/front.png"),
+            ("#player-1001", f"{video_output_folder}/rear.png"),
+            ("#map", f"{video_output_folder}/map.png"),
         ]:
             element = await self.page.querySelector(element_id)
             if element:
@@ -81,9 +81,9 @@ class BrowserService:
                 print(f"Element {element_id} not found")
 
         return (
-            video_output_path + "_front.png",
-            video_output_path + "_rear.png",
-            map_output_path,
+            f"{video_output_folder}/front.png",
+            f"{video_output_folder}/rear.png",
+            f"{video_output_folder}/map.png",
         )
 
     async def data(self) -> dict:
