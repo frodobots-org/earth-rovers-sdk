@@ -30,7 +30,7 @@ class BrowserService:
                     {"Accept-Language": "en-US,en;q=0.9"}
                 )
                 await self.page.goto(
-                    "http://localhost:8000", {"waitUntil": "networkidle2"}
+                    "http://127.0.0.1:8000", {"waitUntil": "networkidle2"}
                 )
                 await self.page.click("#join")
                 await self.page.waitForSelector("video")
