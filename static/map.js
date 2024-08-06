@@ -9,7 +9,7 @@ function initMap() {
   if (checkpointsList && checkpointsList.length > 0) {
     initialLat = parseFloat(checkpointsList[0].latitude);
     initialLng = parseFloat(checkpointsList[0].longitude);
-    zoomLevel = 22;
+    zoomLevel = window.mapZoomLevel;
   }
 
   map = L.map("map").setView([initialLat, initialLng], zoomLevel);
@@ -35,7 +35,7 @@ window.updateMarker = function (latitude, longitude) {
       icon: L.divIcon({ className: "main-marker" }),
     }).addTo(map);
   }
-  map.setView([latitude, longitude], 22); // Set view with zoom level 22
+  map.setView([latitude, longitude], window.mapZoomLevel);
 };
 
 document.addEventListener("DOMContentLoaded", function () {

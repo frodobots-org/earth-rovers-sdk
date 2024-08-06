@@ -8,6 +8,7 @@ services:
       - BOT_SLUG=yout-bot-name
       - SDK_API_TOKEN=y0ur4p1tok3n
       - CHROME_EXECUTABLE_PATH=/usr/bin/chromium
+      - MAP_ZOOM_LEVEL=18
     ports:
       - "8000:8000"
       - "9222:9222"

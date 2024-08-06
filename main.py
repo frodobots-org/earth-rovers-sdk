@@ -217,6 +217,8 @@ async def get_index(request: Request):
     channel = auth_response_data.get("CHANNEL_NAME", "")
     uid = auth_response_data.get("USERID", "")
     checkpoints_list = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
+    map_zoom_level = os.getenv("MAP_ZOOM_LEVEL", "18")
+
     with open("index.html", "r", encoding="utf-8") as file:
         html_content = file.read()
 
@@ -226,6 +228,7 @@ async def get_index(request: Request):
     html_content = html_content.replace("{{ channel }}", channel)
     html_content = html_content.replace("{{ uid }}", str(uid))
     html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_list)
+    html_content = html_content.replace("{{ map_zoom_level }}", map_zoom_level)
 
     return HTMLResponse(content=html_content, status_code=200)
 
