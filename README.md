@@ -95,7 +95,7 @@ Example Response:
 {
     "front_video_frame": "base64_encoded_image",
     "rear_video_frame": "base64_encoded_image",
-    "mapmap_frame": "base64_encoded_image",
+    "map_frame": "base64_encoded_image",
     "timestamp": 1720458328
 }
 ```
