@@ -16,6 +16,8 @@ In order to use or run this SDK you need to have an account registered with Frod
 SDK_API_TOKEN=
 BOT_SLUG=
 CHROME_EXECUTABLE_PATH=
+# Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
+MAP_ZOOM_LEVEL=
 ```
 
 2. Install the SDK
