@@ -1,4 +1,4 @@
-# Earth Rovers SDK v3.1
+# Earth Rovers SDK v3.2
 
 ## Requirements
 
@@ -102,3 +102,14 @@ Example Response:
 }
 ```
 
+# Latest updates
+- v3.2: Added the ability to control the zoom level of the map.
+- v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
+
+## Contributions
+- [Michael Cho](mailto:michael.cho@frodobots.com)
+- [Santiago Pravisani](mailto:santiago.pravisani@frodobots.com)
+- [Esteban Fuhrmann](mailto:esteban.fuhrmann@frodobots.com)
+
+## Join our Discord
+- [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
