@@ -143,6 +143,8 @@ async def auth_common():
             "RTM_TOKEN": response_data.get("RTM_TOKEN"),
             "USERID": response_data.get("USERID"),
             "APP_ID": response_data.get("APP_ID"),
+            "SECOND_USERID": response_data.get("SECOND_USERID"),
+            "SECOND_RTC_TOKEN": response_data.get("SECOND_RTC_TOKEN"),
         }
         return auth_response_data
 
@@ -212,6 +214,32 @@ async def get_index(request: Request):
         await auth()
 
     app_id = auth_response_data.get("APP_ID", "")
+    second_rtc_token = auth_response_data.get("SECOND_RTC_TOKEN", "")
+    channel = auth_response_data.get("CHANNEL_NAME", "")
+    second_uid = auth_response_data.get("SECOND_USERID", "")
+    checkpoints_list = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
+    map_zoom_level = os.getenv("MAP_ZOOM_LEVEL", "18")
+
+    with open("index.html", "r", encoding="utf-8") as file:
+        html_content = file.read()
+
+    html_content = html_content.replace("{{ appid }}", app_id)
+    html_content = html_content.replace("{{ rtc_token }}", second_rtc_token)
+    html_content = html_content.replace("{{ channel }}", channel)
+    html_content = html_content.replace("{{ uid }}", str(second_uid))
+    html_content = html_content.replace("{{ rtm_token }}", "")
+    html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_list)
+    html_content = html_content.replace("{{ map_zoom_level }}", map_zoom_level)
+
+    return HTMLResponse(content=html_content, status_code=200)
+
+
+@app.get("/sdk")
+async def get_index(request: Request):
+    if not auth_response_data:
+        await auth()
+
+    app_id = auth_response_data.get("APP_ID", "")
     rtc_token = auth_response_data.get("RTC_TOKEN", "")
     rtm_token = auth_response_data.get("RTM_TOKEN", "")
     channel = auth_response_data.get("CHANNEL_NAME", "")
@@ -246,6 +274,26 @@ async def control(request: Request):
     RtmClient(auth_response_data).send_message(command)
 
     return {"message": "Command sent successfully"}
+
+
+@app.post("/control_v2")
+async def control_v2(request: Request):
+    if not auth_response_data:
+        await auth()
+
+    body = await request.json()
+    command = body.get("command")
+    if not command:
+        raise HTTPException(status_code=400, detail="Command not provided")
+
+    try:
+        await browser_service.send_message(command)
+        return {"message": "Command sent successfully"}
+    except Exception as e:
+        logger.error("Error sending control command: %s", str(e))
+        raise HTTPException(
+            status_code=500, detail="Failed to send control command"
+        ) from e
 
 
 @app.get("/screenshot")

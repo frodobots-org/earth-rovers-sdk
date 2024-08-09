@@ -3,6 +3,9 @@ $(document).ready(function () {
   const USER_ID = $("#uid").val();
   const TOKEN = $("#rtm_token").val();
   const channelName = $("#channel").val(); // Replace with your desired channel name
+  const botUid = channelName.startsWith("sdk_")
+    ? channelName.slice(4)
+    : channelName;
 
   // Create an instance of the Agora RTM client
   const rtmClient = AgoraRTM.createInstance(APP_ID);
@@ -75,6 +78,29 @@ $(document).ready(function () {
         console.log("AgoraRTM client login failure", err);
       });
   }
+
+  // Function to send message
+  function sendMessage(json) {
+    const message = JSON.stringify(json);
+    console.warn("sending message to bot", botUid);
+    console.warn("message", message);
+    rtmClient
+      .sendMessageToPeer(
+        {
+          text: message,
+        },
+        botUid
+      )
+      .then(() => {
+        console.warn("Message sent successfully:", message);
+      })
+      .catch((err) => {
+        console.warn("Error sending message:", err);
+      });
+  }
+
+  // Make the function globally accessible
+  window.sendMessage = sendMessage;
 
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);
