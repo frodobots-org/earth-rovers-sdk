@@ -78,7 +78,8 @@ Example Response:
     "gps_signal": 31.25,
     "latitude": 22.753774642944336,
     "longitude": 114.09095001220703,
-    "vibration": 0.31
+    "vibration": 0.31,
+    "timestamp": 1720458328
 }
 ```
 
@@ -103,6 +104,7 @@ Example Response:
 ```
 
 # Latest updates
+- v3.3: Improved control speed.
 - v3.2: Added the ability to control the zoom level of the map.
 - v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
 
