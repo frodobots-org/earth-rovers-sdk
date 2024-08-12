@@ -1,4 +1,4 @@
-# Earth Rovers SDK v3.2
+# Earth Rovers SDK v3.3
 
 ## Requirements
 
