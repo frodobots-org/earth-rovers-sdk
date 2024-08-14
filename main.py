@@ -261,7 +261,7 @@ async def get_index(request: Request):
     return HTMLResponse(content=html_content, status_code=200)
 
 
-@app.post("/control_legacy")
+@app.post("/control-legacy")
 async def control_legacy(request: Request):
     if not auth_response_data:
         await auth()
