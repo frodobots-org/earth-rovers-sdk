@@ -88,8 +88,10 @@ Example Response:
 With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
 Inside the folder screenshots/ you can find the images.
 
+This endpoint accepts a list of view types as a query parameter (view_types). Valid view types are rear, map, and front. If no view types are provided, it will return all three by default.
+
 ```bash
-curl --location 'http://localhost:8000/screenshot'
+curl --location 'http://localhost:8000/screenshot?view_types=rear,map,front'
 ```
 
 Example Response:
@@ -99,19 +101,23 @@ Example Response:
     "front_video_frame": "base64_encoded_image",
     "rear_video_frame": "base64_encoded_image",
     "map_frame": "base64_encoded_image",
-    "timestamp": 1720458328
+    "timestamp": 1724189733.208559
 }
 ```
 
 # Latest updates
+
 - v3.3: Improved control speed.
 - v3.2: Added the ability to control the zoom level of the map.
 - v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
 
 ## Contributions
+
 - [Michael Cho](mailto:michael.cho@frodobots.com)
 - [Santiago Pravisani](mailto:santiago.pravisani@frodobots.com)
 - [Esteban Fuhrmann](mailto:esteban.fuhrmann@frodobots.com)
 
 ## Join our Discord
+
 - [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
+

@@ -1,4 +1,5 @@
 import os
+import time
 from pyppeteer import launch
 
 
@@ -45,10 +46,9 @@ class BrowserService:
                 await self.close_browser()
                 raise
 
-    async def take_screenshot(self, video_output_folder: str):
+    async def take_screenshot(self, video_output_folder: str, elements: list):
         await self.initialize_browser()
 
-        # Get the full page dimensions
         dimensions = await self.page.evaluate(
             """() => {
             return {
@@ -58,33 +58,35 @@ class BrowserService:
         }"""
         )
 
-        # If the content is larger than the default viewport, adjust it
         if (
             dimensions["width"] > self.default_viewport["width"]
             or dimensions["height"] > self.default_viewport["height"]
         ):
             await self.page.setViewport(dimensions)
 
-        # Take a full page screenshot
-        # await self.page.screenshot({"path": "full_page.png", "fullPage": True})
+        element_map = {"front": "#player-1000", "rear": "#player-1001", "map": "#map"}
 
-        # Capture individual elements
-        for element_id, output_path in [
-            ("#player-1000", f"{video_output_folder}/front.png"),
-            ("#player-1001", f"{video_output_folder}/rear.png"),
-            ("#map", f"{video_output_folder}/map.png"),
-        ]:
-            element = await self.page.querySelector(element_id)
-            if element:
-                await element.screenshot({"path": output_path})
+        screenshots = {}
+        for name in elements:
+            if name in element_map:
+                element_id = element_map[name]
+                output_path = f"{video_output_folder}/{name}.png"
+                element = await self.page.querySelector(element_id)
+                if element:
+                    start_time = time.time()  # Start time
+                    await element.screenshot({"path": output_path})
+                    end_time = time.time()  # End time
+                    elapsed_time = (
+                        end_time - start_time
+                    ) * 1000  # Convert to milliseconds
+                    print(f"Screenshot for {name} took {elapsed_time:.2f} ms")
+                    screenshots[name] = output_path
+                else:
+                    print(f"Element {element_id} not found")
             else:
-                print(f"Element {element_id} not found")
+                print(f"Invalid element name: {name}")
 
-        return (
-            f"{video_output_folder}/front.png",
-            f"{video_output_folder}/rear.png",
-            f"{video_output_folder}/map.png",
-        )
+        return screenshots
 
     async def data(self) -> dict:
         await self.initialize_browser()

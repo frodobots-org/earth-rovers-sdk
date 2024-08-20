@@ -296,38 +296,37 @@ async def control(request: Request):
         ) from e
 
 
+#    await browser_service.take_screenshot(
+#             "/path/to/folder", ["front", "rear", "map"]
+#         )
 @app.get("/screenshot")
-async def get_screenshot():
-    print("Received request for screenshot")
-    front_video_output_path, rear_video_output_path, map_output_path = (
-        await browser_service.take_screenshot("screenshots")
-    )
-    print(
-        f"Screenshot saved to {front_video_output_path}, {rear_video_output_path}, and {map_output_path}"
-    )
+async def get_screenshot(view_types: str = "rear,map,front"):
+    print("Received request for screenshot with view_types:", view_types)
+    valid_views = {"rear", "map", "front"}
+    views_list = view_types.split(",")
 
-    # Read the image files and encode them in base64
-    with open(front_video_output_path, "rb") as front_video_file:
-        encoded_front_video = base64.b64encode(front_video_file.read()).decode("utf-8")
+    for view in views_list:
+        if view not in valid_views:
+            raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
 
-    with open(rear_video_output_path, "rb") as rear_video_file:
-        encoded_rear_video = base64.b64encode(rear_video_file.read()).decode("utf-8")
+    await browser_service.take_screenshot("screenshots", views_list)
 
-    with open(map_output_path, "rb") as map_file:
-        encoded_map = base64.b64encode(map_file.read()).decode("utf-8")
+    response_content = {}
+    for view in views_list:
+        file_path = f"screenshots/{view}.png"
+        try:
+            with open(file_path, "rb") as image_file:
+                encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
+                response_content[f"{view}_frame"] = encoded_image
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to read {view} image"
+            ) from exc
 
-    # Get the current Unix UTC timestamp (epoch time)
-    current_timestamp = int(datetime.utcnow().timestamp())
+    current_timestamp = datetime.utcnow().timestamp()
+    response_content["timestamp"] = current_timestamp
 
-    # Return JSON response with base64 images and timestamp
-    return JSONResponse(
-        content={
-            "front_video_frame": encoded_front_video,
-            "rear_video_frame": encoded_rear_video,
-            "map_frame": encoded_map,
-            "timestamp": current_timestamp,
-        }
-    )
+    return JSONResponse(content=response_content)
 
 
 @app.get("/data")
