@@ -105,6 +105,19 @@ Example Response:
 }
 ```
 
+```bash
+curl --location 'http://localhost:8000/screenshot?view_types=rear'
+```
+
+Example Response:
+
+```JSON
+{
+    "rear_video_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
+}
+```
+
 # Latest updates
 
 - v3.3: Improved control speed.
