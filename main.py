@@ -296,9 +296,6 @@ async def control(request: Request):
         ) from e
 
 
-#    await browser_service.take_screenshot(
-#             "/path/to/folder", ["front", "rear", "map"]
-#         )
 @app.get("/screenshot")
 async def get_screenshot(view_types: str = "rear,map,front"):
     print("Received request for screenshot with view_types:", view_types)
