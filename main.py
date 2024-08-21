@@ -239,9 +239,7 @@ async def get_checkpoints_list():
     return checkpoints_list_data
 
 
-@app.post("/auth")
 async def auth():
-    await need_start_mission()
     await auth_common()
     if not checkpoints_list_data:
         await get_checkpoints_list()
@@ -404,6 +402,53 @@ async def get_data():
     await need_start_mission()
     data = await browser_service.data()
     return JSONResponse(content=data)
+
+
+@app.post("/checkpoint_reached")
+async def checkpoint_reached(request: Request):
+    await need_start_mission()
+
+    bot_slug = os.getenv("BOT_SLUG")
+    mission_slug = os.getenv("MISSION_SLUG")
+    auth_header = os.getenv("SDK_API_TOKEN")
+
+    if not all([bot_slug, mission_slug, auth_header]):
+        raise HTTPException(
+            status_code=500, detail="Required environment variables not configured"
+        )
+
+    data = await browser_service.data()
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+
+    if not all([latitude, longitude]):
+        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {
+        "bot_slug": bot_slug,
+        "mission_slug": mission_slug,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    response = requests.post(
+        FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
+        headers=headers,
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code, detail="Failed to send checkpoint data"
+        )
+
+    return JSONResponse(content={"message": "Checkpoint data sent successfully"})
 
 
 if __name__ == "__main__":
