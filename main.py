@@ -252,7 +252,7 @@ async def auth():
 
 
 @app.post("/start-mission")
-async def start():
+async def start_mission():
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -267,10 +267,7 @@ async def start():
     if not checkpoints_list_data:
         await get_checkpoints_list()
     return JSONResponse(
-        content={
-            "auth_response_data": auth_response_data,
-            "checkpoints_list_data": checkpoints_list_data,
-        }
+        content={ "message": "Mission started successfully", "checkpoints_list": checkpoints_list_data }
     )
 
 
@@ -448,7 +445,7 @@ async def checkpoint_reached(request: Request):
             status_code=response.status_code, detail=response.json().get("error", "Failed to send checkpoint data")
         )
 
-    return JSONResponse(content={"message": "Checkpoint data sent successfully"})
+    return JSONResponse(content={"message":"Checkpoint reached successfully"})
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Earth Rovers SDK v3.3
+# Earth Rovers SDK v4.0
 
 ## Requirements
 
@@ -18,6 +18,7 @@ BOT_SLUG=
 CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
 MAP_ZOOM_LEVEL=
+MISSION_SLUG=
 ```
 
 2. Install the SDK
@@ -118,8 +119,90 @@ Example Response:
 }
 ```
 
-# Latest updates
+## Missions API
 
+In order to start a mission you need to call the /start-mission endpoint. This endpoint will let you know if the bot is available or not for the mission.
+
+To enable the missions API you need to set the MISSION_SLUG environment variable to the slug of the mission you want to start.
+
+```bash
+MISSION_SLUG=mission-1
+```
+
+If you just want to experiment with the bot without starting a mission you need to unset the MISSION_SLUG environment variable.
+```bash
+MISSION_SLUG=
+```
+
+`Note: Bots that are controlled by other players are not available for missions.`
+
+### POST /start-mission
+```bash
+curl --location 'http://localhost:8000/start-mission'
+```
+
+Example Response:
+```JSON
+{
+    "message": "Mission started successfully"
+}
+```
+
+### POST /checkpoints-list
+
+With this endpoint you can retrieve the list of checkpoints for the mission. And the latest checkpoint that was scanned by the bot. If you scan the first checkpoint, the latest_scanned_checkpoint will be 1. If you scan the last checkpoint, the latest_scanned_checkpoint will be the highest sequence number and the mission will be completed.
+
+```bash
+curl --location 'http://localhost:8000/checkpoints-list'
+```
+
+Example Response:
+```JSON
+{
+    "checkpoints_list": [
+        {
+            "id": 4818,
+            "sequence": 1,
+            "latitude": "30.48243713",
+            "longitude": "114.3026428"
+        },
+        {
+            "id": 4819,
+            "sequence": 2,
+            "latitude": "30.48268318",
+            "longitude": "114.3026047"
+        },
+        {
+            "id": 4820,
+            "sequence": 3,
+            "latitude": "30.48243713",
+            "longitude": "114.3026428"
+        }
+    ],
+    "latest_scanned_checkpoint": 0
+}
+```
+
+### POST /checkpoint-reached
+
+With this endpoint you can send the checkpoint that was scanned by the bot.
+
+```bash
+curl --location 'http://localhost:8000/checkpoint-reached' \
+--header 'Content-Type: application/json' \
+--data '{}'
+```
+
+Example Response:
+```JSON
+{
+    "message": "Checkpoint reached successfully"
+}
+```
+
+
+# Latest updates
+- v.4.0: Added the ability to start a mission. Improved screenshots timings. Timestamps accuracy improved.
 - v3.3: Improved control speed.
 - v3.2: Added the ability to control the zoom level of the map.
 - v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
