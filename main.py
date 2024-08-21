@@ -152,7 +152,7 @@ def get_env_tokens():
 
 
 async def start_ride(headers, bot_slug, mission_slug):
-    start_ride_data = {"bot_slug": bot_slug, "mission_name": mission_slug}
+    start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
     start_ride_response = requests.post(
         FRODOBOTS_API_URL + "/sdk/start_ride",
         headers=headers,
@@ -162,7 +162,7 @@ async def start_ride(headers, bot_slug, mission_slug):
 
     if start_ride_response.status_code != 200:
         raise HTTPException(
-            status_code=start_ride_response.status_code, detail="Failed to start ride"
+            status_code=start_ride_response.status_code, detail="Bot unavailable for SDK"
         )
 
     return start_ride_response.json()
@@ -188,11 +188,11 @@ async def need_start_mission():
     if auth_response_data:
         return
     raise HTTPException(
-        status_code=400, detail="Call /start endpoint to start a mission"
+        status_code=400, detail="Call /start-mission endpoint to start a mission"
     )
 
 
-@app.get("/checkpoints")
+@app.get("/checkpoints-list")
 async def checkpoints():
     await need_start_mission()
     await get_checkpoints_list()
@@ -251,7 +251,7 @@ async def auth():
     )
 
 
-@app.post("/start")
+@app.post("/start-mission")
 async def start():
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -404,7 +404,7 @@ async def get_data():
     return JSONResponse(content=data)
 
 
-@app.post("/checkpoint_reached")
+@app.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
     await need_start_mission()
 
@@ -445,7 +445,7 @@ async def checkpoint_reached(request: Request):
 
     if response.status_code != 200:
         raise HTTPException(
-            status_code=response.status_code, detail="Failed to send checkpoint data"
+            status_code=response.status_code, detail=response.json().get("error", "Failed to send checkpoint data")
         )
 
     return JSONResponse(content={"message": "Checkpoint data sent successfully"})
