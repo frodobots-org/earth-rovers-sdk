@@ -179,7 +179,7 @@ async def end_ride(headers, bot_slug, mission_slug):
 
     if end_ride_response.status_code != 200:
         raise HTTPException(
-            status_code=end_ride_response.status_code, detail="Failed to end ride"
+            status_code=end_ride_response.status_code, detail="Failed to end mission"
         )
 
     return end_ride_response.json()
@@ -313,7 +313,7 @@ async def end_mission():
         global auth_response_data, checkpoints_list_data
         auth_response_data = {}
         checkpoints_list_data = {}
-        return JSONResponse(content={"message": "Mission ended successfully", "response": end_ride_response})
+        return JSONResponse(content={ "message": "Mission ended successfully" })
     except HTTPException as e:
         raise e
     except Exception as e:
