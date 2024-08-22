@@ -204,7 +204,7 @@ Example Response:
 }
 ```
 
-### POST /terminate-mission
+### POST /end-mission
 
 With this endpoint you can force the mission to end in case you face some errors. Note that once you run this endpoint, the bot will be disconnected and will be available again for other players to use.
 
@@ -212,7 +212,7 @@ With this endpoint you can force the mission to end in case you face some errors
 
 
 ```bash
-curl --location 'http://localhost:8000/terminate-mission' \
+curl --location 'http://localhost:8000/end-mission' \
 --header 'Content-Type: application/json' \
 --data '{}'
 ```
