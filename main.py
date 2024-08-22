@@ -94,6 +94,46 @@ browser_service = BrowserService()
 
 async def auth_common():
     global auth_response_data
+    auth_response_data = get_env_tokens()
+
+    if auth_response_data:
+        return auth_response_data
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+    mission_slug = os.getenv("MISSION_SLUG")
+
+    if not auth_header:
+        raise HTTPException(
+            status_code=500, detail="Authorization header not configured"
+        )
+    if not bot_slug:
+        raise HTTPException(status_code=500, detail="Bot name not configured")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    if mission_slug:
+        response_data = await start_ride(headers, bot_slug, mission_slug)
+    else:
+        response_data = await retrieve_tokens(headers, bot_slug)
+
+    auth_response_data = {
+        "CHANNEL_NAME": response_data.get("CHANNEL_NAME"),
+        "RTC_TOKEN": response_data.get("RTC_TOKEN"),
+        "RTM_TOKEN": response_data.get("RTM_TOKEN"),
+        "USERID": response_data.get("USERID"),
+        "APP_ID": response_data.get("APP_ID"),
+        "SPECTATOR_USERID": response_data.get("SPECTATOR_USERID"),
+        "SPECTATOR_RTC_TOKEN": response_data.get("SPECTATOR_RTC_TOKEN"),
+    }
+
+    return auth_response_data
+
+
+def get_env_tokens():
     channel_name = os.getenv("CHANNEL_NAME")
     rtc_token = os.getenv("RTC_TOKEN")
     rtm_token = os.getenv("RTM_TOKEN")
@@ -101,56 +141,60 @@ async def auth_common():
     app_id = os.getenv("APP_ID")
 
     if all([channel_name, rtc_token, rtm_token, userid, app_id]):
-        auth_response_data = {
+        return {
             "CHANNEL_NAME": channel_name,
             "RTC_TOKEN": rtc_token,
             "RTM_TOKEN": rtm_token,
             "USERID": userid,
             "APP_ID": app_id,
         }
-        return auth_response_data
-    else:
-        auth_header = os.getenv("SDK_API_TOKEN")
-        bot_slug = os.getenv("BOT_SLUG")
+    return None
 
-        if not auth_header:
-            raise HTTPException(
-                status_code=500, detail="Authorization header not configured"
-            )
-        if not bot_slug:
-            raise HTTPException(status_code=500, detail="Bot name not configured")
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {auth_header}",
-        }
+async def start_ride(headers, bot_slug, mission_slug):
+    start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
+    start_ride_response = requests.post(
+        FRODOBOTS_API_URL + "/sdk/start_ride",
+        headers=headers,
+        json=start_ride_data,
+        timeout=15,
+    )
 
-        data = {"bot_slug": bot_slug}
-
-        response = requests.post(
-            FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data, timeout=15
+    if start_ride_response.status_code != 200:
+        raise HTTPException(
+            status_code=start_ride_response.status_code, detail="Bot unavailable for SDK"
         )
 
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code, detail="Failed to retrieve tokens"
-            )
-
-        response_data = response.json()
-        auth_response_data = {
-            "CHANNEL_NAME": response_data.get("CHANNEL_NAME"),
-            "RTC_TOKEN": response_data.get("RTC_TOKEN"),
-            "RTM_TOKEN": response_data.get("RTM_TOKEN"),
-            "USERID": response_data.get("USERID"),
-            "APP_ID": response_data.get("APP_ID"),
-            "SPECTATOR_USERID": response_data.get("SPECTATOR_USERID"),
-            "SPECTATOR_RTC_TOKEN": response_data.get("SPECTATOR_RTC_TOKEN"),
-        }
-        return auth_response_data
+    return start_ride_response.json()
 
 
-@app.get("/checkpoints")
+async def retrieve_tokens(headers, bot_slug):
+    data = {"bot_slug": bot_slug}
+    response = requests.post(
+        FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data, timeout=15
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code, detail="Failed to retrieve tokens"
+        )
+
+    return response.json()
+
+
+async def need_start_mission():
+    if not os.getenv("MISSION_SLUG"):
+        return
+    if auth_response_data:
+        return
+    raise HTTPException(
+        status_code=400, detail="Call /start-mission endpoint to start a mission"
+    )
+
+
+@app.get("/checkpoints-list")
 async def checkpoints():
+    await need_start_mission()
     await get_checkpoints_list()
     return JSONResponse(content=checkpoints_list_data)
 
@@ -195,7 +239,6 @@ async def get_checkpoints_list():
     return checkpoints_list_data
 
 
-@app.post("/auth")
 async def auth():
     await auth_common()
     if not checkpoints_list_data:
@@ -208,8 +251,29 @@ async def auth():
     )
 
 
+@app.post("/start-mission")
+async def start_mission():
+    required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+
+    if missing_vars:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required environment variables: {', '.join(missing_vars)}",
+        )
+
+    if not auth_response_data:
+        await auth()
+    if not checkpoints_list_data:
+        await get_checkpoints_list()
+    return JSONResponse(
+        content={ "message": "Mission started successfully", "checkpoints_list": checkpoints_list_data }
+    )
+
+
 @app.get("/")
 async def get_index(request: Request):
+    await need_start_mission()
     if not auth_response_data:
         await auth()
 
@@ -235,7 +299,8 @@ async def get_index(request: Request):
 
 
 @app.get("/sdk")
-async def get_index(request: Request):
+async def sdk(request: Request):
+    await need_start_mission()
     if not auth_response_data:
         await auth()
 
@@ -263,6 +328,7 @@ async def get_index(request: Request):
 
 @app.post("/control-legacy")
 async def control_legacy(request: Request):
+    await need_start_mission()
     if not auth_response_data:
         await auth()
 
@@ -278,6 +344,7 @@ async def control_legacy(request: Request):
 
 @app.post("/control")
 async def control(request: Request):
+    await need_start_mission()
     if not auth_response_data:
         await auth()
 
@@ -297,43 +364,88 @@ async def control(request: Request):
 
 
 @app.get("/screenshot")
-async def get_screenshot():
-    print("Received request for screenshot")
-    front_video_output_path, rear_video_output_path, map_output_path = (
-        await browser_service.take_screenshot("screenshots")
-    )
-    print(
-        f"Screenshot saved to {front_video_output_path}, {rear_video_output_path}, and {map_output_path}"
-    )
+async def get_screenshot(view_types: str = "rear,map,front"):
+    await need_start_mission()
+    print("Received request for screenshot with view_types:", view_types)
+    valid_views = {"rear", "map", "front"}
+    views_list = view_types.split(",")
 
-    # Read the image files and encode them in base64
-    with open(front_video_output_path, "rb") as front_video_file:
-        encoded_front_video = base64.b64encode(front_video_file.read()).decode("utf-8")
+    for view in views_list:
+        if view not in valid_views:
+            raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
 
-    with open(rear_video_output_path, "rb") as rear_video_file:
-        encoded_rear_video = base64.b64encode(rear_video_file.read()).decode("utf-8")
+    await browser_service.take_screenshot("screenshots", views_list)
 
-    with open(map_output_path, "rb") as map_file:
-        encoded_map = base64.b64encode(map_file.read()).decode("utf-8")
+    response_content = {}
+    for view in views_list:
+        file_path = f"screenshots/{view}.png"
+        try:
+            with open(file_path, "rb") as image_file:
+                encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
+                response_content[f"{view}_frame"] = encoded_image
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to read {view} image"
+            ) from exc
 
-    # Get the current Unix UTC timestamp (epoch time)
-    current_timestamp = int(datetime.utcnow().timestamp())
+    current_timestamp = datetime.utcnow().timestamp()
+    response_content["timestamp"] = current_timestamp
 
-    # Return JSON response with base64 images and timestamp
-    return JSONResponse(
-        content={
-            "front_video_frame": encoded_front_video,
-            "rear_video_frame": encoded_rear_video,
-            "map_frame": encoded_map,
-            "timestamp": current_timestamp,
-        }
-    )
+    return JSONResponse(content=response_content)
 
 
 @app.get("/data")
 async def get_data():
+    await need_start_mission()
     data = await browser_service.data()
     return JSONResponse(content=data)
+
+
+@app.post("/checkpoint-reached")
+async def checkpoint_reached(request: Request):
+    await need_start_mission()
+
+    bot_slug = os.getenv("BOT_SLUG")
+    mission_slug = os.getenv("MISSION_SLUG")
+    auth_header = os.getenv("SDK_API_TOKEN")
+
+    if not all([bot_slug, mission_slug, auth_header]):
+        raise HTTPException(
+            status_code=500, detail="Required environment variables not configured"
+        )
+
+    data = await browser_service.data()
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+
+    if not all([latitude, longitude]):
+        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {
+        "bot_slug": bot_slug,
+        "mission_slug": mission_slug,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    response = requests.post(
+        FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
+        headers=headers,
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code, detail=response.json().get("error", "Failed to send checkpoint data")
+        )
+
+    return JSONResponse(content={"message":"Checkpoint reached successfully"})
 
 
 if __name__ == "__main__":

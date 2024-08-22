@@ -29,7 +29,7 @@ $(document).ready(function () {
     const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
     const event = new CustomEvent("message-from-peer", { detail: controls });
     window.rtm_data = controls;
-    window.rtm_data.timestamp = Math.floor(Date.now() / 1000);
+    window.rtm_data.timestamp = (Date.now() / 1000).toFixed(6);
     const formattedMessage = formatMessage(controls);
     $("#messages").html(formattedMessage);
     document.dispatchEvent(event);
