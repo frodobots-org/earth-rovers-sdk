@@ -1,4 +1,4 @@
-# Earth Rovers SDK v4.0
+# Earth Rovers SDK v4.1
 
 ## Requirements
 
@@ -133,16 +133,13 @@ To enable the missions API you need to set the MISSION_SLUG environment variable
 MISSION_SLUG=mission-1
 ```
 
-If you just want to experiment with the bot without starting a mission you need to unset the MISSION_SLUG environment variable.
-```bash
-MISSION_SLUG=
-```
+If you just want to experiment with the bot without starting a mission you need to remove the MISSION_SLUG environment variable.
 
 `Note: Bots that are controlled by other players are not available for missions.`
 
 ### POST /start-mission
 ```bash
-curl -X POST http://localhost:8000/start-mission
+curl --location --request POST 'http://localhost:8000/start-mission'
 ```
 
 Example Response:
@@ -208,13 +205,13 @@ Example Response:
 
 With this endpoint you can force the mission to end in case you face some errors. Note that once you run this endpoint, the bot will be disconnected and will be available again for other players to use.
 
+In case you get stucked and don't want to lose your progress, you can use the /start-mission endpoint to refresh it.
+
 `⚠️  This endpoint should only be used in case of emergency. If you run this endpoint you will lose all your progress during the mission.`
 
 
 ```bash
-curl --location 'http://localhost:8000/end-mission' \
---header 'Content-Type: application/json' \
---data '{}'
+curl --location --request POST 'http://localhost:8000/end-mission'
 ```
 
 Example Response:
