@@ -80,7 +80,11 @@ Example Response:
     "latitude": 22.753774642944336,
     "longitude": 114.09095001220703,
     "vibration": 0.31,
-    "timestamp": 1720458328
+    "timestamp": 1724189733.208559,
+    "accel": [0.604, -0.853,0.076],
+    "gyro": [3.595, -3.885,-0.557],
+    "mag": [-75, 195,390],
+    "rpm": [0,0, 0, 0]
 }
 ```
 
@@ -138,7 +142,7 @@ MISSION_SLUG=
 
 ### POST /start-mission
 ```bash
-curl --location 'http://localhost:8000/start-mission'
+curl -X POST http://localhost:8000/start-mission
 ```
 
 Example Response:
@@ -188,7 +192,7 @@ Example Response:
 With this endpoint you can send the checkpoint that was scanned by the bot.
 
 ```bash
-curl --location 'http://localhost:8000/checkpoint-reached' \
+curl -X POST 'http://localhost:8000/checkpoint-reached' \
 --header 'Content-Type: application/json' \
 --data '{}'
 ```
@@ -197,6 +201,26 @@ Example Response:
 ```JSON
 {
     "message": "Checkpoint reached successfully"
+}
+```
+
+### POST /terminate-mission
+
+With this endpoint you can force the mission to end in case you face some errors. Note that once you run this endpoint, the bot will be disconnected and will be available again for other players to use.
+
+`⚠️  This endpoint should only be used in case of emergency. If you run this endpoint you will lose all your progress during the mission.`
+
+
+```bash
+curl --location 'http://localhost:8000/terminate-mission' \
+--header 'Content-Type: application/json' \
+--data '{}'
+```
+
+Example Response:
+```JSON
+{
+    "message": "Mission ended successfully"
 }
 ```
 
