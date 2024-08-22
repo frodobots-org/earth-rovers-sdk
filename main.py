@@ -168,6 +168,22 @@ async def start_ride(headers, bot_slug, mission_slug):
     return start_ride_response.json()
 
 
+async def end_ride(headers, bot_slug, mission_slug):
+    end_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
+    end_ride_response = requests.post(
+        FRODOBOTS_API_URL + "/sdk/end_ride",
+        headers=headers,
+        json=end_ride_data,
+        timeout=15,
+    )
+
+    if end_ride_response.status_code != 200:
+        raise HTTPException(
+            status_code=end_ride_response.status_code, detail="Failed to end ride"
+        )
+
+    return end_ride_response.json()
+
 async def retrieve_tokens(headers, bot_slug):
     data = {"bot_slug": bot_slug}
     response = requests.post(
@@ -269,6 +285,39 @@ async def start_mission():
     return JSONResponse(
         content={ "message": "Mission started successfully", "checkpoints_list": checkpoints_list_data }
     )
+
+
+@app.post("/end-mission")
+async def end_mission():
+    required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+
+    if missing_vars:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required environment variables: {', '.join(missing_vars)}",
+        )
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+    mission_slug = os.getenv("MISSION_SLUG")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    try:
+        end_ride_response = await end_ride(headers, bot_slug, mission_slug)
+        # Clear the stored auth and checkpoints data
+        global auth_response_data, checkpoints_list_data
+        auth_response_data = {}
+        checkpoints_list_data = {}
+        return JSONResponse(content={"message": "Mission ended successfully", "response": end_ride_response})
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to end mission: {str(e)}")
 
 
 @app.get("/")
