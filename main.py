@@ -162,7 +162,8 @@ async def start_ride(headers, bot_slug, mission_slug):
 
     if start_ride_response.status_code != 200:
         raise HTTPException(
-            status_code=start_ride_response.status_code, detail="Bot unavailable for SDK"
+            status_code=start_ride_response.status_code,
+            detail="Bot unavailable for SDK"
         )
 
     return start_ride_response.json()
@@ -283,7 +284,11 @@ async def start_mission():
     if not checkpoints_list_data:
         await get_checkpoints_list()
     return JSONResponse(
-        content={ "message": "Mission started successfully", "checkpoints_list": checkpoints_list_data }
+        status_code=200,
+        content={
+            "message": "Mission started successfully",
+            "checkpoints_list": checkpoints_list_data
+        }
     )
 
 
@@ -491,10 +496,13 @@ async def checkpoint_reached(request: Request):
 
     if response.status_code != 200:
         raise HTTPException(
-            status_code=response.status_code, detail=response.json().get("error", "Failed to send checkpoint data")
+            status_code=400, detail=response.json().get("error", "Failed to send checkpoint data")
         )
 
-    return JSONResponse(content={"message":"Checkpoint reached successfully"})
+    return JSONResponse(
+        status_code=200,
+        content={"message":"Checkpoint reached successfully"}
+    )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Earth Rovers SDK v4.1
+# Earth Rovers SDK v4.2
 
 ## Requirements
 
@@ -103,8 +103,8 @@ Example Response:
 
 ```JSON
 {
-    "front_video_frame": "base64_encoded_image",
-    "rear_video_frame": "base64_encoded_image",
+    "front_frame": "base64_encoded_image",
+    "rear_frame": "base64_encoded_image",
     "map_frame": "base64_encoded_image",
     "timestamp": 1724189733.208559
 }
@@ -142,10 +142,17 @@ If you just want to experiment with the bot without starting a mission you need 
 curl --location --request POST 'http://localhost:8000/start-mission'
 ```
 
-Example Response:
+Successful Response (Code: 200)
 ```JSON
 {
     "message": "Mission started successfully"
+}
+```
+
+Unsuccessful Response (Code: 400)
+```JSON
+{
+    "detail": "Bot unavailable for SDK"
 }
 ```
 
@@ -194,10 +201,17 @@ curl -X POST 'http://localhost:8000/checkpoint-reached' \
 --data '{}'
 ```
 
-Example Response:
+Successful Response (Code: 200)
 ```JSON
 {
     "message": "Checkpoint reached successfully"
+}
+```
+
+Unsuccessful Response (Code: 400)
+```JSON
+{
+    "message": "Bot is not within XX meters from the checkpoint"
 }
 ```
 
@@ -223,6 +237,8 @@ Example Response:
 
 
 # Latest updates
+- v.4.2: Updated Readme.md
+- v.4.1: End mission.
 - v.4.0: Added the ability to start a mission. Improved screenshots timings. Timestamps accuracy improved.
 - v3.3: Improved control speed.
 - v3.2: Added the ability to control the zoom level of the map.
