@@ -211,7 +211,7 @@ Successful Response (Code: 200)
 Unsuccessful Response (Code: 400)
 ```JSON
 {
-    "message": "Bot is not within XX meters from the checkpoint"
+    "detail": "Bot is not within XX meters from the checkpoint"
 }
 ```
 
