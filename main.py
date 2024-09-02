@@ -505,6 +505,39 @@ async def checkpoint_reached(request: Request):
     )
 
 
+@app.get("/missions-history")
+async def missions_history():
+    await auth_common()
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    data = {"bot_slug": bot_slug}
+
+    try:
+        response = requests.post(
+            FRODOBOTS_API_URL + "/sdk/rides_history",
+            headers=headers,
+            json=data,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Failed to retrieve missions history",
+            )
+
+        return JSONResponse(content=response.json())
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching missions history: {str(e)}")
+
+
 if __name__ == "__main__":
     from hypercorn.config import Config
 
