@@ -1,4 +1,4 @@
-# Earth Rovers SDK v4.2
+# Earth Rovers SDK v4.3
 
 ## Requirements
 
@@ -235,8 +235,35 @@ Example Response:
 }
 ```
 
+### GET /missions-history
+
+With this endpoint you can retrieve the missions history of the bot you've been riding.
+
+```bash
+curl --location 'http://localhost:8000/missions-history'
+```
+
+Example Response:
+```JSON
+{
+    "mission_rides": [
+        {
+            "id": 86855,
+            "mission_slug": "mission-1",
+            "success": true,
+            "latest_scanned_checkpoint": 3,
+            "status": "active",
+            "start_time": "2024-09-02T07:38:46.755Z",
+            "end_time": "2024-09-02T07:45:46.755Z"
+        },
+        // ...
+    ]
+}
+```
+
 
 # Latest updates
+- v.4.3: Missions history and more information on checkpoint reached.
 - v.4.2: Updated Readme.md
 - v.4.1: End mission.
 - v.4.0: Added the ability to start a mission. Improved screenshots timings. Timestamps accuracy improved.
