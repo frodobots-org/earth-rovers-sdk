@@ -494,14 +494,22 @@ async def checkpoint_reached(request: Request):
         timeout=15,
     )
 
+    response_data = response.json()
+
     if response.status_code != 200:
         raise HTTPException(
-            status_code=400, detail=response.json().get("error", "Failed to send checkpoint data")
+            status_code=response.status_code,
+            detail={
+                "error": response_data.get("error", "Failed to send checkpoint data"),
+                "proximate_distance_to_checkpoint": response_data.get("distance_to_checkpoint", "Unknown"),
+            }
         )
-
     return JSONResponse(
         status_code=200,
-        content={"message":"Checkpoint reached successfully"}
+        content={
+            "message": "Checkpoint reached successfully",
+            "next_checkpoint_sequence": response_data.get("next_checkpoint_sequence", "")
+        }
     )
 
 

@@ -81,10 +81,32 @@ Example Response:
     "longitude": 114.09095001220703,
     "vibration": 0.31,
     "timestamp": 1724189733.208559,
-    "accel": [0.604, -0.853,0.076],
-    "gyro": [3.595, -3.885,-0.557],
-    "mag": [-75, 195,390],
-    "rpm": [0,0, 0, 0]
+    "accels": [
+        [0.998,0.003,0.005,1725434620.858],
+        [1,0.002,0.005,1725434620.964],
+        [1,0.002,0.005,1725434620.964],
+        [1,0.003,0.004,1725434621.079],
+        [0.997,0.003,0.008,1725434621.192],
+        [0.998,0.003,0.002,1725434621.294]
+    ],
+    "gyros": [
+        [0.521,0.023,0.716,1725434620.913],
+        [0.552,0.023,0.732,1725434621.02],
+        [0.483,0.015,0.732,1725434621.122],
+        [0.407,-0.007,0.747,1725434621.239],
+        [0.453,0.061,0.724,1725434621.343]
+    ],
+    "mags": [
+        [-1002,967,12,1725434621.194]
+    ],
+
+    "rpms": [
+        [0,0,0,0,1725434567.194],
+        [0,0,0,0,1725434567.218],
+        [0,0,0,0,1725434597.682],
+        [0,0,0,0,1725434597.701],
+        [0,0,0,0,1725434597.726]
+    ],
 }
 ```
 
@@ -204,14 +226,18 @@ curl -X POST 'http://localhost:8000/checkpoint-reached' \
 Successful Response (Code: 200)
 ```JSON
 {
-    "message": "Checkpoint reached successfully"
+    "message": "Checkpoint reached successfully",
+    "next_checkpoint_sequence": 2
 }
 ```
 
 Unsuccessful Response (Code: 400)
 ```JSON
 {
-    "detail": "Bot is not within XX meters from the checkpoint"
+    "detail": {
+        "error": "Bot is not within XX meters from the checkpoint",
+        "proximate_distance_to_checkpoint": 16.87
+    }
 }
 ```
 
@@ -263,7 +289,7 @@ Example Response:
 
 
 # Latest updates
-- v.4.3: Missions history and more information on checkpoint reached.
+- v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
 - v.4.1: End mission.
 - v.4.0: Added the ability to start a mission. Improved screenshots timings. Timestamps accuracy improved.
