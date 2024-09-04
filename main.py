@@ -494,15 +494,56 @@ async def checkpoint_reached(request: Request):
         timeout=15,
     )
 
+    response_data = response.json()
+
     if response.status_code != 200:
         raise HTTPException(
-            status_code=400, detail=response.json().get("error", "Failed to send checkpoint data")
+            status_code=response.status_code,
+            detail={
+                "error": response_data.get("error", "Failed to send checkpoint data"),
+                "proximate_distance_to_checkpoint": response_data.get("distance_to_checkpoint", "Unknown"),
+            }
         )
-
     return JSONResponse(
         status_code=200,
-        content={"message":"Checkpoint reached successfully"}
+        content={
+            "message": "Checkpoint reached successfully",
+            "next_checkpoint_sequence": response_data.get("next_checkpoint_sequence", "")
+        }
     )
+
+
+@app.get("/missions-history")
+async def missions_history():
+    await auth_common()
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    data = {"bot_slug": bot_slug}
+
+    try:
+        response = requests.post(
+            FRODOBOTS_API_URL + "/sdk/rides_history",
+            headers=headers,
+            json=data,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Failed to retrieve missions history",
+            )
+
+        return JSONResponse(content=response.json())
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching missions history: {str(e)}")
 
 
 if __name__ == "__main__":
