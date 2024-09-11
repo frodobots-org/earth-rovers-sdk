@@ -14,9 +14,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Literal
-
+import asyncio
 from browser_service import BrowserService
-from rtm_client import RtmClient
 
 load_dotenv()
 
@@ -90,7 +89,8 @@ checkpoints_list_data = {}
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
-browser_service = BrowserService()
+# Initialize BrowserService with the desired number of concurrent browsers
+browser_service = BrowserService(max_browsers=3)
 
 
 async def auth_common():
@@ -412,11 +412,10 @@ async def get_screenshot(view_types: str = "rear,map,front"):
         if view not in valid_views:
             raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
 
-    await browser_service.take_screenshot("screenshots", views_list)
+    screenshots = await browser_service.take_screenshot("screenshots", views_list)
 
     response_content = {}
-    for view in views_list:
-        file_path = f"screenshots/{view}.png"
+    for view, file_path in screenshots.items():
         try:
             with open(file_path, "rb") as image_file:
                 encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
@@ -532,6 +531,10 @@ async def missions_history():
 
 if __name__ == "__main__":
     from hypercorn.config import Config
+    from hypercorn.asyncio import serve
 
     config = Config()
     config.bind = ["0.0.0.0:8000"]
+    config.workers = int(os.getenv("WORKERS", 4))
+
+    asyncio.run(serve(app, config))
