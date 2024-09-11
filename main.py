@@ -143,7 +143,7 @@ def get_env_tokens():
     app_id = os.getenv("APP_ID")
     bot_uid = os.getenv("BOT_UID")
 
-    if all([channel_name, rtc_token, rtm_token, userid, app_id]):
+    if all([channel_name, rtc_token, rtm_token, userid, app_id, bot_uid]):
         return {
             "CHANNEL_NAME": channel_name,
             "RTC_TOKEN": rtc_token,
