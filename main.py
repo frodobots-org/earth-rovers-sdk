@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Literal
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
@@ -81,7 +82,7 @@ class AuthResponse(BaseModel):
     RTM_TOKEN: str
     USERID: int
     APP_ID: str
-
+    BOT_UID: str
 
 # In-memory storage for the response
 auth_response_data = {}
@@ -126,6 +127,7 @@ async def auth_common():
         "RTM_TOKEN": response_data.get("RTM_TOKEN"),
         "USERID": response_data.get("USERID"),
         "APP_ID": response_data.get("APP_ID"),
+        "BOT_UID": response_data.get("BOT_UID"),
         "SPECTATOR_USERID": response_data.get("SPECTATOR_USERID"),
         "SPECTATOR_RTC_TOKEN": response_data.get("SPECTATOR_RTC_TOKEN"),
     }
@@ -139,6 +141,7 @@ def get_env_tokens():
     rtm_token = os.getenv("RTM_TOKEN")
     userid = os.getenv("USERID")
     app_id = os.getenv("APP_ID")
+    bot_uid = os.getenv("BOT_UID")
 
     if all([channel_name, rtc_token, rtm_token, userid, app_id]):
         return {
@@ -147,6 +150,7 @@ def get_env_tokens():
             "RTM_TOKEN": rtm_token,
             "USERID": userid,
             "APP_ID": app_id,
+            "BOT_UID": bot_uid,
         }
     return None
 
@@ -325,59 +329,39 @@ async def end_mission():
         raise HTTPException(status_code=500, detail=f"Failed to end mission: {str(e)}")
 
 
-@app.get("/")
-async def get_index(request: Request):
+async def render_index_html(is_spectator: bool):
     await need_start_mission()
     if not auth_response_data:
         await auth()
 
-    app_id = auth_response_data.get("APP_ID", "")
-    spectator_rtc_token = auth_response_data.get("SPECTATOR_RTC_TOKEN", "")
-    channel = auth_response_data.get("CHANNEL_NAME", "")
-    spectator_uid = auth_response_data.get("SPECTATOR_USERID", "")
-    checkpoints_list = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
-    map_zoom_level = os.getenv("MAP_ZOOM_LEVEL", "18")
+    token_type: Literal["SPECTATOR_", ""] = "SPECTATOR_" if is_spectator else ""
+
+    template_vars = {
+        "appid": auth_response_data.get("APP_ID", ""),
+        "rtc_token": auth_response_data.get(f"{token_type}RTC_TOKEN", ""),
+        "rtm_token": "" if is_spectator else auth_response_data.get("RTM_TOKEN", ""),
+        "channel": auth_response_data.get("CHANNEL_NAME", ""),
+        "uid": auth_response_data.get(f"{token_type}USERID", ""),
+        "bot_uid": auth_response_data.get("BOT_UID", ""),
+        "checkpoints_list": json.dumps(checkpoints_list_data.get("checkpoints_list", [])),
+        "map_zoom_level": os.getenv("MAP_ZOOM_LEVEL", "18"),
+    }
 
     with open("index.html", "r", encoding="utf-8") as file:
         html_content = file.read()
 
-    html_content = html_content.replace("{{ appid }}", app_id)
-    html_content = html_content.replace("{{ rtc_token }}", spectator_rtc_token)
-    html_content = html_content.replace("{{ channel }}", channel)
-    html_content = html_content.replace("{{ uid }}", str(spectator_uid))
-    html_content = html_content.replace("{{ rtm_token }}", "")
-    html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_list)
-    html_content = html_content.replace("{{ map_zoom_level }}", map_zoom_level)
+    for key, value in template_vars.items():
+        html_content = html_content.replace(f"{{{{ {key} }}}}", str(value))
 
     return HTMLResponse(content=html_content, status_code=200)
 
+@app.get("/")
+async def get_index(request: Request):
+    return await render_index_html(is_spectator=True)
 
 @app.get("/sdk")
 async def sdk(request: Request):
-    await need_start_mission()
-    if not auth_response_data:
-        await auth()
-
-    app_id = auth_response_data.get("APP_ID", "")
-    rtc_token = auth_response_data.get("RTC_TOKEN", "")
-    rtm_token = auth_response_data.get("RTM_TOKEN", "")
-    channel = auth_response_data.get("CHANNEL_NAME", "")
-    uid = auth_response_data.get("USERID", "")
-    checkpoints_list = json.dumps(checkpoints_list_data.get("checkpoints_list", []))
-    map_zoom_level = os.getenv("MAP_ZOOM_LEVEL", "18")
-
-    with open("index.html", "r", encoding="utf-8") as file:
-        html_content = file.read()
-
-    html_content = html_content.replace("{{ appid }}", app_id)
-    html_content = html_content.replace("{{ rtc_token }}", rtc_token)
-    html_content = html_content.replace("{{ rtm_token }}", rtm_token)
-    html_content = html_content.replace("{{ channel }}", channel)
-    html_content = html_content.replace("{{ uid }}", str(uid))
-    html_content = html_content.replace("{{ checkpoints_list }}", checkpoints_list)
-    html_content = html_content.replace("{{ map_zoom_level }}", map_zoom_level)
-
-    return HTMLResponse(content=html_content, status_code=200)
+    return await render_index_html(is_spectator=False)
 
 
 @app.post("/control-legacy")

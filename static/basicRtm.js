@@ -3,9 +3,7 @@ $(document).ready(function () {
   const USER_ID = $("#uid").val();
   const TOKEN = $("#rtm_token").val();
   const channelName = $("#channel").val(); // Replace with your desired channel name
-  const botUid = channelName.startsWith("sdk_")
-    ? channelName.slice(4)
-    : channelName;
+  const botUid = $("#bot_uid").val();
 
   // Create an instance of the Agora RTM client
   const rtmClient = AgoraRTM.createInstance(APP_ID);
