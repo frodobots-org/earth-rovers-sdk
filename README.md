@@ -1,4 +1,4 @@
-# Earth Rovers SDK v4.3
+# Earth Rovers SDK v4.4
 
 ## Requirements
 
@@ -289,6 +289,7 @@ Example Response:
 
 
 # Latest updates
+- v.4.4: Minor Bugfixes. Spectate Rides.
 - v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
 - v.4.1: End mission.
