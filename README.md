@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="https://cdn.prod.website-files.com/66042185882fa3428f4dd6f1/662bee5b5ef7ed094186a56a_frodobots_ai_logo-p-500.png" alt="Earth Rovers SDK Logo" width="140">
+  <h3 align="center">Frodobots AI</h3>
+  <br>
+</p>
+
 # Earth Rovers SDK v4.4
 
 ## Requirements
@@ -7,6 +13,17 @@ In order to use or run this SDK you need to have an account registered with Frod
 - Python 3.9 or higher
 - Frodobots API key
 - Google Chrome installed
+
+## Hardware Specs
+
+<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
+  <img src="assets/v5.2.png" alt="Hardware Specifications" width="200">
+  <img src="assets/axis.jpg" alt="Axis Camera" width="200">
+</div>
+
+For full details on the hardware specifications, please refer to the [Frodobots Hardware Specifications](https://docs.google.com/document/d/1Px-rNy0wQeG74mWcReiV4dEk5u4nfMPTVh-C4pXoieY).
+
+More details about the bot sensors and actuators can be found [here](https://colab.research.google.com/#fileId=https%3A//huggingface.co/datasets/frodobots/FrodoBots-2K/blob/main/helpercode.ipynb).
 
 ## Getting Started
 
