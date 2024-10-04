@@ -84,6 +84,7 @@ class AuthResponse(BaseModel):
     APP_ID: str
     BOT_UID: str
 
+
 # In-memory storage for the response
 auth_response_data = {}
 checkpoints_list_data = {}
@@ -167,7 +168,7 @@ async def start_ride(headers, bot_slug, mission_slug):
     if start_ride_response.status_code != 200:
         raise HTTPException(
             status_code=start_ride_response.status_code,
-            detail="Bot unavailable for SDK"
+            detail="Bot unavailable for SDK",
         )
 
     return start_ride_response.json()
@@ -188,6 +189,7 @@ async def end_ride(headers, bot_slug, mission_slug):
         )
 
     return end_ride_response.json()
+
 
 async def retrieve_tokens(headers, bot_slug):
     data = {"bot_slug": bot_slug}
@@ -291,8 +293,8 @@ async def start_mission():
         status_code=200,
         content={
             "message": "Mission started successfully",
-            "checkpoints_list": checkpoints_list_data
-        }
+            "checkpoints_list": checkpoints_list_data,
+        },
     )
 
 
@@ -322,7 +324,7 @@ async def end_mission():
         global auth_response_data, checkpoints_list_data
         auth_response_data = {}
         checkpoints_list_data = {}
-        return JSONResponse(content={ "message": "Mission ended successfully" })
+        return JSONResponse(content={"message": "Mission ended successfully"})
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -343,7 +345,9 @@ async def render_index_html(is_spectator: bool):
         "channel": auth_response_data.get("CHANNEL_NAME", ""),
         "uid": auth_response_data.get(f"{token_type}USERID", ""),
         "bot_uid": auth_response_data.get("BOT_UID", ""),
-        "checkpoints_list": json.dumps(checkpoints_list_data.get("checkpoints_list", [])),
+        "checkpoints_list": json.dumps(
+            checkpoints_list_data.get("checkpoints_list", [])
+        ),
         "map_zoom_level": os.getenv("MAP_ZOOM_LEVEL", "18"),
     }
 
@@ -355,9 +359,11 @@ async def render_index_html(is_spectator: bool):
 
     return HTMLResponse(content=html_content, status_code=200)
 
+
 @app.get("/")
 async def get_index(request: Request):
     return await render_index_html(is_spectator=True)
+
 
 @app.get("/sdk")
 async def sdk(request: Request):
@@ -439,6 +445,26 @@ async def get_data():
     return JSONResponse(content=data)
 
 
+@app.get("/front")
+async def get_front_frame():
+    await need_start_mission()
+    front_frame = await browser_service.front()
+    if front_frame:
+        return JSONResponse(content={"front_frame": front_frame})
+    else:
+        raise HTTPException(status_code=404, detail="Front frame not available")
+
+
+@app.get("/rear")
+async def get_rear_frame():
+    await need_start_mission()
+    rear_frame = await browser_service.rear()
+    if rear_frame:
+        return JSONResponse(content={"rear_frame": rear_frame})
+    else:
+        raise HTTPException(status_code=404, detail="Rear frame not available")
+
+
 @app.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
     await need_start_mission()
@@ -485,15 +511,19 @@ async def checkpoint_reached(request: Request):
             status_code=response.status_code,
             detail={
                 "error": response_data.get("error", "Failed to send checkpoint data"),
-                "proximate_distance_to_checkpoint": response_data.get("distance_to_checkpoint", "Unknown"),
-            }
+                "proximate_distance_to_checkpoint": response_data.get(
+                    "distance_to_checkpoint", "Unknown"
+                ),
+            },
         )
     return JSONResponse(
         status_code=200,
         content={
             "message": "Checkpoint reached successfully",
-            "next_checkpoint_sequence": response_data.get("next_checkpoint_sequence", "")
-        }
+            "next_checkpoint_sequence": response_data.get(
+                "next_checkpoint_sequence", ""
+            ),
+        },
     )
 
 
@@ -527,7 +557,9 @@ async def missions_history():
 
         return JSONResponse(content=response.json())
     except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching missions history: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching missions history: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

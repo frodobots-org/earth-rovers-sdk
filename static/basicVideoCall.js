@@ -300,22 +300,62 @@ async function leave() {
  */
 async function subscribe(user, mediaType) {
   const uid = user.uid;
-  // subscribe to a remote user
   await client.subscribe(user, mediaType);
   console.log("subscribe success");
   if (mediaType === "video") {
+    const playerWidth =
+      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
+    const playerHeight =
+      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
+
     const player = $(`
       <div id="player-wrapper-${uid}">
         <p class="player-name">(${uid})</p>
-        <div id="player-${uid}" class="player" style="width: ${
-      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto"
-    }; height: ${
-      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto"
-    };"></div>
+        <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
       </div>
     `);
     $("#remote-playerlist").append(player);
     user.videoTrack.play(`player-${uid}`);
+
+    const capturedFrameDiv = $(`
+      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight};">
+        <p>Captured Frames (${uid})</p>
+        <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
+      </div>
+    `);
+    $("#captured-frames").append(capturedFrameDiv);
+
+    let frameCount = 0;
+    let lastTime = performance.now();
+    const targetFPS = 50;
+    const interval = 1000 / targetFPS;
+
+    function captureFrame() {
+      const currentTime = performance.now();
+      const elapsedTime = currentTime - lastTime;
+
+      if (elapsedTime >= interval) {
+        captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
+          $(`#captured-image-${uid}`).attr("src", base64Frame);
+
+          // Store the latest base64 frame for this UID
+          lastBase64Frames[uid] = base64Frame;
+
+          frameCount++;
+
+          if (frameCount === targetFPS) {
+            const actualFPS = (frameCount / (currentTime - lastTime)) * 1000;
+            console.log(`Actual FPS: ${actualFPS.toFixed(2)}`);
+            frameCount = 0;
+            lastTime = currentTime;
+          }
+        });
+      }
+
+      requestAnimationFrame(captureFrame);
+    }
+
+    captureFrame();
   }
   if (mediaType === "audio") {
     user.audioTrack.play();
@@ -355,5 +395,36 @@ function getCodec() {
     }
   }
   return value;
+}
+
+async function captureFrameAsBase64(videoTrack) {
+  const frame = await videoTrack.getCurrentFrameData();
+  const canvas = document.createElement("canvas");
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  const ctx = canvas.getContext("2d");
+  ctx.putImageData(frame, 0, 0);
+  return canvas.toDataURL("image/jpeg", 1.0);
+}
+
+// Add at the beginning of the file
+const lastBase64Frames = {};
+
+// Function to get the latest base64 frame for a specific UID
+function getLastBase64Frame(uid) {
+  return lastBase64Frames[uid] || null;
+}
+
+// Function to print the latest base64 frame for a specific UID
+function printLastBase64Frame(uid) {
+  const base64Frame = getLastBase64Frame(uid);
+  if (base64Frame) {
+    console.log(
+      `Latest base64 frame for UID ${uid}:`,
+      base64Frame.substring(0, 100) + "..."
+    );
+  } else {
+    console.log(`No base64 frame available for UID ${uid}`);
+  }
 }
 
