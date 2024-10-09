@@ -5,6 +5,8 @@ import json
 import logging
 import os
 from datetime import datetime
+import time
+import asyncio
 
 import requests
 from dotenv import load_dotenv
@@ -438,6 +440,24 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     return JSONResponse(content=response_content)
 
 
+@app.get("/screenshot_v2")
+async def get_screenshot_v2(view_types: str = "rear,map,front"):
+    await need_start_mission()
+    valid_views = {"rear", "map", "front"}
+    views_list = view_types.split(",")
+
+    for view in views_list:
+        if view not in valid_views:
+            raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
+
+    try:
+        screenshot_data = await browser_service.take_screenshot_v2(views_list)
+        return JSONResponse(content=screenshot_data)
+    except Exception as e:
+        logger.error("Error taking screenshot_v2: %s", str(e))
+        raise HTTPException(status_code=500, detail="Failed to take screenshot") from e
+
+
 @app.get("/data")
 async def get_data():
     await need_start_mission()
@@ -448,17 +468,33 @@ async def get_data():
 @app.get("/front")
 async def get_front_frame():
     await need_start_mission()
+    start_time = time.time()
     front_frame = await browser_service.front()
+    execution_time = time.time() - start_time
+    logging.info(f"Execution time for /front: {execution_time:.4f} seconds")
     if front_frame:
         return JSONResponse(content={"front_frame": front_frame})
     else:
         raise HTTPException(status_code=404, detail="Front frame not available")
 
 
+@app.get("/map")
+async def get_map_frame():
+    await need_start_mission()
+    map_frame = await browser_service.map()
+    if map_frame:
+        return JSONResponse(content={"map_frame": map_frame})
+    else:
+        raise HTTPException(status_code=404, detail="Map frame not available")
+
+
 @app.get("/rear")
 async def get_rear_frame():
     await need_start_mission()
+    start_time = time.time()
     rear_frame = await browser_service.rear()
+    execution_time = time.time() - start_time
+    logging.info(f"Execution time for /rear: {execution_time:.4f} seconds")
     if rear_frame:
         return JSONResponse(content={"rear_frame": rear_frame})
     else:
@@ -560,6 +596,35 @@ async def missions_history():
         raise HTTPException(
             status_code=500, detail=f"Error fetching missions history: {str(e)}"
         )
+
+
+@app.get("/screenshot_v3")
+async def get_screenshot_v3():
+    await need_start_mission()
+
+    async def get_frame(frame_type):
+        start_time = time.time()
+        frame = await getattr(browser_service, frame_type)()
+        execution_time = time.time() - start_time
+        logging.info(f"Execution time for {frame_type}: {execution_time:.4f} seconds")
+        return {f"{frame_type}_frame": frame}
+
+    rear_task = asyncio.create_task(get_frame("rear"))
+    front_task = asyncio.create_task(get_frame("front"))
+
+    results = await asyncio.gather(rear_task, front_task)
+
+    response_data = {}
+    for result in results:
+        response_data.update(result)
+
+    if not response_data:
+        raise HTTPException(status_code=404, detail="Frames not available")
+
+    current_timestamp = datetime.utcnow().timestamp()
+    response_data["timestamp"] = current_timestamp
+
+    return JSONResponse(content=response_data)
 
 
 if __name__ == "__main__":

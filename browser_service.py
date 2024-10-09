@@ -136,3 +136,31 @@ class BrowserService:
             await self.browser.close()
             self.browser = None
             self.page = None
+
+    async def take_screenshot_v2(self, elements):
+        await self.initialize_browser()
+
+        element_map = {
+            "front": "lastBase64Frames[1000]",
+            "rear": "lastBase64Frames[1001]",
+        }
+
+        valid_elements = [name for name in elements if name in element_map]
+        invalid_elements = set(elements) - set(valid_elements)
+
+        if invalid_elements:
+            print(f"Invalid elements: {', '.join(invalid_elements)}")
+
+        js_code = """
+        () => {
+            const frames = {};
+            %s
+            frames.timestamp = Date.now();
+            return frames;
+        }
+        """ % "\n".join(
+            f"frames['{name}_frame'] = {element_map[name]} || null;"
+            for name in valid_elements
+        )
+
+        return await self.page.evaluate(js_code)

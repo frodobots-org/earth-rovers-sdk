@@ -264,6 +264,8 @@ async function join() {
   // Publish the local video and audio tracks to the channel.
   // await client.publish(Object.values(localTracks));
   // console.log("publish success");
+
+  $("#captured-frames").css("display", DEBUG_MODE ? "block" : "none");
 }
 
 /*
@@ -318,12 +320,24 @@ async function subscribe(user, mediaType) {
     user.videoTrack.play(`player-${uid}`);
 
     const capturedFrameDiv = $(`
-      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight};">
+      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
+      DEBUG_MODE ? "block" : "none"
+    };">
         <p>Captured Frames (${uid})</p>
         <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
+        <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
+        <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
       </div>
     `);
     $("#captured-frames").append(capturedFrameDiv);
+
+    $(`#download-frame-${uid}`).click(() => {
+      downloadFrame(uid);
+    });
+
+    $(`#download-base64-${uid}`).click(() => {
+      downloadBase64(uid);
+    });
 
     let frameCount = 0;
     let lastTime = performance.now();
@@ -337,8 +351,6 @@ async function subscribe(user, mediaType) {
       if (elapsedTime >= interval) {
         captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
           $(`#captured-image-${uid}`).attr("src", base64Frame);
-
-          // Store the latest base64 frame for this UID
           lastBase64Frames[uid] = base64Frame;
 
           frameCount++;
@@ -404,10 +416,11 @@ async function captureFrameAsBase64(videoTrack) {
   canvas.height = frame.height;
   const ctx = canvas.getContext("2d");
   ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL("image/jpeg", 1.0);
+  return canvas.toDataURL("image/png", 1.0);
 }
 
 // Add at the beginning of the file
+const DEBUG_MODE = true;
 const lastBase64Frames = {};
 
 // Function to get the latest base64 frame for a specific UID
@@ -425,6 +438,35 @@ function printLastBase64Frame(uid) {
     );
   } else {
     console.log(`No base64 frame available for UID ${uid}`);
+  }
+}
+
+function downloadFrame(uid) {
+  const base64Frame = getLastBase64Frame(uid);
+  if (base64Frame) {
+    const downloadLink = document.createElement("a");
+    downloadLink.href = base64Frame;
+    downloadLink.download = `frame_${uid}.png`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+  } else {
+    console.log(`No frame available for download for UID ${uid}`);
+  }
+}
+
+function downloadBase64(uid) {
+  const base64Frame = getLastBase64Frame(uid);
+  if (base64Frame) {
+    const blob = new Blob([base64Frame], { type: "text/plain" });
+    const downloadLink = document.createElement("a");
+    downloadLink.href = URL.createObjectURL(blob);
+    downloadLink.download = `base64_frame_${uid}.txt`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+  } else {
+    console.log(`No base64 frame available for download for UID ${uid}`);
   }
 }
 
