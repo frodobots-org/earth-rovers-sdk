@@ -420,7 +420,7 @@ async function captureFrameAsBase64(videoTrack) {
 }
 
 // Add at the beginning of the file
-const DEBUG_MODE = true;
+const DEBUG_MODE = false;
 const lastBase64Frames = {};
 
 // Function to get the latest base64 frame for a specific UID
