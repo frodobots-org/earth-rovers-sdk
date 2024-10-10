@@ -69,8 +69,8 @@
           );
           const data = await response.json();
 
-          rearFrame.src = data.rear_frame;
-          frontFrame.src = data.front_frame;
+          rearFrame.src = addBase64PngHeader(data.rear_frame);
+          frontFrame.src = addBase64PngHeader(data.front_frame);
           timestampElement.textContent = `Timestamp: ${data.timestamp}`;
 
           updateFps("rear", data.timestamp);
@@ -78,6 +78,13 @@
         } catch (error) {
           console.error("Error fetching frames:", error);
         }
+      };
+
+      const addBase64PngHeader = (base64String) => {
+        const pngHeader = "data:image/png;base64,";
+        return base64String.startsWith(pngHeader)
+          ? base64String
+          : pngHeader + base64String;
       };
 
       const updateFps = (camera, timestamp) => {

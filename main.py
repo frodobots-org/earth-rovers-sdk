@@ -589,6 +589,8 @@ async def get_screenshot_v2():
         frame = await getattr(browser_service, frame_type)()
         execution_time = time.time() - start_time
         logging.info(f"Execution time for {frame_type}: {execution_time:.4f} seconds")
+
+        _, frame = frame.split(",", 1)
         return {f"{frame_type}_frame": frame}
 
     rear_task = asyncio.create_task(get_frame("rear"))
@@ -603,8 +605,7 @@ async def get_screenshot_v2():
     if not response_data:
         raise HTTPException(status_code=404, detail="Frames not available")
 
-    current_timestamp = datetime.utcnow().timestamp()
-    response_data["timestamp"] = current_timestamp
+    response_data["timestamp"] = datetime.utcnow().timestamp()
 
     return JSONResponse(content=response_data)
 
