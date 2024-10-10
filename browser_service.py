@@ -99,6 +99,28 @@ class BrowserService:
 
         return bot_data
 
+    async def front(self) -> str:
+        await self.initialize_browser()
+
+        front_frame = await self.page.evaluate(
+            """() => {
+        return lastBase64Frames[1000] || null;
+        }"""
+        )
+
+        return front_frame
+
+    async def rear(self) -> str:
+        await self.initialize_browser()
+
+        rear_frame = await self.page.evaluate(
+            """() => {
+        return lastBase64Frames[1001] || null;
+        }"""
+        )
+
+        return rear_frame
+
     async def send_message(self, message: dict):
         await self.initialize_browser()
 
