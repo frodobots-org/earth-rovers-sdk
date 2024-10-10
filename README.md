@@ -8,11 +8,20 @@
 
 ## Requirements
 
-In order to use or run this SDK you need to have an account registered with Frodobots. This is meant for research purposes, if you are interested please reach us here: [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
+[Change to Flow v2]
 
+1. Acquire one of our Earth Rovers in here: [Earth Rovers Shop](https://shop.frodobots.com/).
+
+
+2. Complete your Bot activation.
+
+3. After completing your bot activation. Get your SDK Access token in [here](https://my.frodobots.com/owner/settings).
+
+
+## Software Requirements
 - Python 3.9 or higher
 - Frodobots API key
-- Google Chrome installed
+- Google Chrome (Or any browser) installed
 
 ## Hardware Specs
 
