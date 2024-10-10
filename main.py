@@ -440,24 +440,6 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     return JSONResponse(content=response_content)
 
 
-@app.get("/screenshot_v2")
-async def get_screenshot_v2(view_types: str = "rear,map,front"):
-    await need_start_mission()
-    valid_views = {"rear", "map", "front"}
-    views_list = view_types.split(",")
-
-    for view in views_list:
-        if view not in valid_views:
-            raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
-
-    try:
-        screenshot_data = await browser_service.take_screenshot_v2(views_list)
-        return JSONResponse(content=screenshot_data)
-    except Exception as e:
-        logger.error("Error taking screenshot_v2: %s", str(e))
-        raise HTTPException(status_code=500, detail="Failed to take screenshot") from e
-
-
 @app.get("/data")
 async def get_data():
     await need_start_mission()
@@ -598,8 +580,8 @@ async def missions_history():
         )
 
 
-@app.get("/screenshot_v3")
-async def get_screenshot_v3():
+@app.get("/screenshot_v2")
+async def get_screenshot_v2():
     await need_start_mission()
 
     async def get_frame(frame_type):

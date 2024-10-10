@@ -65,7 +65,7 @@
       const fetchFrames = async () => {
         try {
           const response = await fetch(
-            "http://localhost:8000/screenshot_v3?view_types=front,rear"
+            "http://localhost:8000/screenshot_v2?view_types=front,rear"
           );
           const data = await response.json();
 
@@ -99,7 +99,7 @@
       };
 
       fetchFrames();
-      setInterval(fetchFrames, 1000 / 25);
+      setInterval(fetchFrames, 1000 / 20);
     </script>
   </body>
 </html>
