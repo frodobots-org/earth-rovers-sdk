@@ -8,8 +8,6 @@
 
 ## Requirements
 
-[Change to Flow v2]
-
 1. Acquire one of our Earth Rovers in here: [Earth Rovers Shop](https://shop.frodobots.com/).
 
 
