@@ -6,7 +6,7 @@ import cv2
 
 
 async def fetch_and_display_image():
-    url = "http://localhost:8000/front"
+    url = "http://localhost:8000/v1/front"
 
     async with aiohttp.ClientSession() as session:
         while True:

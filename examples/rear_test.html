@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Live Front View Frame</title>
+    <title>Live Rear View Frame</title>
     <style>
       body {
         display: flex;
@@ -20,25 +20,24 @@
     </style>
   </head>
   <body>
-    <h1>Live Front View Frame</h1>
-    <img id="frontFrame" class="frame" alt="Front View" />
+    <h1>Live Rear View Frame</h1>
+    <img id="rearFrame" class="frame" alt="Rear View" />
 
     <script>
-      const frontFrame = document.getElementById("frontFrame");
+      const rearFrame = document.getElementById("rearFrame");
 
-      const fetchFrontFrame = async () => {
+      const fetchRearFrame = async () => {
         try {
-          const response = await fetch("http://localhost:8000/front");
+          const response = await fetch("http://localhost:8000/v1/rear");
           const data = await response.json();
-
-          frontFrame.src = data.front_frame;
+          rearFrame.src = `data:image/png;base64,${data.rear_frame}`;
         } catch (error) {
-          console.error("Error fetching front frame:", error);
+          console.error("Error fetching rear frame:", error);
         }
       };
 
-      fetchFrontFrame();
-      setInterval(fetchFrontFrame, 1000 / 50);
+      fetchRearFrame();
+      setInterval(fetchRearFrame, 1000 / 50);
     </script>
   </body>
 </html>

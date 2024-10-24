@@ -1,11 +1,9 @@
 import base64
 import functools
-import html
 import json
 import logging
 import os
 from datetime import datetime
-import time
 import asyncio
 
 import requests
@@ -447,28 +445,6 @@ async def get_data():
     return JSONResponse(content=data)
 
 
-@app.get("/front")
-async def get_front_frame():
-    await need_start_mission()
-    front_frame = await browser_service.front()
-    if front_frame:
-        _, base64_data = front_frame.split(",", 1)
-        return JSONResponse(content={"front_frame": base64_data})
-    else:
-        raise HTTPException(status_code=404, detail="Front frame not available")
-
-
-@app.get("/rear")
-async def get_rear_frame():
-    await need_start_mission()
-    rear_frame = await browser_service.rear()
-    if rear_frame:
-        _, base64_data = rear_frame.split(",", 1)
-        return JSONResponse(content={"rear_frame": base64_data})
-    else:
-        raise HTTPException(status_code=404, detail="Rear frame not available")
-
-
 @app.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
     await need_start_mission()
@@ -566,16 +542,12 @@ async def missions_history():
         )
 
 
-@app.get("/screenshot_v2")
+@app.get("/v1/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()
 
     async def get_frame(frame_type):
-        start_time = time.time()
         frame = await getattr(browser_service, frame_type)()
-        execution_time = time.time() - start_time
-        logging.info(f"Execution time for {frame_type}: {execution_time:.4f} seconds")
-
         _, frame = frame.split(",", 1)
         return {f"{frame_type}_frame": frame}
 
@@ -601,3 +573,25 @@ if __name__ == "__main__":
 
     config = Config()
     config.bind = ["0.0.0.0:8000"]
+
+
+@app.get("/v1/front")
+async def get_front_frame():
+    await need_start_mission()
+    front_frame = await browser_service.front()
+    if front_frame:
+        _, base64_data = front_frame.split(",", 1)
+        return JSONResponse(content={"front_frame": base64_data})
+    else:
+        raise HTTPException(status_code=404, detail="Front frame not available")
+
+
+@app.get("/v1/rear")
+async def get_rear_frame():
+    await need_start_mission()
+    rear_frame = await browser_service.rear()
+    if rear_frame:
+        _, base64_data = rear_frame.split(",", 1)
+        return JSONResponse(content={"rear_frame": base64_data})
+    else:
+        raise HTTPException(status_code=404, detail="Rear frame not available")
