@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Rear View Frame</title>
+    <style>
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+      .frame {
+        margin: 10px;
+        max-width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Live Rear View Frame</h1>
+    <img id="rearFrame" class="frame" alt="Rear View" />
+
+    <script>
+      const rearFrame = document.getElementById("rearFrame");
+
+      const fetchRearFrame = async () => {
+        try {
+          const response = await fetch("http://localhost:8000/v1/rear");
+          const data = await response.json();
+          rearFrame.src = `data:image/png;base64,${data.rear_frame}`;
+        } catch (error) {
+          console.error("Error fetching rear frame:", error);
+        }
+      };
+
+      fetchRearFrame();
+      setInterval(fetchRearFrame, 1000 / 50);
+    </script>
+  </body>
+</html>
+
