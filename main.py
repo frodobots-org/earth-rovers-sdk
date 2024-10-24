@@ -17,6 +17,7 @@ from typing import Literal
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
+from fastapi import WebSocket, WebSocketDisconnect
 
 load_dotenv()
 
@@ -595,3 +596,28 @@ async def get_rear_frame():
         return JSONResponse(content={"rear_frame": base64_data})
     else:
         raise HTTPException(status_code=404, detail="Rear frame not available")
+
+
+@app.websocket("/api/ws/screenshots")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await need_start_mission()
+            rear_frame = await browser_service.rear()
+            front_frame = await browser_service.front()
+            timestamp = datetime.utcnow().timestamp()
+
+            if rear_frame and front_frame:
+                _, rear_base64 = rear_frame.split(",", 1)
+                _, front_base64 = front_frame.split(",", 1)
+                await websocket.send_json(
+                    {
+                        "rear_frame": rear_base64,
+                        "front_frame": front_base64,
+                        "timestamp": timestamp,
+                    }
+                )
+            await asyncio.sleep(1 / 60)
+    except WebSocketDisconnect:
+        print("Client disconnected")
