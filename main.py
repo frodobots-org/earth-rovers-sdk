@@ -450,35 +450,21 @@ async def get_data():
 @app.get("/front")
 async def get_front_frame():
     await need_start_mission()
-    start_time = time.time()
     front_frame = await browser_service.front()
-    execution_time = time.time() - start_time
-    logging.info(f"Execution time for /front: {execution_time:.4f} seconds")
     if front_frame:
-        return JSONResponse(content={"front_frame": front_frame})
+        _, base64_data = front_frame.split(",", 1)
+        return JSONResponse(content={"front_frame": base64_data})
     else:
         raise HTTPException(status_code=404, detail="Front frame not available")
-
-
-@app.get("/map")
-async def get_map_frame():
-    await need_start_mission()
-    map_frame = await browser_service.map()
-    if map_frame:
-        return JSONResponse(content={"map_frame": map_frame})
-    else:
-        raise HTTPException(status_code=404, detail="Map frame not available")
 
 
 @app.get("/rear")
 async def get_rear_frame():
     await need_start_mission()
-    start_time = time.time()
     rear_frame = await browser_service.rear()
-    execution_time = time.time() - start_time
-    logging.info(f"Execution time for /rear: {execution_time:.4f} seconds")
     if rear_frame:
-        return JSONResponse(content={"rear_frame": rear_frame})
+        _, base64_data = rear_frame.split(",", 1)
+        return JSONResponse(content={"rear_frame": base64_data})
     else:
         raise HTTPException(status_code=404, detail="Rear frame not available")
 

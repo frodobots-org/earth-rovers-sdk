@@ -242,29 +242,6 @@ async function join() {
     options.token || null,
     options.uid || null
   );
-
-  // Join the channel.
-  // options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
-  // if (!localTracks.audioTrack) {
-  //   localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-  //     encoderConfig: "music_standard"
-  //   });
-  // }
-  // if (!localTracks.videoTrack) {
-  //   localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
-  //     encoderConfig: curVideoProfile.value
-  //   });
-  // }
-
-  // Play the local video track to the local browser and update the UI with the user ID.
-  // localTracks.videoTrack.play("local-player");
-  // $("#local-player-name").text(`localVideo(${options.uid})`);
-  // $("#joined-setup").css("display", "flex");
-
-  // Publish the local video and audio tracks to the channel.
-  // await client.publish(Object.values(localTracks));
-  // console.log("publish success");
-
   $("#captured-frames").css("display", DEBUG_MODE ? "block" : "none");
 }
 
@@ -331,40 +308,13 @@ async function subscribe(user, mediaType) {
     `);
     $("#captured-frames").append(capturedFrameDiv);
 
-    $(`#download-frame-${uid}`).click(() => {
-      downloadFrame(uid);
-    });
-
-    $(`#download-base64-${uid}`).click(() => {
-      downloadBase64(uid);
-    });
-
-    let frameCount = 0;
-    let lastTime = performance.now();
-    const targetFPS = 50;
-    const interval = 1000 / targetFPS;
-
     function captureFrame() {
-      const currentTime = performance.now();
-      const elapsedTime = currentTime - lastTime;
+      captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
+        $(`#captured-image-${uid}`).attr("src", base64Frame);
+        lastBase64Frames[uid] = base64Frame;
+      });
 
-      if (elapsedTime >= interval) {
-        captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
-          $(`#captured-image-${uid}`).attr("src", base64Frame);
-          lastBase64Frames[uid] = base64Frame;
-
-          frameCount++;
-
-          if (frameCount === targetFPS) {
-            const actualFPS = (frameCount / (currentTime - lastTime)) * 1000;
-            console.log(`Actual FPS: ${actualFPS.toFixed(2)}`);
-            frameCount = 0;
-            lastTime = currentTime;
-          }
-        });
-      }
-
-      requestAnimationFrame(captureFrame);
+      setTimeout(captureFrame, 0.01);
     }
 
     captureFrame();
@@ -426,47 +376,5 @@ const lastBase64Frames = {};
 // Function to get the latest base64 frame for a specific UID
 function getLastBase64Frame(uid) {
   return lastBase64Frames[uid] || null;
-}
-
-// Function to print the latest base64 frame for a specific UID
-function printLastBase64Frame(uid) {
-  const base64Frame = getLastBase64Frame(uid);
-  if (base64Frame) {
-    console.log(
-      `Latest base64 frame for UID ${uid}:`,
-      base64Frame.substring(0, 100) + "..."
-    );
-  } else {
-    console.log(`No base64 frame available for UID ${uid}`);
-  }
-}
-
-function downloadFrame(uid) {
-  const base64Frame = getLastBase64Frame(uid);
-  if (base64Frame) {
-    const downloadLink = document.createElement("a");
-    downloadLink.href = base64Frame;
-    downloadLink.download = `frame_${uid}.png`;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-  } else {
-    console.log(`No frame available for download for UID ${uid}`);
-  }
-}
-
-function downloadBase64(uid) {
-  const base64Frame = getLastBase64Frame(uid);
-  if (base64Frame) {
-    const blob = new Blob([base64Frame], { type: "text/plain" });
-    const downloadLink = document.createElement("a");
-    downloadLink.href = URL.createObjectURL(blob);
-    downloadLink.download = `base64_frame_${uid}.txt`;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-  } else {
-    console.log(`No base64 frame available for download for UID ${uid}`);
-  }
 }
 
