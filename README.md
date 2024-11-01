@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.4
+# Earth Rovers SDK v4.5
 
 ## Requirements
 
@@ -168,7 +168,7 @@ Example Response:
 }
 ```
 
-### GET /v1/screenshot
+### GET /v2/screenshot
 
 With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
 
@@ -177,7 +177,7 @@ This endpoint retrieves the latest emitted frame (both front and rear) and the c
 Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
 
 ```bash
-curl --location 'http://localhost:8000/v1/screenshot'
+curl --location 'http://localhost:8000/v2/screenshot'
 ```
 
 Example Response:
@@ -190,12 +190,12 @@ Example Response:
 }
 ```
 
-### GET /v1/front
+### GET /v2/front
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
 
 ```bash
-curl --location 'http://localhost:8000/v1/front'
+curl --location 'http://localhost:8000/v2/front'
 ```
 
 Example Response:
@@ -206,12 +206,12 @@ Example Response:
 }
 ```
 
-### GET /v1/rear
+### GET /v2/rear
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's rear camera. The frame is provided as a base64 encoded image.
 
 ```bash
-curl --location 'http://localhost:8000/v1/rear'
+curl --location 'http://localhost:8000/v2/rear'
 ```
 
 Example Response:

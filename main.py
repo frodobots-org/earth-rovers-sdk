@@ -542,7 +542,7 @@ async def missions_history():
         )
 
 
-@app.get("/v1/screenshot")
+@app.get("/v2/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()
 
@@ -575,7 +575,7 @@ if __name__ == "__main__":
     config.bind = ["0.0.0.0:8000"]
 
 
-@app.get("/v1/front")
+@app.get("/v2/front")
 async def get_front_frame():
     await need_start_mission()
     front_frame = await browser_service.front()
@@ -586,7 +586,7 @@ async def get_front_frame():
         raise HTTPException(status_code=404, detail="Front frame not available")
 
 
-@app.get("/v1/rear")
+@app.get("/v2/rear")
 async def get_rear_frame():
     await need_start_mission()
     rear_frame = await browser_service.rear()
