@@ -242,28 +242,7 @@ async function join() {
     options.token || null,
     options.uid || null
   );
-
-  // Join the channel.
-  // options.uid = await client.join(options.appid, options.channel, options.token || null, options.uid || null);
-  // if (!localTracks.audioTrack) {
-  //   localTracks.audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-  //     encoderConfig: "music_standard"
-  //   });
-  // }
-  // if (!localTracks.videoTrack) {
-  //   localTracks.videoTrack = await AgoraRTC.createCameraVideoTrack({
-  //     encoderConfig: curVideoProfile.value
-  //   });
-  // }
-
-  // Play the local video track to the local browser and update the UI with the user ID.
-  // localTracks.videoTrack.play("local-player");
-  // $("#local-player-name").text(`localVideo(${options.uid})`);
-  // $("#joined-setup").css("display", "flex");
-
-  // Publish the local video and audio tracks to the channel.
-  // await client.publish(Object.values(localTracks));
-  // console.log("publish success");
+  $("#captured-frames").css("display", DEBUG_MODE ? "block" : "none");
 }
 
 /*
@@ -300,22 +279,45 @@ async function leave() {
  */
 async function subscribe(user, mediaType) {
   const uid = user.uid;
-  // subscribe to a remote user
   await client.subscribe(user, mediaType);
   console.log("subscribe success");
   if (mediaType === "video") {
+    const playerWidth =
+      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
+    const playerHeight =
+      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
+
     const player = $(`
       <div id="player-wrapper-${uid}">
         <p class="player-name">(${uid})</p>
-        <div id="player-${uid}" class="player" style="width: ${
-      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto"
-    }; height: ${
-      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto"
-    };"></div>
+        <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
       </div>
     `);
     $("#remote-playerlist").append(player);
     user.videoTrack.play(`player-${uid}`);
+
+    const capturedFrameDiv = $(`
+      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
+      DEBUG_MODE ? "block" : "none"
+    };">
+        <p>Captured Frames (${uid})</p>
+        <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
+        <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
+        <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
+      </div>
+    `);
+    $("#captured-frames").append(capturedFrameDiv);
+
+    function captureFrame() {
+      captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
+        $(`#captured-image-${uid}`).attr("src", base64Frame);
+        lastBase64Frames[uid] = base64Frame;
+      });
+
+      setTimeout(captureFrame, 0.01);
+    }
+
+    captureFrame();
   }
   if (mediaType === "audio") {
     user.audioTrack.play();
@@ -355,5 +357,24 @@ function getCodec() {
     }
   }
   return value;
+}
+
+async function captureFrameAsBase64(videoTrack) {
+  const frame = await videoTrack.getCurrentFrameData();
+  const canvas = document.createElement("canvas");
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  const ctx = canvas.getContext("2d");
+  ctx.putImageData(frame, 0, 0);
+  return canvas.toDataURL("image/png", 1.0);
+}
+
+// Add at the beginning of the file
+const DEBUG_MODE = false;
+const lastBase64Frames = {};
+
+// Function to get the latest base64 frame for a specific UID
+function getLastBase64Frame(uid) {
+  return lastBase64Frames[uid] || null;
 }
 

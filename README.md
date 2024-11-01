@@ -4,19 +4,18 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.4
+# Earth Rovers SDK v4.5
 
 ## Requirements
 
 1. Acquire one of our Earth Rovers in here: [Earth Rovers Shop](https://shop.frodobots.com/).
 
-
 2. Complete your Bot activation.
 
 3. After completing your bot activation. Get your SDK Access token in [here](https://my.frodobots.com/owner/settings).
 
-
 ## Software Requirements
+
 - Python 3.9 or higher
 - Frodobots API key
 - Google Chrome (Or any browser) installed
@@ -169,6 +168,60 @@ Example Response:
 }
 ```
 
+### GET /v2/screenshot
+
+With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
+
+This endpoint retrieves the latest emitted frame (both front and rear) and the corresponding timestamp. The frame is provided as a base64 encoded image, and the timestamp is given in Unix Epoch format (Unix Epoch UTC timestamp).
+
+Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
+
+```bash
+curl --location 'http://localhost:8000/v2/screenshot'
+```
+
+Example Response:
+
+```JSON
+{
+    "front_frame": "base64_encoded_image",
+    "rear_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
+}
+```
+
+### GET /v2/front
+
+This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
+
+```bash
+curl --location 'http://localhost:8000/v2/front'
+```
+
+Example Response:
+
+```JSON
+{
+    "front_frame": "base64_encoded_image"
+}
+```
+
+### GET /v2/rear
+
+This endpoint allows you to retrieve the latest frame emitted from the bot's rear camera. The frame is provided as a base64 encoded image.
+
+```bash
+curl --location 'http://localhost:8000/v2/rear'
+```
+
+Example Response:
+
+```JSON
+{
+    "rear_frame": "base64_encoded_image"
+}
+```
+
 ## Missions API
 
 In order to start a mission you need to call the /start-mission endpoint. This endpoint will let you know if the bot is available or not for the mission.
@@ -184,11 +237,13 @@ If you just want to experiment with the bot without starting a mission you need 
 `Note: Bots that are controlled by other players are not available for missions.`
 
 ### POST /start-mission
+
 ```bash
 curl --location --request POST 'http://localhost:8000/start-mission'
 ```
 
 Successful Response (Code: 200)
+
 ```JSON
 {
     "message": "Mission started successfully"
@@ -196,6 +251,7 @@ Successful Response (Code: 200)
 ```
 
 Unsuccessful Response (Code: 400)
+
 ```JSON
 {
     "detail": "Bot unavailable for SDK"
@@ -211,6 +267,7 @@ curl --location 'http://localhost:8000/checkpoints-list'
 ```
 
 Example Response:
+
 ```JSON
 {
     "checkpoints_list": [
@@ -248,6 +305,7 @@ curl -X POST 'http://localhost:8000/checkpoint-reached' \
 ```
 
 Successful Response (Code: 200)
+
 ```JSON
 {
     "message": "Checkpoint reached successfully",
@@ -256,6 +314,7 @@ Successful Response (Code: 200)
 ```
 
 Unsuccessful Response (Code: 400)
+
 ```JSON
 {
     "detail": {
@@ -273,12 +332,12 @@ In case you get stucked and don't want to lose your progress, you can use the /s
 
 `⚠️  This endpoint should only be used in case of emergency. If you run this endpoint you will lose all your progress during the mission.`
 
-
 ```bash
 curl --location --request POST 'http://localhost:8000/end-mission'
 ```
 
 Example Response:
+
 ```JSON
 {
     "message": "Mission ended successfully"
@@ -294,6 +353,7 @@ curl --location 'http://localhost:8000/missions-history'
 ```
 
 Example Response:
+
 ```JSON
 {
     "mission_rides": [
@@ -311,8 +371,8 @@ Example Response:
 }
 ```
 
-
 # Latest updates
+
 - v.4.4: Minor Bugfixes. Spectate Rides.
 - v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
