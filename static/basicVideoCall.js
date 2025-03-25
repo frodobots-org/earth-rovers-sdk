@@ -366,7 +366,7 @@ async function captureFrameAsBase64(videoTrack) {
   canvas.height = frame.height;
   const ctx = canvas.getContext("2d");
   ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL("image/png", 1.0);
+  return canvas.toDataURL(`image/${window.imageParams["imageFormat"]}`, window.imageParams["imageQuality"]);
 }
 
 // Add at the beginning of the file
@@ -378,3 +378,7 @@ function getLastBase64Frame(uid) {
   return lastBase64Frames[uid] || null;
 }
 
+function initializeImageParams({imageFormat, imageQuality}) {
+  window.imageParams = {imageFormat, imageQuality}
+}
+window.initializeImageParams = initializeImageParams

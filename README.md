@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.5
+# Earth Rovers SDK P
 
 ## Requirements
 
@@ -42,6 +42,10 @@ CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
 MAP_ZOOM_LEVEL=
 MISSION_SLUG=
+# Image quality between 0.1 and 1.0 (default: 1.0)
+IMAGE_QUALITY=
+# Image format: jpeg, png or webp (default: png)
+IMAGE_FORMAT=
 ```
 
 2. Install the SDK
@@ -194,10 +198,9 @@ Example Response:
 
 ### GET /v2/front
 
-This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image. 
+This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
 
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
-
 
 ```bash
 curl --location 'http://localhost:8000/v2/front'
@@ -216,7 +219,6 @@ Example Response:
 This endpoint allows you to retrieve the latest frame emitted from the bot's rear camera. The frame is provided as a base64 encoded image.
 
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
-
 
 ```bash
 curl --location 'http://localhost:8000/v2/rear'
