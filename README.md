@@ -176,6 +176,8 @@ This endpoint retrieves the latest emitted frame (both front and rear) and the c
 
 Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
 
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
 ```bash
 curl --location 'http://localhost:8000/v2/screenshot'
 ```
@@ -192,7 +194,10 @@ Example Response:
 
 ### GET /v2/front
 
-This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
+This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image. 
+
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
 
 ```bash
 curl --location 'http://localhost:8000/v2/front'
@@ -209,6 +214,9 @@ Example Response:
 ### GET /v2/rear
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's rear camera. The frame is provided as a base64 encoded image.
+
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
 
 ```bash
 curl --location 'http://localhost:8000/v2/rear'
