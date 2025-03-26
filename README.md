@@ -42,10 +42,12 @@ CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
 MAP_ZOOM_LEVEL=
 MISSION_SLUG=
-# Image quality between 0.1 and 1.0 (default: 1.0)
-IMAGE_QUALITY=
+# Image quality between 0.1 and 1.0 (default: 0.8)
+# Recommended: 0.8 for better performance
+IMAGE_QUALITY=0.8
 # Image format: jpeg, png or webp (default: png)
-IMAGE_FORMAT=
+# Recommended: jpeg for better performance and lower bandwidth usage
+IMAGE_FORMAT=jpeg
 ```
 
 2. Install the SDK
@@ -383,6 +385,7 @@ Example Response:
 
 # Latest updates
 
+- v.4.5: Added image quality and format configuration options for better performance
 - v.4.4: Minor Bugfixes. Spectate Rides.
 - v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
