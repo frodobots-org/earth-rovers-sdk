@@ -2,6 +2,16 @@ import os
 import time
 from pyppeteer import launch
 
+# Configuration from environment variables with defaults
+FORMAT = os.getenv("IMAGE_FORMAT", "png")
+QUALITY = float(os.getenv("IMAGE_QUALITY", "1.0"))
+HAS_REAR_CAMERA = os.getenv("HAS_REAR_CAMERA", "False").lower() == "true"
+
+if FORMAT not in ["png", "jpeg", "webp"]:
+    raise ValueError("Invalid image format. Supported formats: png, jpeg, webp")
+
+if QUALITY < 0 or QUALITY > 1:
+    raise ValueError("Invalid image quality. Quality should be between 0 and 1")
 
 class BrowserService:
     def __init__(self):
@@ -39,6 +49,14 @@ class BrowserService:
                 await self.page.setViewport(self.default_viewport)
 
                 await self.page.waitFor(2000)
+
+                call = f"""() => {{
+                    window.initializeImageParams({{
+                        imageFormat: "{FORMAT}",
+                        imageQuality: {QUALITY}
+                    }});
+                }}"""
+                await self.page.evaluate(call)
             except Exception as e:
                 print(f"Error initializing browser: {e}")
                 self.browser = None

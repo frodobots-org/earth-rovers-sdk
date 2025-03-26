@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.5
+# Earth Rovers SDK v4.6
 
 ## Requirements
 
@@ -42,6 +42,12 @@ CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
 MAP_ZOOM_LEVEL=
 MISSION_SLUG=
+# Image quality between 0.1 and 1.0 (default: 0.8)
+# Recommended: 0.8 for better performance
+IMAGE_QUALITY=0.8
+# Image format: jpeg, png or webp (default: png)
+# Recommended: jpeg for better performance and lower bandwidth usage
+IMAGE_FORMAT=jpeg
 ```
 
 2. Install the SDK
@@ -176,6 +182,8 @@ This endpoint retrieves the latest emitted frame (both front and rear) and the c
 
 Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
 
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
 ```bash
 curl --location 'http://localhost:8000/v2/screenshot'
 ```
@@ -194,6 +202,8 @@ Example Response:
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
 
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
 ```bash
 curl --location 'http://localhost:8000/v2/front'
 ```
@@ -209,6 +219,8 @@ Example Response:
 ### GET /v2/rear
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's rear camera. The frame is provided as a base64 encoded image.
+
+You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
 ```bash
 curl --location 'http://localhost:8000/v2/rear'
@@ -373,6 +385,8 @@ Example Response:
 
 # Latest updates
 
+- v.4.6: Added image quality and format configuration options for better performance
+- v.4.5: Minor Bugfixes.
 - v.4.4: Minor Bugfixes. Spectate Rides.
 - v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
