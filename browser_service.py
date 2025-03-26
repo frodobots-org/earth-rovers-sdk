@@ -122,7 +122,7 @@ class BrowserService:
 
         front_frame = await self.page.evaluate(
             """() => {
-        return lastBase64Frames[1000] || null;
+        return getLastBase64Frame(1000) || null;
         }"""
         )
 
@@ -133,7 +133,7 @@ class BrowserService:
 
         rear_frame = await self.page.evaluate(
             """() => {
-        return lastBase64Frames[1001] || null;
+        return getLastBase64Frame(1001) || null;
         }"""
         )
 
