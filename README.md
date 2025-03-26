@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK P
+# Earth Rovers SDK v4.6
 
 ## Requirements
 
@@ -385,7 +385,8 @@ Example Response:
 
 # Latest updates
 
-- v.4.5: Added image quality and format configuration options for better performance
+- v.4.6: Added image quality and format configuration options for better performance
+- v.4.5: Minor Bugfixes.
 - v.4.4: Minor Bugfixes. Spectate Rides.
 - v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
 - v.4.2: Updated Readme.md
