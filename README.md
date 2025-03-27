@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.6
+# Earth Rovers SDK v4.7
 
 ## Requirements
 
@@ -385,6 +385,11 @@ Example Response:
 
 # Latest updates
 
+- v.4.7:
+  - Optimized frame capture system to reduce CPU and memory usage
+  - Removed continuous frame capture loop, now frames are captured on-demand
+  - Improved resource management for video streaming
+  - Better handling of system resources during long-running sessions
 - v.4.6: Added image quality and format configuration options for better performance
 - v.4.5: Minor Bugfixes.
 - v.4.4: Minor Bugfixes. Spectate Rides.

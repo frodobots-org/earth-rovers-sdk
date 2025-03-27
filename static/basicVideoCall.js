@@ -308,16 +308,7 @@ async function subscribe(user, mediaType) {
     `);
     $("#captured-frames").append(capturedFrameDiv);
 
-    function captureFrame() {
-      captureFrameAsBase64(user.videoTrack).then((base64Frame) => {
-        $(`#captured-image-${uid}`).attr("src", base64Frame);
-        lastBase64Frames[uid] = base64Frame;
-      });
-
-      setTimeout(captureFrame, 0.01);
-    }
-
-    captureFrame();
+    user.videoTrack.captureEnabled = true;
   }
   if (mediaType === "audio") {
     user.audioTrack.play();
@@ -366,7 +357,10 @@ async function captureFrameAsBase64(videoTrack) {
   canvas.height = frame.height;
   const ctx = canvas.getContext("2d");
   ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL(`image/${window.imageParams["imageFormat"]}`, window.imageParams["imageQuality"]);
+  return canvas.toDataURL(
+    `image/${window.imageParams["imageFormat"]}`,
+    window.imageParams["imageQuality"]
+  );
 }
 
 // Add at the beginning of the file
@@ -374,11 +368,19 @@ const DEBUG_MODE = false;
 const lastBase64Frames = {};
 
 // Function to get the latest base64 frame for a specific UID
-function getLastBase64Frame(uid) {
-  return lastBase64Frames[uid] || null;
+async function getLastBase64Frame(uid) {
+  const user = remoteUsers[uid];
+  if (!user || !user.videoTrack || !user.videoTrack.captureEnabled) {
+    return null;
+  }
+
+  const base64Frame = await captureFrameAsBase64(user.videoTrack);
+  lastBase64Frames[uid] = base64Frame;
+  return base64Frame;
 }
 
-function initializeImageParams({imageFormat, imageQuality}) {
-  window.imageParams = {imageFormat, imageQuality}
+function initializeImageParams({ imageFormat, imageQuality }) {
+  window.imageParams = { imageFormat, imageQuality };
 }
-window.initializeImageParams = initializeImageParams
+window.initializeImageParams = initializeImageParams;
+window.getLastBase64Frame = getLastBase64Frame
