@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.7
+# Earth Rovers SDK v4.8
 
 ## Requirements
 
@@ -385,6 +385,8 @@ Example Response:
 
 # Latest updates
 
+- v.4.8:
+  - Added compatibility for mini and zero bots
 - v.4.7:
   - Optimized frame capture system to reduce CPU and memory usage
   - Removed continuous frame capture loop, now frames are captured on-demand
