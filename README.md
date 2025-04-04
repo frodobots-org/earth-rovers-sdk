@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.7
+# Earth Rovers SDK v4.8
 
 ## Requirements
 
@@ -384,6 +384,15 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.4.8:
+  - Added compatibility for mini and zero bots
+  - Added HTML examples for bot control and video streaming (20 FPS)
+
+<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
+  <img src="screenshots/zero.jpg" alt="Zero Bot" width="900">
+  <img src="screenshots/mini.jpg" alt="Mini Bot" width="900">
+</div>
 
 - v.4.7:
   - Optimized frame capture system to reduce CPU and memory usage

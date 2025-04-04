@@ -28,10 +28,10 @@
 
       const fetchFrontFrame = async () => {
         try {
-          const response = await fetch("http://localhost:8000/v1/front");
+          const response = await fetch("http://localhost:8000/v2/front");
           const data = await response.json();
 
-          frontFrame.src = `data:image/png;base64,${data.front_frame}`;
+          frontFrame.src = `data:image/jpg;base64,${data.front_frame}`;
         } catch (error) {
           console.error("Error fetching front frame:", error);
         }

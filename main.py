@@ -131,6 +131,7 @@ async def auth_common():
         "BOT_UID": response_data.get("BOT_UID"),
         "SPECTATOR_USERID": response_data.get("SPECTATOR_USERID"),
         "SPECTATOR_RTC_TOKEN": response_data.get("SPECTATOR_RTC_TOKEN"),
+        "BOT_TYPE": response_data.get("BOT_TYPE", "mini"),
     }
 
     return auth_response_data
@@ -410,6 +411,9 @@ async def control(request: Request):
 @app.get("/screenshot")
 async def get_screenshot(view_types: str = "rear,map,front"):
     await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
     print("Received request for screenshot with view_types:", view_types)
     valid_views = {"rear", "map", "front"}
     views_list = view_types.split(",")
@@ -417,6 +421,11 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     for view in views_list:
         if view not in valid_views:
             raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
+        if view == "rear" and auth_response_data.get("BOT_TYPE") != "zero":
+            raise HTTPException(
+                status_code=400,
+                detail="Rear camera is only available for zero type bots",
+            )
 
     await browser_service.take_screenshot("screenshots", views_list)
 
@@ -545,16 +554,22 @@ async def missions_history():
 @app.get("/v2/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()
+    if not auth_response_data:
+        await auth()
 
     async def get_frame(frame_type):
         frame = await getattr(browser_service, frame_type)()
         _, frame = frame.split(",", 1)
         return {f"{frame_type}_frame": frame}
 
-    rear_task = asyncio.create_task(get_frame("rear"))
     front_task = asyncio.create_task(get_frame("front"))
+    tasks = [front_task]
 
-    results = await asyncio.gather(rear_task, front_task)
+    if auth_response_data.get("BOT_TYPE") == "zero":
+        rear_task = asyncio.create_task(get_frame("rear"))
+        tasks.append(rear_task)
+
+    results = await asyncio.gather(*tasks)
 
     response_data = {}
     for result in results:
@@ -589,6 +604,14 @@ async def get_front_frame():
 @app.get("/v2/rear")
 async def get_rear_frame():
     await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    if auth_response_data.get("BOT_TYPE") != "zero":
+        raise HTTPException(
+            status_code=400, detail="Rear camera is only available for zero type bots"
+        )
+
     rear_frame = await browser_service.rear()
     if rear_frame:
         _, base64_data = rear_frame.split(",", 1)
