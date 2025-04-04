@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Front View Frame with Controls</title>
+    <style>
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background-color: #f5f5f5;
+        overflow: hidden;
+      }
+
+      .container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 15px;
+        background-color: white;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        max-height: 95vh;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 5px;
+      }
+
+      .header img {
+        height: 30px;
+        width: auto;
+        object-fit: contain;
+      }
+
+      h1 {
+        color: #333;
+        margin: 0;
+        font-size: 20px;
+      }
+
+      .frame-container {
+        position: relative;
+        display: inline-block;
+        max-height: 50vh;
+      }
+
+      .frame {
+        max-width: 100%;
+        max-height: 50vh;
+        height: auto;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+      }
+
+      .fps-counter {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background-color: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: monospace;
+      }
+
+      .controls {
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        z-index: 10;
+      }
+
+      .controls-row {
+        display: flex;
+        gap: 5px;
+        justify-content: center;
+      }
+
+      .control-btn {
+        padding: 8px;
+        font-size: 14px;
+        border: none;
+        border-radius: 5px;
+        background-color: rgba(76, 175, 80, 0.8);
+        color: white;
+        cursor: pointer;
+        transition: all 0.2s;
+        position: relative;
+        min-width: 35px;
+        min-height: 35px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        backdrop-filter: blur(2px);
+      }
+
+      .control-btn.active {
+        background-color: rgba(33, 150, 243, 0.9);
+        transform: scale(0.95);
+      }
+
+      .control-btn:hover {
+        background-color: rgba(76, 175, 80, 0.9);
+      }
+
+      .control-btn:active {
+        background-color: rgba(61, 139, 64, 0.9);
+      }
+
+      .control-btn:disabled {
+        background-color: rgba(204, 204, 204, 0.8);
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin-top: 10px;
+        color: #666;
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .movement-indicator {
+        display: flex;
+        gap: 20px;
+        margin-top: 10px;
+      }
+
+      .indicator {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .indicator-label {
+        font-size: 12px;
+        color: #666;
+      }
+
+      .indicator-value {
+        font-size: 16px;
+        font-weight: bold;
+        color: #333;
+        min-width: 40px;
+        text-align: center;
+      }
+
+      .active-keys {
+        display: flex;
+        gap: 5px;
+        margin-top: 5px;
+      }
+
+      .key {
+        background-color: #e0e0e0;
+        padding: 2px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+        color: #666;
+      }
+
+      .key.active {
+        background-color: #2196f3;
+        color: white;
+      }
+
+      .smoothing-control {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .smoothing-control label {
+        font-size: 14px;
+        color: #666;
+      }
+
+      .smoothing-control input[type="range"] {
+        width: 150px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <img
+          src="https://camo.githubusercontent.com/e3ca668491ef86597cf7d0ee0f22eb2526ead2a69e46d1827eb2efdaf0454cc9/68747470733a2f2f63646e2e70726f642e776562736974652d66696c65732e636f6d2f3636303432313835383832666133343238663464643666312f3636326265653562356566376564303934313836613536615f66726f646f626f74735f61695f6c6f676f2d702d3530302e706e67"
+          alt="Frodobots Logo"
+        />
+        <h1>Live Front View Frame with Controls</h1>
+      </div>
+      <div class="frame-container">
+        <img id="frontFrame" class="frame" alt="Front View" />
+        <div class="fps-counter" id="fpsCounter">FPS: 0</div>
+        <div class="controls">
+          <div class="controls-row">
+            <button class="control-btn" id="btnW">W</button>
+          </div>
+          <div class="controls-row">
+            <button class="control-btn" id="btnA">A</button>
+            <button class="control-btn" id="btnS">S</button>
+            <button class="control-btn" id="btnD">D</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="status" id="status">
+        <div class="movement-indicator">
+          <div class="indicator">
+            <div class="indicator-label">Linear</div>
+            <div class="indicator-value" id="linearValue">0.0</div>
+          </div>
+          <div class="indicator">
+            <div class="indicator-label">Angular</div>
+            <div class="indicator-value" id="angularValue">0.0</div>
+          </div>
+        </div>
+        <div class="active-keys" id="activeKeys">
+          <span class="key">W</span>
+          <span class="key">A</span>
+          <span class="key">S</span>
+          <span class="key">D</span>
+        </div>
+        <div class="smoothing-control">
+          <label for="smoothingFactor">Smoothing:</label>
+          <input
+            type="range"
+            id="smoothingFactor"
+            min="0"
+            max="100"
+            value="50"
+          />
+          <span id="smoothingValue">50%</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const frontFrame = document.getElementById("frontFrame");
+      const status = document.getElementById("status");
+      const linearValue = document.getElementById("linearValue");
+      const angularValue = document.getElementById("angularValue");
+      const activeKeys = document.getElementById("activeKeys").children;
+      const smoothingFactor = document.getElementById("smoothingFactor");
+      const smoothingValue = document.getElementById("smoothingValue");
+      const fpsCounter = document.getElementById("fpsCounter");
+      let frameCount = 0;
+      let lastFpsUpdate = 0;
+      const FPS_UPDATE_INTERVAL = 1000; // Update FPS counter every second
+
+      let pressedKeys = new Set();
+      let currentLinear = 0;
+      let currentAngular = 0;
+      let targetLinear = 0;
+      let targetAngular = 0;
+      let lastUpdateTime = 0;
+      const UPDATE_INTERVAL = 50; // 50ms = 20Hz
+
+      smoothingFactor.addEventListener("input", (e) => {
+        smoothingValue.textContent = `${e.target.value}%`;
+      });
+
+      const updateMovementIndicators = () => {
+        linearValue.textContent = currentLinear.toFixed(2);
+        angularValue.textContent = currentAngular.toFixed(2);
+      };
+
+      const updateActiveKeys = () => {
+        Array.from(activeKeys).forEach((key) => {
+          const keyLetter = key.textContent.toLowerCase();
+          if (pressedKeys.has(keyLetter)) {
+            key.classList.add("active");
+          } else {
+            key.classList.remove("active");
+          }
+        });
+      };
+
+      const updateButtons = () => {
+        document.querySelectorAll(".control-btn").forEach((btn) => {
+          const btnLetter = btn.textContent.toLowerCase();
+          if (pressedKeys.has(btnLetter)) {
+            btn.classList.add("active");
+          } else {
+            btn.classList.remove("active");
+          }
+        });
+      };
+
+      const calculateMovement = () => {
+        let linear = 0;
+        let angular = 0;
+
+        if (pressedKeys.has("w")) linear += 1;
+        if (pressedKeys.has("s")) linear -= 1;
+        if (pressedKeys.has("a")) angular += 1;
+        if (pressedKeys.has("d")) angular -= 1;
+
+        // Normalize diagonal movement
+        if (linear !== 0 && angular !== 0) {
+          const factor = 1 / Math.sqrt(2);
+          linear *= factor;
+          angular *= factor;
+        }
+
+        return { linear, angular };
+      };
+
+      const lerp = (start, end, t) => {
+        return start + (end - start) * t;
+      };
+
+      const updateMovement = async (timestamp) => {
+        if (timestamp - lastUpdateTime < UPDATE_INTERVAL) {
+          requestAnimationFrame(updateMovement);
+          return;
+        }
+        lastUpdateTime = timestamp;
+
+        const smoothing = smoothingFactor.value / 100;
+        currentLinear = lerp(currentLinear, targetLinear, smoothing);
+        currentAngular = lerp(currentAngular, targetAngular, smoothing);
+
+        // Only send command if there's significant movement
+        if (Math.abs(currentLinear) > 0.01 || Math.abs(currentAngular) > 0.01) {
+          await sendCommand(currentLinear, currentAngular);
+        }
+
+        updateMovementIndicators();
+        requestAnimationFrame(updateMovement);
+      };
+
+      const sendCommand = async (linear, angular) => {
+        try {
+          const response = await fetch("http://localhost:8000/control", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              command: {
+                linear,
+                angular,
+              },
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+        } catch (error) {
+          console.error("Error sending command:", error);
+        }
+      };
+
+      const handleKeyDown = async (event) => {
+        const key = event.key.toLowerCase();
+        if (["w", "a", "s", "d"].includes(key)) {
+          pressedKeys.add(key);
+          const { linear, angular } = calculateMovement();
+          targetLinear = linear;
+          targetAngular = angular;
+          updateActiveKeys();
+          updateButtons();
+        }
+      };
+
+      const handleKeyUp = async (event) => {
+        const key = event.key.toLowerCase();
+        if (["w", "a", "s", "d"].includes(key)) {
+          pressedKeys.delete(key);
+          const { linear, angular } = calculateMovement();
+          targetLinear = linear;
+          targetAngular = angular;
+          updateActiveKeys();
+          updateButtons();
+        }
+      };
+
+      const handleButtonClick = async (linear, angular) => {
+        targetLinear = linear;
+        targetAngular = angular;
+      };
+
+      // Keyboard event listeners
+      window.addEventListener("keydown", handleKeyDown);
+      window.addEventListener("keyup", handleKeyUp);
+
+      // Button event listeners
+      document
+        .getElementById("btnW")
+        .addEventListener("mousedown", () => handleButtonClick(1, 0));
+      document
+        .getElementById("btnS")
+        .addEventListener("mousedown", () => handleButtonClick(-1, 0));
+      document
+        .getElementById("btnA")
+        .addEventListener("mousedown", () => handleButtonClick(0, 1));
+      document
+        .getElementById("btnD")
+        .addEventListener("mousedown", () => handleButtonClick(0, -1));
+
+      // Stop movement when mouse leaves buttons
+      document.querySelectorAll(".control-btn").forEach((btn) => {
+        btn.addEventListener("mouseup", () => handleButtonClick(0, 0));
+        btn.addEventListener("mouseleave", () => handleButtonClick(0, 0));
+      });
+
+      const fetchFrontFrame = async () => {
+        try {
+          const response = await fetch("http://localhost:8000/v2/front");
+          const data = await response.json();
+          frontFrame.src = `data:image/jpg;base64,${data.front_frame}`;
+
+          // Update FPS counter
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFpsUpdate >= FPS_UPDATE_INTERVAL) {
+            const fps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+            fpsCounter.textContent = `FPS: ${fps}`;
+            frameCount = 0;
+            lastFpsUpdate = now;
+          }
+        } catch (error) {
+          console.error("Error fetching front frame:", error);
+        }
+      };
+
+      fetchFrontFrame();
+      setInterval(fetchFrontFrame, 1000 / 50);
+      requestAnimationFrame(updateMovement);
+    </script>
+  </body>
+</html>
+
