@@ -390,8 +390,8 @@ Example Response:
   - Added HTML examples for bot control and video streaming (20 FPS)
 
 <div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="screenshots/zero.jpg" alt="Zero Bot" width="200">
-  <img src="screenshots/mini.jpg" alt="Mini Bot" width="200">
+  <img src="screenshots/zero.jpg" alt="Zero Bot" width="900">
+  <img src="screenshots/mini.jpg" alt="Mini Bot" width="900">
 </div>
 
 - v.4.7:
