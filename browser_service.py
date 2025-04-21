@@ -1,6 +1,9 @@
 import os
 import time
 from pyppeteer import launch
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configuration from environment variables with defaults
 FORMAT = os.getenv("IMAGE_FORMAT", "png")
@@ -12,6 +15,7 @@ if FORMAT not in ["png", "jpeg", "webp"]:
 
 if QUALITY < 0 or QUALITY > 1:
     raise ValueError("Invalid image quality. Quality should be between 0 and 1")
+
 
 class BrowserService:
     def __init__(self):
