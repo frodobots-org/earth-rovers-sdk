@@ -272,6 +272,8 @@ Unsuccessful Response (Code: 400)
 
 ### POST /checkpoints-list
 
+### GET /checkpoints-list
+
 With this endpoint you can retrieve the list of checkpoints for the mission. And the latest checkpoint that was scanned by the bot. If you scan the first checkpoint, the latest_scanned_checkpoint will be 1. If you scan the last checkpoint, the latest_scanned_checkpoint will be the highest sequence number and the mission will be completed.
 
 ```bash
