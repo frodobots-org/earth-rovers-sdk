@@ -216,6 +216,7 @@ async def need_start_mission():
     )
 
 
+@app.post("/checkpoints-list")
 @app.get("/checkpoints-list")
 async def checkpoints():
     await need_start_mission()
