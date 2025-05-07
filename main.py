@@ -595,9 +595,12 @@ if __name__ == "__main__":
 async def get_front_frame():
     await need_start_mission()
     front_frame = await browser_service.front()
+    response_data = {}
     if front_frame:
         _, base64_data = front_frame.split(",", 1)
-        return JSONResponse(content={"front_frame": base64_data})
+        response_data["front_frame"] = base64_data
+        response_data["timestamp"] = datetime.utcnow().timestamp()
+        return JSONResponse(content=response_data)
     else:
         raise HTTPException(status_code=404, detail="Front frame not available")
 
@@ -614,8 +617,11 @@ async def get_rear_frame():
         )
 
     rear_frame = await browser_service.rear()
+    response_data = {}
     if rear_frame:
         _, base64_data = rear_frame.split(",", 1)
-        return JSONResponse(content={"rear_frame": base64_data})
+        response_data["rear_frame"] = base64_data
+        response_data["timestamp"] = datetime.utcnow().timestamp()
+        return JSONResponse(content=response_data)
     else:
         raise HTTPException(status_code=404, detail="Rear frame not available")

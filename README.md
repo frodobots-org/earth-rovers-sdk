@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.8
+# Earth Rovers SDK v4.9
 
 ## Requirements
 
@@ -212,7 +212,8 @@ Example Response:
 
 ```JSON
 {
-    "front_frame": "base64_encoded_image"
+    "front_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
 }
 ```
 
@@ -230,7 +231,8 @@ Example Response:
 
 ```JSON
 {
-    "rear_frame": "base64_encoded_image"
+    "rear_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
 }
 ```
 
@@ -387,6 +389,8 @@ Example Response:
 
 # Latest updates
 
+- v.4.9:
+  - Added timestamp to /v2/front and /v2/rear endpoints
 - v.4.8:
   - Added compatibility for mini and zero bots
   - Added HTML examples for bot control and video streaming (20 FPS)
