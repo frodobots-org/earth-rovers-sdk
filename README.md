@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.8
+# Earth Rovers SDK v4.9
 
 ## Requirements
 
@@ -310,12 +310,15 @@ Example Response:
 
 ### POST /checkpoint-reached
 
-With this endpoint you can send the checkpoint that was scanned by the bot.
+With this endpoint you can send the checkpoint that was scanned by the bot. You can provide the latitude and longitude of your current position.
 
 ```bash
 curl -X POST 'http://localhost:8000/checkpoint-reached' \
 --header 'Content-Type: application/json' \
---data '{}'
+--data '{
+    "latitude": 30.48243713,
+    "longitude": 114.3026428
+}'
 ```
 
 Successful Response (Code: 200)
@@ -385,7 +388,83 @@ Example Response:
 }
 ```
 
+## Interventions API
+
+The Interventions API allows you to manage interventions during bot rides. An intervention represents a period where the bot requires special attention or handling.
+
+### POST /interventions/start
+
+Start a new intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
+
+```bash
+curl -X POST 'http://localhost:8000/interventions/start'
+```
+
+Successful Response (Code: 200)
+
+```JSON
+{
+    "message": "Intervention started successfully",
+    "intervention_id": "123e4567-e89b-12d3-a456-426614174000"
+}
+```
+
+### POST /interventions/end
+
+End an active intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
+
+```bash
+curl -X POST 'http://localhost:8000/interventions/end'
+```
+
+Successful Response (Code: 200)
+
+```JSON
+{
+    "message": "Intervention ended successfully"
+}
+```
+
+Unsuccessful Response (Code: 400)
+
+```JSON
+{
+    "detail": "No active intervention found"
+}
+```
+
+### GET /interventions/history
+
+Retrieve the history of interventions for the current bot.
+
+```bash
+curl --location 'http://localhost:8000/interventions/history'
+```
+
+Example Response:
+
+```JSON
+{
+    "interventions": [
+        {
+            "ride_id": "123",
+            "start_time": "2024-01-01T12:00:00Z",
+            "end_time": "2024-01-01T12:30:00Z",
+            "mission_name": "Mission 1",
+            "mission_slug": "mission-1",
+            "bot_name": "Bot 1",
+            "bot_slug": "bot-1"
+        }
+    ]
+}
+```
+
 # Latest updates
+
+- v.4.9:
+
+  - Added Interventions API with endpoints for starting, ending and retrieving intervention history
+  - New endpoints: /interventions/start, /interventions/end, /interventions/history
 
 - v.4.8:
   - Added compatibility for mini and zero bots

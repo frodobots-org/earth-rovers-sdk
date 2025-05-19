@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Intervention Manager</title>
+    <style>
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background-color: #f5f5f5;
+      }
+
+      .container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        padding: 20px;
+        background-color: white;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        width: 90%;
+        max-width: 1200px;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+
+      .header img {
+        height: 30px;
+        width: auto;
+        object-fit: contain;
+      }
+
+      h1 {
+        color: #333;
+        margin: 0;
+        font-size: 20px;
+      }
+
+      .intervention-form {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+        width: 100%;
+        max-width: 400px;
+        padding: 20px;
+        background-color: #f8f9fa;
+        border-radius: 8px;
+      }
+
+      .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .form-group label {
+        font-size: 14px;
+        color: #666;
+      }
+
+      .form-group input {
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+
+      .button {
+        padding: 10px;
+        font-size: 14px;
+        border: none;
+        border-radius: 5px;
+        color: white;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .start-button {
+        background-color: rgba(76, 175, 80, 0.8);
+      }
+
+      .end-button {
+        background-color: rgba(244, 67, 54, 0.8);
+      }
+
+      .button:hover {
+        opacity: 0.9;
+        transform: scale(0.98);
+      }
+
+      .button:disabled {
+        background-color: #ccc;
+        cursor: not-allowed;
+      }
+
+      .interventions-list {
+        width: 100%;
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 20px;
+      }
+
+      th,
+      td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #ddd;
+        font-size: 14px;
+      }
+
+      th {
+        background-color: #f8f9fa;
+        color: #333;
+        font-weight: bold;
+      }
+
+      tr:hover {
+        background-color: #f5f5f5;
+      }
+
+      .status-active {
+        color: #4caf50;
+        font-weight: bold;
+      }
+
+      .status-ended {
+        color: #666;
+      }
+
+      .error-message {
+        color: #f44336;
+        font-size: 14px;
+        margin-top: 5px;
+      }
+
+      .success-message {
+        color: #4caf50;
+        font-size: 14px;
+        margin-top: 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <img
+          src="https://cdn.prod.website-files.com/66042185882fa3428f4dd6f1/662bee5b5ef7ed094186a56a_frodobots_ai_logo-p-500.png"
+          alt="Frodobots Logo"
+        />
+        <h1>Intervention Manager</h1>
+      </div>
+
+      <div class="intervention-form">
+        <button id="startButton" class="button start-button">
+          Start Intervention
+        </button>
+        <button id="endButton" class="button end-button" disabled>
+          End Intervention
+        </button>
+        <div id="message"></div>
+      </div>
+
+      <div class="interventions-list">
+        <table>
+          <thead>
+            <tr>
+              <th>Ride ID</th>
+              <th>Start Time</th>
+              <th>End Time</th>
+              <th>Mission Name</th>
+              <th>Mission Slug</th>
+              <th>Bot Name</th>
+              <th>Bot Slug</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="interventionsTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const startButton = document.getElementById("startButton");
+      const endButton = document.getElementById("endButton");
+      const messageDiv = document.getElementById("message");
+      const interventionsTable = document.getElementById("interventionsTable");
+      let activeIntervention = false;
+
+      const showMessage = (text, isError = false) => {
+        messageDiv.textContent = text;
+        messageDiv.className = isError ? "error-message" : "success-message";
+        setTimeout(() => {
+          messageDiv.textContent = "";
+        }, 5000);
+      };
+
+      const formatDateTime = (dateString) => {
+        return new Date(dateString).toLocaleString();
+      };
+
+      const formatCoordinates = (lat, lon) => {
+        return `${parseFloat(lat).toFixed(6)}, ${parseFloat(lon).toFixed(6)}`;
+      };
+
+      const updateInterventionsList = async () => {
+        try {
+          const response = await fetch(
+            "http://localhost:8000/interventions/history"
+          );
+          const data = await response.json();
+
+          interventionsTable.innerHTML = "";
+          data.interventions.forEach((intervention) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+              <td>${intervention.ride_id}</td>
+              <td>${formatDateTime(intervention.start_time)}</td>
+              <td>${
+                intervention.end_time
+                  ? formatDateTime(intervention.end_time)
+                  : "-"
+              }</td>
+              <td>${intervention.mission_name || "-"}</td>
+              <td>${intervention.mission_slug || "-"}</td>
+              <td>${intervention.bot_name || "-"}</td>
+              <td>${intervention.bot_slug || "-"}</td>
+              <td class="${
+                intervention.end_time ? "status-ended" : "status-active"
+              }">
+                ${intervention.end_time ? "Ended" : "Active"}
+              </td>
+            `;
+            interventionsTable.appendChild(row);
+          });
+
+          // Check if there's an active intervention
+          activeIntervention = data.interventions.some((i) => !i.end_time);
+          startButton.disabled = activeIntervention;
+          endButton.disabled = !activeIntervention;
+        } catch (error) {
+          showMessage("Error loading interventions: " + error.message, true);
+        }
+      };
+
+      const startIntervention = async () => {
+        try {
+          const response = await fetch(
+            "http://localhost:8000/interventions/start",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          const data = await response.json();
+          if (response.ok) {
+            showMessage("Intervention started successfully");
+            activeIntervention = true;
+            startButton.disabled = true;
+            endButton.disabled = false;
+            await updateInterventionsList();
+          } else {
+            showMessage(data.detail || "Error starting intervention", true);
+          }
+        } catch (error) {
+          showMessage("Error starting intervention: " + error.message, true);
+        }
+      };
+
+      const endIntervention = async () => {
+        try {
+          const response = await fetch(
+            "http://localhost:8000/interventions/end",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          const data = await response.json();
+          if (response.ok) {
+            showMessage("Intervention ended successfully");
+            activeIntervention = false;
+            startButton.disabled = false;
+            endButton.disabled = true;
+            await updateInterventionsList();
+          } else {
+            showMessage(data.detail || "Error ending intervention", true);
+          }
+        } catch (error) {
+          showMessage("Error ending intervention: " + error.message, true);
+        }
+      };
+
+      startButton.addEventListener("click", startIntervention);
+      endButton.addEventListener("click", endIntervention);
+
+      // Initial load of interventions
+      updateInterventionsList();
+      // Refresh list every 30 seconds
+      setInterval(updateInterventionsList, 30000);
+    </script>
+  </body>
+</html>
+

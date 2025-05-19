@@ -619,3 +619,162 @@ async def get_rear_frame():
         return JSONResponse(content={"rear_frame": base64_data})
     else:
         raise HTTPException(status_code=404, detail="Rear frame not available")
+
+
+@app.post("/interventions/start")
+async def start_intervention(request: Request):
+    await need_start_mission()
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    if not auth_header:
+        raise HTTPException(
+            status_code=500, detail="Authorization header not configured"
+        )
+    if not bot_slug:
+        raise HTTPException(status_code=500, detail="Bot name not configured")
+
+    data = await browser_service.data()
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+
+    if not all([latitude, longitude]):
+        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {
+        "bot_slug": bot_slug,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    try:
+        response = requests.post(
+            FRODOBOTS_API_URL + "/sdk/interventions/start",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+
+        response_data = response.json()
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=response_data.get("error", "Failed to start intervention"),
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Intervention started successfully",
+                "intervention_id": response_data.get("intervention_id"),
+            },
+        )
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error starting intervention: {str(e)}"
+        )
+
+
+@app.post("/interventions/end")
+async def end_intervention(request: Request):
+    await need_start_mission()
+
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    if not auth_header:
+        raise HTTPException(
+            status_code=500, detail="Authorization header not configured"
+        )
+    if not bot_slug:
+        raise HTTPException(status_code=500, detail="Bot name not configured")
+
+    data = await browser_service.data()
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+
+    if not all([latitude, longitude]):
+        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {
+        "bot_slug": bot_slug,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    try:
+        response = requests.post(
+            FRODOBOTS_API_URL + "/sdk/interventions/end",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+
+        response_data = response.json()
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=response_data.get("error", "Failed to end intervention"),
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={"message": "Intervention ended successfully"},
+        )
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error ending intervention: {str(e)}"
+        )
+
+
+@app.get("/interventions/history")
+async def interventions_history():
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    if not auth_header:
+        raise HTTPException(
+            status_code=500, detail="Authorization header not configured"
+        )
+    if not bot_slug:
+        raise HTTPException(status_code=500, detail="Bot name not configured")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {"bot_slug": bot_slug}
+
+    try:
+        response = requests.get(
+            FRODOBOTS_API_URL + "/sdk/interventions/history",
+            headers=headers,
+            params=payload,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Failed to retrieve interventions history",
+            )
+
+        return JSONResponse(content=response.json())
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching interventions history: {str(e)}"
+        )
