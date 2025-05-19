@@ -312,15 +312,12 @@ Example Response:
 
 ### POST /checkpoint-reached
 
-With this endpoint you can send the checkpoint that was scanned by the bot. You can provide the latitude and longitude of your current position.
+With this endpoint you can send the checkpoint that was scanned by the bot.
 
 ```bash
 curl -X POST 'http://localhost:8000/checkpoint-reached' \
 --header 'Content-Type: application/json' \
---data '{
-    "latitude": 30.48243713,
-    "longitude": 114.3026428
-}'
+--data '{}'
 ```
 
 Successful Response (Code: 200)
