@@ -212,7 +212,8 @@ Example Response:
 
 ```JSON
 {
-    "front_frame": "base64_encoded_image"
+    "front_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
 }
 ```
 
@@ -230,7 +231,8 @@ Example Response:
 
 ```JSON
 {
-    "rear_frame": "base64_encoded_image"
+    "rear_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
 }
 ```
 
@@ -465,6 +467,7 @@ Example Response:
 
   - Added Interventions API with endpoints for starting, ending and retrieving intervention history
   - New endpoints: /interventions/start, /interventions/end, /interventions/history
+  - Added timestamp to /v2/front and /v2/rear endpoints
 
 - v.4.8:
   - Added compatibility for mini and zero bots
