@@ -422,11 +422,6 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     for view in views_list:
         if view not in valid_views:
             raise HTTPException(status_code=400, detail=f"Invalid view type: {view}")
-        if view == "rear" and auth_response_data.get("BOT_TYPE") != "zero":
-            raise HTTPException(
-                status_code=400,
-                detail="Rear camera is only available for zero type bots",
-            )
 
     await browser_service.take_screenshot("screenshots", views_list)
 
@@ -610,11 +605,6 @@ async def get_rear_frame():
     await need_start_mission()
     if not auth_response_data:
         await auth()
-
-    if auth_response_data.get("BOT_TYPE") != "zero":
-        raise HTTPException(
-            status_code=400, detail="Rear camera is only available for zero type bots"
-        )
 
     rear_frame = await browser_service.rear()
     response_data = {}
