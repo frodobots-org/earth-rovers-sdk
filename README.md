@@ -70,15 +70,21 @@ This SDK is meant to control the bot and at the same time monitor its status. Th
 
 ### POST /control
 
-With this endpoint you can send linear and angular values to move the bot. The values are between -1 and 1.
+With this endpoint you can send linear and angular values to move the bot, and control the lamp. The linear and angular values are between -1 and 1. The lamp value is 0 (off) or 1 (on).
 
 ```bash
 curl --location 'http://localhost:8000/control' \
 --header 'Content-Type: application/json' \
 --data '{
-    "command": { "linear": 1, "angular": 1 }
+    "command": { "linear": 1, "angular": 1, "lamp": 0 }
 }'
 ```
+
+**Parameters:**
+
+- `linear`: Movement speed forward/backward (-1 to 1)
+- `angular`: Rotation speed left/right (-1 to 1)
+- `lamp`: Lamp control (0 = off, 1 = on)
 
 Example response:
 
