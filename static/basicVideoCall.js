@@ -25,6 +25,12 @@ var localTracks = {
 var remoteUsers = {};
 
 /*
+ * Subscription queue to serialize subscribe calls (prevents WebRTC negotiation conflicts)
+ */
+var subscriptionQueue = [];
+var isProcessingSubscription = false;
+
+/*
  * On initiation. `client` is not attached to any project or channel for any specific user.
  */
 var options = {
@@ -260,6 +266,9 @@ async function leave() {
 
   // Remove remote users and player views.
   remoteUsers = {};
+  // Clear subscription queue
+  subscriptionQueue = [];
+  isProcessingSubscription = false;
   $("#remote-playerlist").html("");
 
   // leave the channel
@@ -272,47 +281,88 @@ async function leave() {
 }
 
 /*
+ * Process subscription queue one at a time to prevent WebRTC negotiation conflicts
+ */
+async function processSubscriptionQueue() {
+  if (isProcessingSubscription || subscriptionQueue.length === 0) {
+    return;
+  }
+
+  isProcessingSubscription = true;
+
+  while (subscriptionQueue.length > 0) {
+    const { user, mediaType, resolve, reject } = subscriptionQueue.shift();
+    const uid = user.uid;
+
+    try {
+      console.log(`Processing subscription for ${uid} ${mediaType}`);
+      await client.subscribe(user, mediaType);
+      console.log(`subscribe success for ${uid} ${mediaType}`);
+
+      if (mediaType === "video") {
+        const playerWidth =
+          uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
+        const playerHeight =
+          uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
+
+        // Check if player already exists
+        if ($(`#player-wrapper-${uid}`).length === 0) {
+          const player = $(`
+            <div id="player-wrapper-${uid}">
+              <p class="player-name">(${uid})</p>
+              <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
+            </div>
+          `);
+          $("#remote-playerlist").append(player);
+        }
+        user.videoTrack.play(`player-${uid}`);
+
+        // Check if captured frame div already exists
+        if ($(`#captured-frame-${uid}`).length === 0) {
+          const capturedFrameDiv = $(`
+            <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
+            DEBUG_MODE ? "block" : "none"
+          };">
+              <p>Captured Frames (${uid})</p>
+              <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
+              <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
+              <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
+            </div>
+          `);
+          $("#captured-frames").append(capturedFrameDiv);
+        }
+
+        user.videoTrack.captureEnabled = true;
+      }
+      if (mediaType === "audio") {
+        user.audioTrack.play();
+      }
+
+      resolve();
+    } catch (error) {
+      console.error(`subscribe error for ${uid} ${mediaType}:`, error);
+      reject(error);
+    }
+
+    // Small delay between subscriptions to let WebRTC settle
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  isProcessingSubscription = false;
+}
+
+/*
  * Add the local use to a remote channel.
+ * Queues subscriptions to process them sequentially.
  *
  * @param  {IAgoraRTCRemoteUser} user - The {@link  https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/iagorartcremoteuser.html| remote user} to add.
  * @param {trackMediaType - The {@link https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/itrack.html#trackmediatype | media type} to add.
  */
 async function subscribe(user, mediaType) {
-  const uid = user.uid;
-  await client.subscribe(user, mediaType);
-  console.log("subscribe success");
-  if (mediaType === "video") {
-    const playerWidth =
-      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
-    const playerHeight =
-      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
-
-    const player = $(`
-      <div id="player-wrapper-${uid}">
-        <p class="player-name">(${uid})</p>
-        <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
-      </div>
-    `);
-    $("#remote-playerlist").append(player);
-    user.videoTrack.play(`player-${uid}`);
-
-    const capturedFrameDiv = $(`
-      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
-      DEBUG_MODE ? "block" : "none"
-    };">
-        <p>Captured Frames (${uid})</p>
-        <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
-        <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
-        <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
-      </div>
-    `);
-    $("#captured-frames").append(capturedFrameDiv);
-
-    user.videoTrack.captureEnabled = true;
-  }
-  if (mediaType === "audio") {
-    user.audioTrack.play();
-  }
+  return new Promise((resolve, reject) => {
+    subscriptionQueue.push({ user, mediaType, resolve, reject });
+    processSubscriptionQueue();
+  });
 }
 
 /*
@@ -321,10 +371,14 @@ async function subscribe(user, mediaType) {
  * @param  {IAgoraRTCRemoteUser} user - The {@link  https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/iagorartcremoteuser.html| remote user} to add.
  * @param {trackMediaType - The {@link https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/itrack.html#trackmediatype | media type} to add.
  */
-function handleUserPublished(user, mediaType) {
+async function handleUserPublished(user, mediaType) {
   const id = user.uid;
   remoteUsers[id] = user;
-  subscribe(user, mediaType);
+  try {
+    await subscribe(user, mediaType);
+  } catch (error) {
+    console.error(`Failed to subscribe to user ${id} ${mediaType}:`, error);
+  }
 }
 
 /*
