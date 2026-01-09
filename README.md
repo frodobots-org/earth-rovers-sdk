@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v4.9
+# Earth Rovers SDK v5.0
 
 ## Requirements
 
@@ -18,7 +18,7 @@
 
 - Python 3.9 or higher
 - Frodobots API key
-- Google Chrome (Or any browser) installed
+- Google Chrome 143+ (or any modern browser) installed
 
 ## Hardware Specs
 
@@ -465,6 +465,14 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.5.0:
+
+  - Updated video streaming SDK for Chrome 143+ compatibility
+  - Updated real-time messaging SDK to latest stable version
+  - Fixed video subscription errors during stream initialization
+  - Added subscription queue to prevent race conditions
+  - Improved error handling for video stream subscriptions
 
 - v.4.9:
 
