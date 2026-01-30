@@ -214,10 +214,6 @@
         return new Date(dateString).toLocaleString();
       };
 
-      const formatCoordinates = (lat, lon) => {
-        return `${parseFloat(lat).toFixed(6)}, ${parseFloat(lon).toFixed(6)}`;
-      };
-
       const updateInterventionsList = async () => {
         try {
           const response = await fetch(
@@ -249,7 +245,6 @@
             interventionsTable.appendChild(row);
           });
 
-          // Check if there's an active intervention
           activeIntervention = data.interventions.some((i) => !i.end_time);
           startButton.disabled = activeIntervention;
           endButton.disabled = !activeIntervention;
@@ -315,9 +310,7 @@
       startButton.addEventListener("click", startIntervention);
       endButton.addEventListener("click", endIntervention);
 
-      // Initial load of interventions
       updateInterventionsList();
-      // Refresh list every 30 seconds
       setInterval(updateInterventionsList, 30000);
     </script>
   </body>

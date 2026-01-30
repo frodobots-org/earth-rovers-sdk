@@ -4,9 +4,11 @@ import base64
 import numpy as np
 import cv2
 
+BASE_URL = "http://localhost:8000"
+
 
 async def fetch_and_display_image():
-    url = "http://localhost:8000/v1/rear"
+    url = f"{BASE_URL}/v2/rear"
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -14,7 +16,9 @@ async def fetch_and_display_image():
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
-                        base64_image = data["rear_frame"]
+                        base64_image = data.get("rear_frame")
+                        if not base64_image:
+                            continue
 
                         image_bytes = base64.b64decode(base64_image)
                         image_array = np.frombuffer(image_bytes, dtype=np.uint8)
