@@ -63,6 +63,12 @@ pip install keyboard
 | `legacy/front_example.py` | Display front camera feed |
 | `legacy/rear_example.py` | Display rear camera feed |
 
+### AI Agent (Openclaw)
+
+| Example | Description |
+|---------|-------------|
+| `openclaw/` | Control your rover via Telegram using [Openclaw](https://openclaw.ai) as an AI agent gateway. Includes workspace config files and full setup guide. |
+
 ### Web UI Examples
 
 | Example | Description |
