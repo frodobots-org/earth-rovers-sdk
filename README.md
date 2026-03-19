@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v5.0
+# Earth Rovers SDK v5.1
 
 ## Requirements
 
@@ -48,6 +48,12 @@ IMAGE_QUALITY=0.8
 # Image format: jpeg, png or webp (default: png)
 # Recommended: jpeg for better performance and lower bandwidth usage
 IMAGE_FORMAT=jpeg
+# TTS Provider: "edge" (free, default) or "gemini"
+TTS_PROVIDER=edge
+# API key (required for gemini only)
+TTS_API_KEY=
+# Voice name (default: en-US-GuyNeural for edge, Kore for gemini)
+TTS_VOICE=en-US-GuyNeural
 ```
 
 2. Install the SDK
@@ -239,6 +245,38 @@ Example Response:
 {
     "rear_frame": "base64_encoded_image",
     "timestamp": 1724189733.208559
+}
+```
+
+### POST /speak
+
+With this endpoint you can send text-to-speech audio through the rover's physical speaker. The text is converted to speech and streamed to the rover via the Agora RTC audio channel.
+
+Supports two TTS providers, configurable via environment variables:
+- **edge** (default): Free, no API key required, uses Microsoft Edge neural voices
+- **gemini**: Uses Google Gemini API, requires `TTS_API_KEY`
+
+```bash
+curl --location 'http://localhost:8000/speak' \
+--header 'Content-Type: application/json' \
+--data '{
+    "text": "Hello, I am your rover"
+}'
+```
+
+**Environment variables:**
+
+```bash
+TTS_PROVIDER="edge"          # "edge" or "gemini"
+TTS_API_KEY=""                # Required for gemini only
+TTS_VOICE="en-US-GuyNeural"  # Voice name (edge voices or gemini voices like "Kore")
+```
+
+Example Response:
+
+```JSON
+{
+    "message": "Speech sent to rover"
 }
 ```
 
@@ -465,6 +503,13 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.5.1:
+
+  - Added Text-to-Speech (TTS) endpoint `/speak` to play audio through the rover's speaker
+  - Supports two TTS providers: Edge TTS (free, default) and Google Gemini
+  - Audio streamed to rover via Agora RTC custom audio track
+  - Added Openclaw agent configuration files for Telegram-based rover control
 
 - v.5.0:
 

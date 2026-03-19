@@ -7,3 +7,5 @@ Requests==2.32.3
 aiohttp==3.9.3
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
+edge-tts>=6.1.0
+google-genai>=1.0.0
