@@ -188,8 +188,8 @@ def main():
 
     # Check current mission status
     try:
-    checkpoints, latest_scanned = get_checkpoints()
-    display_checkpoints(checkpoints, latest_scanned)
+        checkpoints, latest_scanned = get_checkpoints()
+        display_checkpoints(checkpoints, latest_scanned)
     except Exception as e:
         print(f"Note: Could not fetch checkpoints - {e}")
         print("This may be normal if no mission is configured.\n")

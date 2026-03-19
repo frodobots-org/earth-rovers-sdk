@@ -20,41 +20,41 @@ pip install keyboard
 
 | Example | Description |
 |---------|-------------|
-| `01_basic_movement.py` | Fundamental controls: forward, backward, left, right turns |
-| `02_diagonal_movement.py` | Curved paths, slalom patterns, combined linear+angular |
-| `03_speed_control.py` | Speed levels, smooth acceleration/deceleration |
-| `04_lamp_control.py` | Lamp on/off, blinking patterns, SOS signal |
+| `basics/01_basic_movement.py` | Fundamental controls: forward, backward, left, right turns |
+| `basics/02_diagonal_movement.py` | Curved paths, slalom patterns, combined linear+angular |
+| `basics/03_speed_control.py` | Speed levels, smooth acceleration/deceleration |
+| `basics/04_lamp_control.py` | Lamp on/off, blinking patterns, SOS signal |
 
 ### Telemetry & Cameras
 
 | Example | Description |
 |---------|-------------|
-| `05_telemetry_monitoring.py` | Read battery, GPS, IMU, motor data |
-| `06_dual_camera_stream.py` | Display front and rear camera feeds |
-| `12_video_recording.py` | Record video to file, timelapse capture |
+| `basics/05_telemetry_monitoring.py` | Read battery, GPS, IMU, motor data |
+| `basics/06_dual_camera_stream.py` | Display front and rear camera feeds |
+| `basics/12_video_recording.py` | Record video to file, timelapse capture |
 
 ### Movement Patterns
 
 | Example | Description |
 |---------|-------------|
-| `07_square_pattern.py` | Drive in a square with 90-degree turns |
-| `08_circle_pattern.py` | Circles, figure-8, spirals, sine wave paths |
+| `basics/07_square_pattern.py` | Drive in a square with 90-degree turns |
+| `basics/08_circle_pattern.py` | Circles, figure-8, spirals, sine wave paths |
 
 ### Interactive Control
 
 | Example | Description |
 |---------|-------------|
-| `09_keyboard_teleop.py` | Real-time WASD keyboard control |
-| `13_async_control.py` | Async operations, concurrent monitoring |
+| `basics/09_keyboard_teleop.py` | Real-time WASD keyboard control |
+| `basics/13_async_control.py` | Async operations, concurrent monitoring |
 
 ### Mission & Autonomy
 
 | Example | Description |
 |---------|-------------|
-| `10_mission_control.py` | Start/end missions, checkpoints |
-| `11_intervention_tracking.py` | Track human intervention periods |
-| `14_obstacle_simulation.py` | Simulated obstacle avoidance |
-| `15_waypoint_navigation.py` | GPS-based waypoint navigation |
+| `basics/10_mission_control.py` | Start/end missions, checkpoints |
+| `basics/11_intervention_tracking.py` | Track human intervention periods |
+| `basics/14_obstacle_simulation.py` | Simulated obstacle avoidance |
+| `basics/15_waypoint_navigation.py` | GPS-based waypoint navigation |
 
 ### Camera Feed (Legacy)
 
