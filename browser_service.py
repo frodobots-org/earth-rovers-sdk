@@ -36,6 +36,8 @@ class BrowserService:
                     args=[
                         "--ignore-certificate-errors",
                         "--no-sandbox",
+                        "--autoplay-policy=no-user-gesture-required",
+                        "--use-fake-ui-for-media-stream",
                         f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
                     ],
                 )
@@ -152,6 +154,18 @@ class BrowserService:
             }""",
             message,
         )
+
+    async def speak(self, audio_url: str):
+        await self.initialize_browser()
+
+        result = await self.page.evaluate(
+            """async (audioUrl) => {
+                return await window.playAudioToRover(audioUrl);
+            }""",
+            audio_url,
+        )
+
+        return result
 
     async def close_browser(self):
         if self.browser:

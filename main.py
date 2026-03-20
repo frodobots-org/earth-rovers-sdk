@@ -17,6 +17,7 @@ from typing import Literal
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
+from tts_service import generate_speech
 
 load_dotenv()
 
@@ -407,6 +408,28 @@ async def control(request: Request):
         raise HTTPException(
             status_code=500, detail="Failed to send control command"
         ) from e
+
+
+@app.post("/speak")
+async def speak(request: Request):
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await request.json()
+    text = body.get("text")
+    if not text:
+        raise HTTPException(status_code=400, detail="Text not provided")
+
+    try:
+        audio_path = await generate_speech(text, "static/tts_output")
+        audio_filename = os.path.basename(audio_path)
+        audio_url = f"http://127.0.0.1:8000/static/{audio_filename}"
+        await browser_service.speak(audio_url)
+        return {"message": "Speech sent to rover"}
+    except Exception as e:
+        logger.error("Error in /speak: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
 
 
 @app.get("/screenshot")

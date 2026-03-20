@@ -514,7 +514,7 @@
         try {
           const response = await fetch("http://localhost:8000/v2/front");
           const data = await response.json();
-          frontFrame.src = `data:image/jpg;base64,${data.front_frame}`;
+          frontFrame.src = `data:image/png;base64,${data.front_frame}`;
 
           const now = performance.now();
           const result = updateFpsCounter(
@@ -534,7 +534,7 @@
         try {
           const response = await fetch("http://localhost:8000/v2/rear");
           const data = await response.json();
-          rearFrame.src = `data:image/jpg;base64,${data.rear_frame}`;
+          rearFrame.src = `data:image/png;base64,${data.rear_frame}`;
 
           const now = performance.now();
           const result = updateFpsCounter(

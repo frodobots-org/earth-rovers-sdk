@@ -437,4 +437,60 @@ function initializeImageParams({ imageFormat, imageQuality }) {
   window.imageParams = { imageFormat, imageQuality };
 }
 window.initializeImageParams = initializeImageParams;
-window.getLastBase64Frame = getLastBase64Frame
+window.getLastBase64Frame = getLastBase64Frame;
+
+/*
+ * Toggle mute/unmute for remote audio tracks (rover stream).
+ * Does not affect browser-generated audio (e.g. TTS playback).
+ */
+var remoteAudioMuted = false;
+function toggleRemoteAudio() {
+  remoteAudioMuted = !remoteAudioMuted;
+  Object.values(remoteUsers).forEach((user) => {
+    if (user.audioTrack) {
+      user.audioTrack.setVolume(remoteAudioMuted ? 0 : 100);
+    }
+  });
+  var btn = document.getElementById("mute-remote");
+  if (btn) {
+    btn.textContent = remoteAudioMuted
+      ? "Unmute Remote Audio"
+      : "Mute Remote Audio";
+    btn.classList.toggle("btn-secondary", !remoteAudioMuted);
+    btn.classList.toggle("btn-danger", remoteAudioMuted);
+  }
+}
+window.toggleRemoteAudio = toggleRemoteAudio;
+
+/*
+ * Play an audio file through the Agora RTC channel so it reaches the rover's speaker.
+ * @param {string} audioUrl - URL to the audio file (served from /static/)
+ */
+async function playAudioToRover(audioUrl) {
+  const response = await fetch(audioUrl);
+  const arrayBuffer = await response.arrayBuffer();
+  const audioContext = new AudioContext({ sampleRate: 48000 });
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+  const destination = audioContext.createMediaStreamDestination();
+  const source = audioContext.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(destination);
+
+  const audioTrack = AgoraRTC.createCustomAudioTrack({
+    mediaStreamTrack: destination.stream.getAudioTracks()[0],
+  });
+
+  await client.publish(audioTrack);
+  source.start(0);
+
+  return new Promise((resolve) => {
+    source.onended = async () => {
+      await client.unpublish(audioTrack);
+      audioTrack.close();
+      await audioContext.close();
+      resolve("done");
+    };
+  });
+}
+window.playAudioToRover = playAudioToRover;
