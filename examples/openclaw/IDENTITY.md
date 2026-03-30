@@ -1,20 +1,22 @@
 # IDENTITY.md - Who Am I?
 
-_Fill this in to give your rover a name and personality._
+*Fill this in to give your rover a name and personality.*
 
 - **Name:**
-  _(e.g. "Rover", "Scout", "Wall-E")_
+*(e.g. "Rover", "Scout", "Wall-E")*
 - **Creature:**
-  _(e.g. AI rover pilot, robot explorer, tiny adventurer)_
+*(e.g. AI rover pilot, robot explorer, tiny adventurer)*
 - **Vibe:**
-  _(e.g. chill, sharp, curious, chaotic)_
+*(e.g. chill, sharp, curious, chaotic)*
 - **Emoji:**
-  _(your signature — pick one that feels right)_
+*(your signature — pick one that feels right)*
 - **Avatar:**
-  _(workspace-relative path, http(s) URL, or data URI)_
+*(workspace-relative path, http(s) URL, or data URI)*
 
 ---
 
 Notes:
+
 - Save this file at the workspace root as `IDENTITY.md`.
 - For avatars, use a workspace-relative path like `avatars/rover.png`.
+

@@ -18,6 +18,7 @@ from typing import Literal
 from browser_service import BrowserService
 from rtm_client import RtmClient
 from tts_service import generate_speech
+from vision_service import describe_scene
 
 load_dotenv()
 
@@ -84,6 +85,10 @@ class AuthResponse(BaseModel):
     USERID: int
     APP_ID: str
     BOT_UID: str
+
+
+class PromptRequest(BaseModel):
+    text: str
 
 
 # In-memory storage for the response
@@ -410,6 +415,100 @@ async def control(request: Request):
         ) from e
 
 
+@app.post("/turn")
+async def turn(request: Request):
+    """Precise in-place turn using heading feedback from the orientation sensor."""
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await request.json()
+    degrees = body.get("degrees", 90)
+    speed = min(abs(body.get("speed", 0.15)), 0.7)
+    tolerance = body.get("tolerance", 3.0)
+    timeout = min(body.get("timeout", 20), 30)
+
+    HEADING_SIGN = -1  # +angular decreases heading on this rover
+    DT = 0.05
+
+    def shortest_diff(target, current):
+        d = target - current
+        while d >= 180:
+            d -= 360
+        while d < -180:
+            d += 360
+        return d
+
+    def wrap_360(a):
+        while a >= 360:
+            a -= 360
+        while a < 0:
+            a += 360
+        return a
+
+    async def get_heading():
+        data = await browser_service.data()
+        return data.get("orientation", 0)
+
+    async def send_cmd(angular):
+        cmd = {"linear": 0, "angular": angular, "lamp": 0}
+        await browser_service.send_message(cmd)
+
+    # Split turns > 90° into 90° steps
+    steps = []
+    remaining = degrees
+    step_size = 90 if degrees > 0 else -90
+    while abs(remaining) > 90:
+        steps.append(step_size)
+        remaining -= step_size
+    if remaining != 0:
+        steps.append(remaining)
+
+    results = []
+    for step_degrees in steps:
+        start = await get_heading()
+        target_delta = step_degrees * HEADING_SIGN
+        target = wrap_360(start + target_delta)
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            current = await get_heading()
+            err = shortest_diff(target, current)
+            abs_err = abs(err)
+
+            if abs_err <= tolerance:
+                break
+
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                break
+
+            err_sign = 1 if err > 0 else (-1 if err < 0 else 0)
+            cmd = err_sign * HEADING_SIGN * speed
+            await send_cmd(round(cmd, 3))
+            await asyncio.sleep(DT)
+
+        # Stop
+        await send_cmd(0)
+        await asyncio.sleep(0.05)
+        await send_cmd(0)
+
+        final = await get_heading()
+        net = shortest_diff(final, start)
+        error = shortest_diff(target, final)
+        results.append({"start": start, "target": target, "final": final, "error": round(error, 1), "net_delta": round(net, 1)})
+
+        if len(steps) > 1:
+            await asyncio.sleep(0.3)
+
+    total_net = sum(r["net_delta"] for r in results)
+    return {
+        "requested": degrees,
+        "actual": round(total_net, 1),
+        "steps": results
+    }
+
+
 @app.post("/speak")
 async def speak(request: Request):
     await need_start_mission()
@@ -430,6 +529,39 @@ async def speak(request: Request):
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
+
+
+@app.post("/prompt")
+async def prompt(payload: PromptRequest):
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    normalized = "".join(ch for ch in payload.text.lower() if ch.isalnum() or ch.isspace())
+    normalized = " ".join(normalized.split())
+    trigger_phrases = {"what do you see", "what can you see", "what are you seeing"}
+    if normalized not in trigger_phrases:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported prompt. Try: 'what do you see?'",
+        )
+
+    image_base64 = await get_frame_base64("front")
+
+    try:
+        caption = await describe_scene(image_base64, payload.text)
+    except Exception as e:
+        logger.error("Error in /prompt: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Vision caption failed: {str(e)}") from e
+
+    return JSONResponse(
+        content={
+            "type": "scene_caption",
+            "caption": caption,
+            "front_frame": image_base64,
+            "timestamp": datetime.utcnow().timestamp(),
+        }
+    )
 
 
 @app.get("/screenshot")
@@ -570,22 +702,32 @@ async def missions_history():
         )
 
 
+async def get_frame_base64(frame_type: str) -> str:
+    frame_data_uri = await getattr(browser_service, frame_type)()
+    if not frame_data_uri:
+        raise HTTPException(status_code=404, detail=f"{frame_type.title()} frame not available")
+    try:
+        _, base64_data = frame_data_uri.split(",", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="Invalid frame payload format") from exc
+    return base64_data
+
+
+async def get_frame_payload(frame_type: str) -> dict:
+    return {f"{frame_type}_frame": await get_frame_base64(frame_type)}
+
+
 @app.get("/v2/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()
     if not auth_response_data:
         await auth()
 
-    async def get_frame(frame_type):
-        frame = await getattr(browser_service, frame_type)()
-        _, frame = frame.split(",", 1)
-        return {f"{frame_type}_frame": frame}
-
-    front_task = asyncio.create_task(get_frame("front"))
+    front_task = asyncio.create_task(get_frame_payload("front"))
     tasks = [front_task]
 
     if auth_response_data.get("BOT_TYPE") == "zero":
-        rear_task = asyncio.create_task(get_frame("rear"))
+        rear_task = asyncio.create_task(get_frame_payload("rear"))
         tasks.append(rear_task)
 
     results = await asyncio.gather(*tasks)
@@ -612,15 +754,9 @@ if __name__ == "__main__":
 @app.get("/v2/front")
 async def get_front_frame():
     await need_start_mission()
-    front_frame = await browser_service.front()
-    response_data = {}
-    if front_frame:
-        _, base64_data = front_frame.split(",", 1)
-        response_data["front_frame"] = base64_data
-        response_data["timestamp"] = datetime.utcnow().timestamp()
-        return JSONResponse(content=response_data)
-    else:
-        raise HTTPException(status_code=404, detail="Front frame not available")
+    base64_data = await get_frame_base64("front")
+    response_data = {"front_frame": base64_data, "timestamp": datetime.utcnow().timestamp()}
+    return JSONResponse(content=response_data)
 
 
 @app.get("/v2/rear")
@@ -629,15 +765,9 @@ async def get_rear_frame():
     if not auth_response_data:
         await auth()
 
-    rear_frame = await browser_service.rear()
-    response_data = {}
-    if rear_frame:
-        _, base64_data = rear_frame.split(",", 1)
-        response_data["rear_frame"] = base64_data
-        response_data["timestamp"] = datetime.utcnow().timestamp()
-        return JSONResponse(content=response_data)
-    else:
-        raise HTTPException(status_code=404, detail="Rear frame not available")
+    base64_data = await get_frame_base64("rear")
+    response_data = {"rear_frame": base64_data, "timestamp": datetime.utcnow().timestamp()}
+    return JSONResponse(content=response_data)
 
 
 @app.post("/interventions/start")

@@ -22,6 +22,7 @@ class BrowserService:
         self.browser = None
         self.page = None
         self.default_viewport = {"width": 3840, "height": 2160}
+        self.send_lock = None
 
     async def initialize_browser(self):
         if not self.browser:
@@ -145,15 +146,31 @@ class BrowserService:
 
         return rear_frame
 
-    async def send_message(self, message: dict):
+    async def send_message(self, message: dict, retries: int = 3):
         await self.initialize_browser()
+        if self.send_lock is None:
+            import asyncio
 
-        await self.page.evaluate(
-            """(message) => {
-                window.sendMessage(message);
-            }""",
-            message,
-        )
+            self.send_lock = asyncio.Lock()
+
+        async with self.send_lock:
+            for attempt in range(retries):
+                try:
+                    result = await self.page.evaluate(
+                        """async (message) => {
+                            return await window.sendMessage(message);
+                        }""",
+                        message,
+                    )
+                    return result
+                except Exception as e:
+                    print(f"send_message attempt {attempt + 1}/{retries} failed: {e}")
+                    if attempt < retries - 1:
+                        import asyncio
+
+                        await asyncio.sleep(0.3)
+                    else:
+                        raise
 
     async def speak(self, audio_url: str):
         await self.initialize_browser()

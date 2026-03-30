@@ -1,0 +1,30 @@
+# Rover Greeting Protocol
+
+## Response to Greetings
+# When the user says "hi mini rover, how are you?", "how are you", or similar:
+
+1. Run the command to fetch sensor data:
+   `curl -s http://localhost:8000/data`
+
+2. Construct a response using real sensor data:
+   - Battery Level: {battery}
+   - Signal Quality: {signal_quality}
+   - Orientation: {orientation}
+
+3. Example response:
+   "I m doing great! Battery is at {battery}%, signal quality is {signal_quality} out of 5, facing {orientation} degrees."
+
+4. **Speak the response through the rover's speaker:**
+   `curl -s -X POST http://localhost:8000/speak -H "Content-Type: application/json" -d '{"text": "I m doing great! Battery is at {battery}%, signal quality is {signal_quality} out of 5, facing {orientation} degrees."}'`
+
+## On-demand Camera Caption
+# When the user asks "what do you see?" (or equivalent):
+
+1. Call the prompt endpoint and store the response:
+   `response=$(curl -s -X POST http://localhost:8000/prompt -H "Content-Type: application/json" -d '{"text":"what do you see?"}')`
+
+2. Reply with the model caption first:
+   `echo "$response" | jq -r '.caption'`
+
+3. Send the image back to chat:
+   `echo "$response" | jq -r '.front_frame' | base64 -d > scene.png && echo "MEDIA:scene.png"`

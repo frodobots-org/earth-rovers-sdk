@@ -54,6 +54,14 @@ TTS_PROVIDER=edge
 TTS_API_KEY=
 # Voice name (default: en-US-GuyNeural for edge, Kore for gemini)
 TTS_VOICE=en-US-GuyNeural
+# Vision Provider (currently "openai")
+VISION_PROVIDER=openai
+# API key required for on-demand camera captioning
+OPENAI_API_KEY=
+# Vision model name
+OPENAI_VISION_MODEL=gpt-4.1-mini
+# Optional timeout for vision calls in seconds
+OPENAI_VISION_TIMEOUT_SECONDS=15
 ```
 
 2. Install the SDK
@@ -99,6 +107,8 @@ Example response:
     "message": "Command sent successfully"
 }
 ```
+
+**Sustained motion:** The bundled web controls send `/control` about every **50 ms** while a key is held. A single successful POST often moves the rover only briefly; for moves over a chosen time or distance, repeat the same command at roughly **20 Hz** for that duration, then send `linear: 0`, `angular: 0`. See `examples/openclaw/AGENTS.md` for bash loop examples.
 
 ### GET /data
 
@@ -277,6 +287,38 @@ Example Response:
 ```JSON
 {
     "message": "Speech sent to rover"
+}
+```
+
+### POST /prompt
+
+Use this endpoint for on-demand camera captioning. If you send `what do you see?`, the SDK captures a front camera frame and returns an AI-generated scene caption with the image payload.
+
+```bash
+curl --location 'http://localhost:8000/prompt' \
+--header 'Content-Type: application/json' \
+--data '{
+    "text": "what do you see?"
+}'
+```
+
+**Environment variables:**
+
+```bash
+VISION_PROVIDER="openai"
+OPENAI_API_KEY=""                  # Required
+OPENAI_VISION_MODEL="gpt-4.1-mini" # Optional override
+OPENAI_VISION_TIMEOUT_SECONDS=15   # Optional timeout
+```
+
+Example Response:
+
+```JSON
+{
+    "type": "scene_caption",
+    "caption": "A paved road ahead with a parked scooter on the right and no immediate obstacle in front.",
+    "front_frame": "base64_encoded_image",
+    "timestamp": 1724189733.208559
 }
 ```
 

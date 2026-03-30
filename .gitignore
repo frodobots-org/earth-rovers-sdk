@@ -19,3 +19,5 @@ node_modules/
 screenshots/*.png
 static/*.mp3
 static/*.wav
+venv39/
+.pycache/

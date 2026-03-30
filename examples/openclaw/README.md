@@ -34,7 +34,7 @@ In your `~/.openclaw/openclaw.json`, set the agent's workspace to this SDK direc
 Alternatively, copy the files from this folder into your existing workspace:
 
 ```bash
-cp examples/openclaw/*.md ~/.openclaw/workspace/
+cp examples/openclaw/*.md examples/openclaw/precise_turn.sh ~/.openclaw/workspace/
 ```
 
 ### 2. Add the workspace files
@@ -49,6 +49,7 @@ Copy these files into your workspace directory:
 | `USER.md` | Info about you (the human). The agent fills this in over time. |
 | `TOOLS.md` | Environment-specific notes (device names, preferences). |
 | `HEARTBEAT.md` | Periodic tasks the agent runs automatically. |
+| `precise_turn.sh` | Closed-loop turn script using heading sensor (±3° accuracy). Used by the agent for all in-place turns. |
 
 ### 3. Start the SDK server
 
@@ -104,6 +105,8 @@ Chat Message → Openclaw Gateway → LLM Agent → curl to localhost:8000 → E
 **Images not sending**: If you get `LocalMediaAccessError`, the image path is outside the workspace. Make sure images are saved inside the workspace directory.
 
 **TTS not working**: Verify with `curl -s -X POST http://localhost:8000/speak -H "Content-Type: application/json" -d '{"text": "test"}'`.
+
+**Agent says "I can't see images"**: Your Openclaw session is likely not using the updated workspace prompts. Re-copy `examples/openclaw/*.md` into the active Openclaw workspace and restart the agent session.
 
 ## Resources
 
