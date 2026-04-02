@@ -10,18 +10,38 @@ $(document).ready(function () {
 
   // Create an instance of an RTM channel
   const rtmChannel = rtmClient.createChannel(channelName);
-  let resolveRtmReady;
-  let rejectRtmReady;
-  const rtmReadyPromise = new Promise((resolve, reject) => {
-    resolveRtmReady = resolve;
-    rejectRtmReady = reject;
-  });
+  let rtmJoinPromise = null;
+  let rtmReconnectTimer = null;
+  window.rtmReady = false;
+  window.rtmConnectionState = "DISCONNECTED";
+  window.rtmLastReason = "";
+  window.rtmLastError = "";
+  window.rtmLoggedIn = false;
+  window.rtmChannelJoined = false;
 
   // Event listener for connection state changes
   rtmClient.on("ConnectionStateChange", (newState, reason) => {
     console.log(
       "on connection state changed to " + newState + " reason: " + reason
     );
+    window.rtmConnectionState = newState;
+    window.rtmLastReason = reason || "";
+    if (newState === "CONNECTED") {
+      window.rtmReady = true;
+      window.rtmLoggedIn = true;
+      if (rtmReconnectTimer) {
+        clearTimeout(rtmReconnectTimer);
+        rtmReconnectTimer = null;
+      }
+      return;
+    }
+
+    if (newState === "ABORTED" || newState === "DISCONNECTED") {
+      window.rtmReady = false;
+      window.rtmLoggedIn = false;
+      window.rtmChannelJoined = false;
+      scheduleRtmReconnect(reason || newState);
+    }
   });
 
   // Event listener for receiving a channel message
@@ -93,33 +113,113 @@ $(document).ready(function () {
   }
 
   // Function to join the RTM channel
-  function joinRTMChannel(uid) {
-    rtmClient
-      .login({ token: TOKEN, uid: String(uid) })
-      .then(() => {
-        console.log("AgoraRTM client login success");
-        // Join a channel
-        rtmChannel
-          .join()
-          .then(() => {
-            console.log("RTM Channel join success");
-            resolveRtmReady();
-            // You can now send messages or set up more event listeners
-          })
-          .catch((error) => {
-            console.log("Failed to join channel for error: " + error);
-            rejectRtmReady(error);
-          });
-      })
-      .catch((err) => {
-        console.log("AgoraRTM client login failure", err);
-        rejectRtmReady(err);
-      });
+  async function joinRTMChannel(uid, forceReconnect = false) {
+    if (!TOKEN) {
+      window.rtmReady = true;
+      window.rtmConnectionState = "DISABLED";
+      return true;
+    }
+
+    if (
+      !forceReconnect &&
+      (window.rtmReady ||
+        window.rtmConnectionState === "CONNECTED" ||
+        window.rtmChannelJoined)
+    ) {
+      return true;
+    }
+
+    if (rtmJoinPromise) {
+      return rtmJoinPromise;
+    }
+
+    rtmJoinPromise = (async () => {
+      if (forceReconnect) {
+        try {
+          if (window.rtmChannelJoined) {
+            await rtmChannel.leave();
+          }
+        } catch (error) {
+          // Ignore if channel was already detached.
+        }
+        window.rtmChannelJoined = false;
+        try {
+          if (window.rtmLoggedIn) {
+            await rtmClient.logout();
+          }
+        } catch (error) {
+          // Ignore if client was already logged out.
+        }
+        window.rtmLoggedIn = false;
+      }
+
+      try {
+        if (!window.rtmLoggedIn) {
+          await rtmClient.login({ token: TOKEN, uid: String(uid) });
+          console.log("AgoraRTM client login success");
+          window.rtmLoggedIn = true;
+        }
+        if (!window.rtmChannelJoined) {
+          await rtmChannel.join();
+          console.log("RTM Channel join success");
+          window.rtmChannelJoined = true;
+        }
+        window.rtmReady = true;
+        window.rtmConnectionState = "CONNECTED";
+        window.rtmLastError = "";
+        return true;
+      } catch (err) {
+        window.rtmReady = false;
+        window.rtmLoggedIn = false;
+        window.rtmChannelJoined = false;
+        window.rtmLastError = String(err);
+        console.log("AgoraRTM join failure", err);
+        throw err;
+      } finally {
+        rtmJoinPromise = null;
+      }
+    })();
+
+    return rtmJoinPromise;
   }
 
-  async function waitForRtmReady(timeoutMs = 5000) {
+  function scheduleRtmReconnect(reason) {
+    if (rtmReconnectTimer || rtmJoinPromise) {
+      return;
+    }
+
+    console.warn("[rtm] scheduling reconnect, reason:", reason);
+    rtmReconnectTimer = setTimeout(() => {
+      rtmReconnectTimer = null;
+      joinRTMChannel(USER_ID, true).catch((error) => {
+        console.warn("[rtm] reconnect failed:", error);
+        scheduleRtmReconnect("retry_after_failure");
+      });
+    }, 1000);
+  }
+
+  function isRtmUsable() {
+    if (!TOKEN) {
+      return true;
+    }
+    return Boolean(
+      window.rtmLoggedIn &&
+        window.rtmChannelJoined &&
+        (window.rtmReady || window.rtmConnectionState === "CONNECTED")
+    );
+  }
+
+  async function ensureRtmReady(timeoutMs = 5000) {
+    if (!TOKEN) {
+      return true;
+    }
+
+    if (isRtmUsable()) {
+      return true;
+    }
+
     return Promise.race([
-      rtmReadyPromise,
+      joinRTMChannel(USER_ID, false),
       new Promise((_, reject) =>
         setTimeout(
           () => reject(new Error("RTM not ready: login/join timeout")),
@@ -128,13 +228,23 @@ $(document).ready(function () {
       ),
     ]);
   }
+  window.ensureRtmReady = ensureRtmReady;
+
+  function shouldRetrySendAfterReconnect(err) {
+    const message = String(err || "");
+    return (
+      message.includes("RtmInvalidStatusError") ||
+      message.includes("Error Code 102") ||
+      message.toLowerCase().includes("not logged in")
+    );
+  }
 
   // Function to send message — returns a promise so callers can await it
   function sendMessage(json) {
     const message = JSON.stringify(json);
     console.warn("sending message to bot", botUid);
     console.warn("message", message);
-    return waitForRtmReady()
+    return ensureRtmReady()
       .then(() =>
         rtmClient.sendMessageToPeer(
           {
@@ -143,6 +253,25 @@ $(document).ready(function () {
           botUid
         )
       )
+      .catch((err) => {
+        if (!shouldRetrySendAfterReconnect(err)) {
+          throw err;
+        }
+
+        console.warn("[rtm] send retry after reconnect:", err);
+        window.rtmReady = false;
+        window.rtmLoggedIn = false;
+        window.rtmChannelJoined = false;
+        window.rtmConnectionState = "DISCONNECTED";
+        return joinRTMChannel(USER_ID, true).then(() =>
+          rtmClient.sendMessageToPeer(
+            {
+              text: message,
+            },
+            botUid
+          )
+        );
+      })
       .then(() => {
         console.warn("Message sent successfully:", message);
         return { success: true };
@@ -157,6 +286,11 @@ $(document).ready(function () {
   window.sendMessage = sendMessage;
 
   // Call joinRTMChannel with the user ID to start the process
-  joinRTMChannel(USER_ID);
+  if (TOKEN) {
+    joinRTMChannel(USER_ID);
+  } else {
+    window.rtmReady = true;
+    window.rtmConnectionState = "DISABLED";
+    console.log("RTM disabled for this page: no token provided");
+  }
 });
-

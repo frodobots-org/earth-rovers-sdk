@@ -34,7 +34,7 @@ In your `~/.openclaw/openclaw.json`, set the agent's workspace to this SDK direc
 Alternatively, copy the files from this folder into your existing workspace:
 
 ```bash
-cp examples/openclaw/*.md examples/openclaw/precise_turn.sh ~/.openclaw/workspace/
+cp examples/openclaw/*.md ~/.openclaw/workspace/
 ```
 
 ### 2. Add the workspace files
@@ -49,7 +49,6 @@ Copy these files into your workspace directory:
 | `USER.md` | Info about you (the human). The agent fills this in over time. |
 | `TOOLS.md` | Environment-specific notes (device names, preferences). |
 | `HEARTBEAT.md` | Periodic tasks the agent runs automatically. |
-| `precise_turn.sh` | Closed-loop turn script using heading sensor (±3° accuracy). Used by the agent for all in-place turns. |
 
 ### 3. Start the SDK server
 

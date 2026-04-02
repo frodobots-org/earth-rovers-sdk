@@ -439,6 +439,164 @@ function initializeImageParams({ imageFormat, imageQuality }) {
 window.initializeImageParams = initializeImageParams;
 window.getLastBase64Frame = getLastBase64Frame;
 
+let rtcJoinPromise = null;
+
+async function triggerRtcJoin() {
+  if (client && client.connectionState === "CONNECTED") {
+    return true;
+  }
+  if (rtcJoinPromise) {
+    return rtcJoinPromise;
+  }
+
+  rtcJoinPromise = (async () => {
+    if (!client) {
+      const joinForm = document.getElementById("join-form");
+      if (joinForm) {
+        const event = new Event("submit", { cancelable: true, bubbles: true });
+        joinForm.dispatchEvent(event);
+      } else {
+        return false;
+      }
+    }
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 10000) {
+      if (client && client.connectionState === "CONNECTED") {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return false;
+  })();
+
+  try {
+    return await rtcJoinPromise;
+  } finally {
+    rtcJoinPromise = null;
+  }
+}
+
+async function ensureRtcReady(timeoutMs = 12000) {
+  const joined = await triggerRtcJoin();
+  if (!joined) {
+    return false;
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const frontUser = remoteUsers[1000];
+    const connected = Boolean(client && client.connectionState === "CONNECTED");
+    const hasFrontVideo = Boolean(frontUser && frontUser.videoTrack);
+    if (connected && hasFrontVideo) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  return false;
+}
+window.ensureRtcReady = ensureRtcReady;
+
+function pickRoverAudioTrack() {
+  const preferred = remoteUsers[1000];
+  if (preferred && preferred.audioTrack) {
+    return preferred.audioTrack;
+  }
+  for (const user of Object.values(remoteUsers)) {
+    if (user && user.audioTrack) {
+      return user.audioTrack;
+    }
+  }
+  return null;
+}
+
+function pickRecorderMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+  ];
+  for (const type of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+  return "";
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Failed to read blob"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function recordRoverAudio(durationMs = 4000) {
+  const ready = await ensureRtcReady();
+  if (!ready) {
+    return null;
+  }
+
+  const roverAudioTrack = pickRoverAudioTrack();
+  if (!roverAudioTrack || !roverAudioTrack.getMediaStreamTrack) {
+    return null;
+  }
+
+  const mediaTrack = roverAudioTrack.getMediaStreamTrack();
+  if (!mediaTrack) {
+    return null;
+  }
+
+  const clonedTrack = mediaTrack.clone ? mediaTrack.clone() : mediaTrack;
+  const stream = new MediaStream([clonedTrack]);
+  const mimeType = pickRecorderMimeType();
+  const chunks = [];
+
+  let recorder;
+  try {
+    recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+  } catch (error) {
+    console.warn("recordRoverAudio MediaRecorder init failed:", error);
+    stream.getTracks().forEach((t) => t.stop());
+    return null;
+  }
+
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      chunks.push(event.data);
+    }
+  };
+
+  const stopped = new Promise((resolve) => {
+    recorder.onstop = resolve;
+  });
+
+  recorder.start();
+  await new Promise((resolve) => setTimeout(resolve, Math.max(300, Number(durationMs) || 4000)));
+  recorder.stop();
+  await stopped;
+
+  stream.getTracks().forEach((t) => t.stop());
+  if (!chunks.length) {
+    return null;
+  }
+
+  const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+  try {
+    return await blobToDataUrl(blob);
+  } catch (error) {
+    console.warn("recordRoverAudio blob conversion failed:", error);
+    return null;
+  }
+}
+window.recordRoverAudio = recordRoverAudio;
+
 /*
  * Toggle mute/unmute for remote audio tracks (rover stream).
  * Does not affect browser-generated audio (e.g. TTS playback).

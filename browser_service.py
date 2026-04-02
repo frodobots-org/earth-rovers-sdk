@@ -18,14 +18,28 @@ if QUALITY < 0 or QUALITY > 1:
 
 
 class BrowserService:
-    def __init__(self):
+    def __init__(self, page_path: str = "/sdk", require_rtm: bool = True):
         self.browser = None
         self.page = None
         self.default_viewport = {"width": 3840, "height": 2160}
         self.send_lock = None
+        self.init_lock = None
+        self.page_path = page_path
+        self.require_rtm = require_rtm
 
     async def initialize_browser(self):
-        if not self.browser:
+        if self.browser:
+            return
+
+        if self.init_lock is None:
+            import asyncio
+
+            self.init_lock = asyncio.Lock()
+
+        async with self.init_lock:
+            if self.browser:
+                return
+
             try:
                 executable_path = os.getenv(
                     "CHROME_EXECUTABLE_PATH",
@@ -39,6 +53,8 @@ class BrowserService:
                         "--no-sandbox",
                         "--autoplay-policy=no-user-gesture-required",
                         "--use-fake-ui-for-media-stream",
+                        "--enable-usermedia-screen-capturing",
+                        "--allow-http-screen-capture",
                         f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
                     ],
                 )
@@ -48,12 +64,36 @@ class BrowserService:
                     {"Accept-Language": "en-US,en;q=0.9"}
                 )
                 await self.page.goto(
-                    "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
+                    f"http://127.0.0.1:8000{self.page_path}",
+                    {"waitUntil": "networkidle2"},
                 )
-                await self.page.click("#join")
-                await self.page.waitForSelector("video")
                 await self.page.waitForSelector("#map")
+
+                # IMPORTANT: do not RTC-join in headless control path.
+                # `/control` only needs RTM (window.sendMessage). Forcing RTC join here can
+                # collide with a human browser session using the same UID and result in
+                # Agora "UID_BANNED" reconnect blocks.
+                if self.require_rtm:
+                    await self.page.waitForFunction(
+                        """() =>
+                        Boolean(
+                            window.sendMessage &&
+                            window.ensureRtmReady
+                        )"""
+                    )
+                else:
+                    await self.page.click("#join")
+                    await self.page.waitForSelector("#remote-playerlist")
+                    await self.page.waitForFunction(
+                        """() =>
+                        Boolean(
+                            window.recordRoverAudio &&
+                            window.ensureRtcReady
+                        )"""
+                    )
                 await self.page.setViewport(self.default_viewport)
+
+                self.page.on("console", lambda msg: print(f"[browser] {msg.type}: {msg.text}"))
 
                 await self.page.waitFor(2000)
 
@@ -73,6 +113,7 @@ class BrowserService:
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
         await self.initialize_browser()
+        await self.ensure_session_ready()
 
         dimensions = await self.page.evaluate(
             """() => {
@@ -115,6 +156,7 @@ class BrowserService:
 
     async def data(self) -> dict:
         await self.initialize_browser()
+        await self.ensure_session_ready()
 
         bot_data = await self.page.evaluate(
             """() => {
@@ -126,28 +168,39 @@ class BrowserService:
 
     async def front(self) -> str:
         await self.initialize_browser()
+        await self.ensure_session_ready(require_rtm=False)
 
-        front_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1000) || null;
-        }"""
-        )
+        try:
+            front_frame = await self.page.evaluate(
+                """() => {
+            return getLastBase64Frame(1000) || null;
+            }"""
+            )
+        except Exception as error:
+            print(f"front frame capture failed: {error}")
+            return None
 
         return front_frame
 
     async def rear(self) -> str:
         await self.initialize_browser()
+        await self.ensure_session_ready(require_rtm=False)
 
-        rear_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1001) || null;
-        }"""
-        )
+        try:
+            rear_frame = await self.page.evaluate(
+                """() => {
+            return getLastBase64Frame(1001) || null;
+            }"""
+            )
+        except Exception as error:
+            print(f"rear frame capture failed: {error}")
+            return None
 
         return rear_frame
 
     async def send_message(self, message: dict, retries: int = 3):
         await self.initialize_browser()
+        await self.ensure_session_ready()
         if self.send_lock is None:
             import asyncio
 
@@ -174,6 +227,7 @@ class BrowserService:
 
     async def speak(self, audio_url: str):
         await self.initialize_browser()
+        await self.ensure_session_ready()
 
         result = await self.page.evaluate(
             """async (audioUrl) => {
@@ -183,6 +237,79 @@ class BrowserService:
         )
 
         return result
+
+    async def record_rover_audio(self, duration_ms: int = 4000):
+        """Record audio from the rover's mic via Agora RTC. Returns base64 data URL or None."""
+        await self.initialize_browser()
+        await self.ensure_session_ready(require_rtm=False)
+        result = await self.page.evaluate(
+            """async (durationMs) => {
+                return await window.recordRoverAudio(durationMs);
+            }""",
+            duration_ms,
+        )
+        return result
+
+    async def ensure_session_ready(self, require_rtm: bool = None):
+        if require_rtm is None:
+            require_rtm = self.require_rtm
+        last_error = None
+
+        for attempt in range(2):
+            await self.initialize_browser()
+            try:
+                status = await self.page.evaluate(
+                    """async (requireRtm) => {
+                        let rtcReady = null;
+                        if (!requireRtm) {
+                            rtcReady = window.ensureRtcReady
+                                ? await window.ensureRtcReady()
+                                : false;
+                        }
+                        let rtmReady = null;
+                        if (requireRtm) {
+                            rtmReady = window.ensureRtmReady
+                                ? await window.ensureRtmReady()
+                                : false;
+                        }
+                        return {
+                            rtc_ready: rtcReady === null ? null : Boolean(rtcReady),
+                            rtm_ready: rtmReady === null ? null : Boolean(rtmReady),
+                            rtc_state: window.rtcConnectionState || null,
+                            rtm_state: window.rtmConnectionState || null,
+                        };
+                    }""",
+                    require_rtm,
+                )
+            except Exception as error:
+                last_error = error
+                print(f"ensure_session_ready evaluate failed: {error}")
+                if attempt == 0:
+                    await self.close_browser()
+                    continue
+                raise
+
+            if (require_rtm and status.get("rtm_ready")) or (
+                not require_rtm and status.get("rtc_ready")
+            ):
+                return
+
+            rtc_state = status.get("rtc_state")
+            rtm_state = status.get("rtm_state")
+            last_error = RuntimeError(
+                f"RTC session not ready (state={rtc_state}); RTM state={rtm_state}"
+            )
+            if attempt == 0:
+                print(f"ensure_session_ready recovering after unhealthy session: {last_error}")
+                await self.close_browser()
+                continue
+
+            if require_rtm:
+                raise RuntimeError(f"RTM session not ready (state={rtm_state})")
+            raise RuntimeError(f"RTC session not ready (state={rtc_state})")
+
+        if last_error:
+            raise last_error
 
     async def close_browser(self):
         if self.browser:

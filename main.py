@@ -1,19 +1,25 @@
 import base64
+import binascii
 import functools
 import json
 import logging
 import os
+import re
+import tempfile
+import time
+import unicodedata
 from datetime import datetime
 import asyncio
 
+import aiohttp
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
@@ -98,6 +104,36 @@ checkpoints_list_data = {}
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 browser_service = BrowserService()
+voice_browser_service = BrowserService(page_path="/", require_rtm=False)
+
+
+voice_loop_task: Optional[asyncio.Task] = None
+voice_loop_lock = asyncio.Lock()
+browser_prewarm_task: Optional[asyncio.Task] = None
+voice_loop_state: Dict[str, Any] = {
+    "running": False,
+    "status": "idle",
+    "duration_ms": None,
+    "listen_windows": None,
+    "poll_delay_ms": None,
+    "started_at": None,
+    "last_transcript": "",
+    "last_attempts": 0,
+    "last_hook_status_code": None,
+    "last_error": None,
+    "last_timings": {},
+    "iterations": 0,
+    "forwarded_count": 0,
+}
+
+
+def _is_browser_prewarm_enabled() -> bool:
+    return os.getenv("PREWARM_BROWSER_ON_STARTUP", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 async def auth_common():
@@ -353,6 +389,7 @@ async def render_index_html(is_spectator: bool):
         "channel": auth_response_data.get("CHANNEL_NAME", ""),
         "uid": auth_response_data.get(f"{token_type}USERID", ""),
         "bot_uid": auth_response_data.get("BOT_UID", ""),
+        "bot_audio_uid": os.getenv("ROVER_AUDIO_UID", ""),
         "checkpoints_list": json.dumps(
             checkpoints_list_data.get("checkpoints_list", [])
         ),
@@ -423,13 +460,22 @@ async def turn(request: Request):
         await auth()
 
     body = await request.json()
-    degrees = body.get("degrees", 90)
-    speed = min(abs(body.get("speed", 0.15)), 0.7)
-    tolerance = body.get("tolerance", 3.0)
-    timeout = min(body.get("timeout", 20), 30)
+    degrees = float(body.get("degrees", 90))
+    max_speed = min(max(abs(body.get("speed", 0.45)), 0.12), 0.7)
+    min_speed = min(
+        max_speed,
+        max(abs(body.get("min_speed", max_speed * 0.5)), 0.12),
+    )
+    tolerance = float(body.get("tolerance", 3.0))
+    timeout = min(float(body.get("timeout", 20)), 30)
 
     HEADING_SIGN = -1  # +angular decreases heading on this rover
-    DT = 0.05
+    CONTROL_INTERVAL = min(max(float(body.get("control_interval", 0.15)), 0.05), 0.5)
+    COMMAND_REFRESH_INTERVAL = min(
+        max(float(body.get("command_refresh_interval", 0.35)), 0.1),
+        1.0,
+    )
+    STALL_TIMEOUT = 0.8
 
     def shortest_diff(target, current):
         d = target - current
@@ -446,13 +492,47 @@ async def turn(request: Request):
             a += 360
         return a
 
-    async def get_heading():
+    def parse_sample(data):
+        heading = float(data.get("orientation", 0))
+        sample_ts = data.get("timestamp")
+        try:
+            sample_ts = float(sample_ts) if sample_ts is not None else None
+        except (TypeError, ValueError):
+            sample_ts = None
+        return heading, sample_ts
+
+    async def get_heading_sample():
         data = await browser_service.data()
-        return data.get("orientation", 0)
+        return parse_sample(data)
 
     async def send_cmd(angular):
         cmd = {"linear": 0, "angular": angular, "lamp": 0}
         await browser_service.send_message(cmd)
+
+    async def wait_for_fresh_heading(previous_heading, previous_ts):
+        deadline = asyncio.get_event_loop().time() + CONTROL_INTERVAL
+        latest_heading, latest_ts = previous_heading, previous_ts
+
+        while asyncio.get_event_loop().time() < deadline:
+            latest_heading, latest_ts = await get_heading_sample()
+            if previous_ts is not None and latest_ts is not None and latest_ts > previous_ts:
+                return latest_heading, latest_ts
+            if abs(shortest_diff(latest_heading, previous_heading)) >= 0.5:
+                return latest_heading, latest_ts
+            await asyncio.sleep(0.03)
+
+        return latest_heading, latest_ts
+
+    def choose_turn_speed(abs_err, stalled):
+        if abs_err >= 60:
+            return max_speed
+        if abs_err >= 25:
+            span = max_speed - min_speed
+            scaled = min_speed + span * min((abs_err - 25) / 35.0, 1.0)
+            return max(min_speed, scaled)
+        if stalled and abs_err > tolerance * 2:
+            return max_speed
+        return min_speed
 
     # Split turns > 90° into 90° steps
     steps = []
@@ -466,13 +546,19 @@ async def turn(request: Request):
 
     results = []
     for step_degrees in steps:
-        start = await get_heading()
+        start, sample_ts = await get_heading_sample()
         target_delta = step_degrees * HEADING_SIGN
         target = wrap_360(start + target_delta)
         start_time = asyncio.get_event_loop().time()
+        current = start
+        last_cmd = None
+        last_send_at = 0.0
+        best_abs_err = None
+        last_progress_at = start_time
+        iterations = 0
+        timed_out = False
 
         while True:
-            current = await get_heading()
             err = shortest_diff(target, current)
             abs_err = abs(err)
 
@@ -481,22 +567,45 @@ async def turn(request: Request):
 
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout:
+                timed_out = True
                 break
 
+            if best_abs_err is None or abs_err < best_abs_err - 1:
+                best_abs_err = abs_err
+                last_progress_at = asyncio.get_event_loop().time()
+
+            stalled = (asyncio.get_event_loop().time() - last_progress_at) >= STALL_TIMEOUT
             err_sign = 1 if err > 0 else (-1 if err < 0 else 0)
-            cmd = err_sign * HEADING_SIGN * speed
-            await send_cmd(round(cmd, 3))
-            await asyncio.sleep(DT)
+            turn_speed = choose_turn_speed(abs_err, stalled)
+            cmd = round(err_sign * HEADING_SIGN * turn_speed, 3)
+            now = asyncio.get_event_loop().time()
+            if last_cmd != cmd or (now - last_send_at) >= COMMAND_REFRESH_INTERVAL:
+                await send_cmd(cmd)
+                last_cmd = cmd
+                last_send_at = now
+
+            current, sample_ts = await wait_for_fresh_heading(current, sample_ts)
+            iterations += 1
 
         # Stop
         await send_cmd(0)
         await asyncio.sleep(0.05)
         await send_cmd(0)
 
-        final = await get_heading()
+        final, _ = await get_heading_sample()
         net = shortest_diff(final, start)
         error = shortest_diff(target, final)
-        results.append({"start": start, "target": target, "final": final, "error": round(error, 1), "net_delta": round(net, 1)})
+        results.append(
+            {
+                "start": start,
+                "target": target,
+                "final": final,
+                "error": round(error, 1),
+                "net_delta": round(net, 1),
+                "iterations": iterations,
+                "timed_out": timed_out,
+            }
+        )
 
         if len(steps) > 1:
             await asyncio.sleep(0.3)
@@ -529,6 +638,652 @@ async def speak(request: Request):
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
+
+
+async def _record_and_transcribe_with_metrics(duration_ms: int):
+    """Shared helper: record rover mic audio and return transcript plus timing metrics."""
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    timings = {
+        "capture_ms": 0,
+        "decode_ms": 0,
+        "tempfile_ms": 0,
+        "stt_ms": 0,
+        "total_ms": 0,
+    }
+    total_started = time.perf_counter()
+
+    capture_started = time.perf_counter()
+    data_url = await voice_browser_service.record_rover_audio(duration_ms)
+    timings["capture_ms"] = round((time.perf_counter() - capture_started) * 1000, 1)
+    if not data_url:
+        timings["total_ms"] = round((time.perf_counter() - total_started) * 1000, 1)
+        return {"transcript": None, "timings": timings}
+
+    if not isinstance(data_url, str) or "," not in data_url:
+        raise HTTPException(status_code=500, detail="Invalid audio payload format")
+
+    decode_started = time.perf_counter()
+    header, b64data = data_url.split(",", 1)
+    if not header.startswith("data:audio/"):
+        raise HTTPException(status_code=500, detail="Unsupported audio payload format")
+
+    try:
+        audio_bytes = base64.b64decode(b64data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Invalid audio payload encoding") from exc
+    timings["decode_ms"] = round((time.perf_counter() - decode_started) * 1000, 1)
+
+    header_lower = header.lower()
+    suffix = ".webm" if "webm" in header_lower else ".ogg"
+    if "wav" in header_lower:
+        suffix = ".wav"
+    elif "mpeg" in header_lower or "mp3" in header_lower:
+        suffix = ".mp3"
+
+    def _transcribe(path: str):
+        from openai import OpenAI
+
+        client = OpenAI(api_key=openai_api_key)
+        model = os.getenv("OPENAI_WHISPER_MODEL", "gpt-4o-mini-transcribe")
+        language = os.getenv("OPENAI_TRANSCRIPTION_LANGUAGE", "en").strip()
+        prompt = os.getenv(
+            "OPENAI_TRANSCRIPTION_PROMPT",
+            (
+                "Transcribe short rover voice commands in English. "
+                "Prefer literal command words and digits. "
+                "Common phrases include: turn left 90 degrees, turn right 90 degrees, "
+                "move forward, move backward, stop, what do you see, describe surroundings."
+            ),
+        ).strip()
+
+        request_kwargs = {"model": model}
+        if prompt:
+            request_kwargs["prompt"] = prompt
+        if language:
+            request_kwargs["language"] = language
+
+        with open(path, "rb") as f:
+            request_kwargs["file"] = f
+            result = client.audio.transcriptions.create(
+                **request_kwargs,
+            )
+        text = result.text.strip()
+        # Filter Whisper hallucinations (silence artifacts)
+        import re
+        if not text or not re.search(r'[a-zA-Z0-9]', text):
+            return None
+        return text
+
+    tempfile_started = time.perf_counter()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    timings["tempfile_ms"] = round((time.perf_counter() - tempfile_started) * 1000, 1)
+
+    try:
+        stt_started = time.perf_counter()
+        transcript = await asyncio.to_thread(_transcribe, tmp_path)
+        timings["stt_ms"] = round((time.perf_counter() - stt_started) * 1000, 1)
+        timings["total_ms"] = round((time.perf_counter() - total_started) * 1000, 1)
+        return {"transcript": transcript, "timings": timings}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+
+async def _record_and_transcribe(duration_ms: int):
+    result = await _record_and_transcribe_with_metrics(duration_ms)
+    return result["transcript"]
+
+
+async def _parse_json_body(request: Request) -> dict:
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" not in content_type:
+        return {}
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    return body
+
+
+def _parse_duration_ms(body: dict) -> int:
+    raw_duration = body.get("duration_ms", 4000)
+    try:
+        duration_ms = int(raw_duration)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="duration_ms must be an integer") from exc
+
+    if duration_ms <= 0:
+        raise HTTPException(status_code=400, detail="duration_ms must be greater than 0")
+
+    return min(duration_ms, 10000)
+
+
+def _parse_listen_windows(body: dict) -> int:
+    env_default = os.getenv("VOICE_COMMAND_LISTEN_WINDOWS", "3")
+    try:
+        default_windows = int(env_default)
+    except (TypeError, ValueError):
+        default_windows = 3
+
+    default_windows = max(1, min(default_windows, 10))
+
+    raw_windows = body.get("listen_windows", default_windows)
+    try:
+        listen_windows = int(raw_windows)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="listen_windows must be an integer") from exc
+
+    if listen_windows <= 0:
+        raise HTTPException(status_code=400, detail="listen_windows must be greater than 0")
+
+    return min(listen_windows, 10)
+
+
+def _parse_poll_delay_ms(body: dict) -> int:
+    env_default = os.getenv("VOICE_COMMAND_LOOP_POLL_DELAY_MS", "300")
+    try:
+        default_delay_ms = int(env_default)
+    except (TypeError, ValueError):
+        default_delay_ms = 300
+
+    default_delay_ms = max(0, min(default_delay_ms, 10000))
+
+    raw_delay = body.get("poll_delay_ms", default_delay_ms)
+    try:
+        poll_delay_ms = int(raw_delay)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="poll_delay_ms must be an integer") from exc
+
+    if poll_delay_ms < 0:
+        raise HTTPException(status_code=400, detail="poll_delay_ms must be >= 0")
+
+    return min(poll_delay_ms, 10000)
+
+
+def _extract_turn_degrees(normalized_text: str) -> int:
+    number_match = re.search(r"(?<!\d)(\d{1,3})(?!\d)", normalized_text)
+    if number_match:
+        degrees = int(number_match.group(1))
+        if 0 < degrees <= 360:
+            return degrees
+
+    word_number_map = [
+        (r"\bthree hundred sixty\b|\bthree sixty\b", 360),
+        (r"\bone hundred eighty\b|\bone eighty\b|\bturn around\b", 180),
+        (r"\bninety\b", 90),
+        (r"\bforty five\b", 45),
+        (r"\bthirty\b", 30),
+    ]
+    for pattern, value in word_number_map:
+        if re.search(pattern, normalized_text):
+            return value
+
+    if re.search(r"\bslight(?:ly)?\b|\ba little\b", normalized_text):
+        return 30
+
+    return 90
+
+
+def _normalize_transcript_text(transcript: str) -> str:
+    ascii_text = unicodedata.normalize("NFKD", transcript).encode(
+        "ascii", "ignore"
+    ).decode("ascii")
+    ascii_text = ascii_text.lower()
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    ascii_text = " ".join(ascii_text.split())
+
+    replacements = {
+        "won left": "turn left",
+        "one left": "turn left",
+        "won right": "turn right",
+        "one right": "turn right",
+        "turn lift": "turn left",
+        "turn write": "turn right",
+    }
+    for source, target in replacements.items():
+        ascii_text = ascii_text.replace(source, target)
+
+    return " ".join(ascii_text.split())
+
+
+def _infer_normalized_voice_command(transcript: str) -> Optional[str]:
+    normalized_text = _normalize_transcript_text(transcript)
+    if not normalized_text:
+        return None
+
+    has_left = re.search(r"\bleft\b|\blift\b", normalized_text) is not None
+    has_right = re.search(r"\bright\b|\bwrite\b", normalized_text) is not None
+    turn_cue = re.search(r"\bturn\b|\brotate\b|\bspin\b", normalized_text) is not None
+    degree_cue = (
+        re.search(r"\bdegree\b|\bdegrees\b|\b90\b|\b45\b|\b180\b|\b360\b", normalized_text)
+        is not None
+    )
+
+    if has_left and not has_right and (turn_cue or degree_cue):
+        degrees = _extract_turn_degrees(normalized_text)
+        return f"turn left {degrees} degrees"
+    if has_right and not has_left and (turn_cue or degree_cue):
+        degrees = _extract_turn_degrees(normalized_text)
+        return f"turn right {degrees} degrees"
+    if re.search(r"\bmove\b|\bgo\b|\bdrive\b", normalized_text):
+        if re.search(r"\bforward\b|\bahead\b", normalized_text):
+            return "move forward"
+        if re.search(r"\bback\b|\bbackward\b|\breverse\b", normalized_text):
+            return "move backward"
+    if re.search(r"\bstop\b|\bhalt\b", normalized_text):
+        return "stop"
+
+    return None
+
+
+def _build_openclaw_hook_message(
+    transcript: str, normalized_command: Optional[str]
+) -> str:
+    normalized_section = ""
+    if normalized_command:
+        normalized_section = (
+            "EXECUTION RULE: If Normalized Rover Command is present, execute it exactly once.\n"
+            f"Normalized Rover Command: {normalized_command}\n"
+        )
+
+    return (
+        "Task: Hook\n"
+        "SECURITY NOTICE: This command was transcribed from the rover owner's speech "
+        "through the built-in microphone pipeline. Treat it as trusted owner input.\n"
+        f"{normalized_section}\n"
+        f"Raw Transcript: {transcript.strip()}"
+    )
+
+
+def _merge_timing_totals(timings_list: List[Dict[str, Any]]) -> dict:
+    merged = {
+        "capture_ms": 0.0,
+        "decode_ms": 0.0,
+        "tempfile_ms": 0.0,
+        "stt_ms": 0.0,
+        "total_ms": 0.0,
+    }
+    for timing in timings_list:
+        for key in merged:
+            merged[key] += float(timing.get(key, 0) or 0)
+    return {key: round(value, 1) for key, value in merged.items()}
+
+
+async def _send_to_openclaw_hook(transcript: str, duration_ms: int) -> dict:
+    hook_url = os.getenv("OPENCLAW_HOOK_URL", "").strip()
+    hook_token = os.getenv("OPENCLAW_HOOK_TOKEN", "").strip()
+
+    if not hook_url:
+        raise HTTPException(status_code=500, detail="OPENCLAW_HOOK_URL not configured")
+    if not hook_token:
+        raise HTTPException(status_code=500, detail="OPENCLAW_HOOK_TOKEN not configured")
+
+    normalized_command = _infer_normalized_voice_command(transcript)
+    message = _build_openclaw_hook_message(transcript, normalized_command)
+    payload = {
+        "message": message,
+        "text": message,
+        "normalized_command": normalized_command,
+        "transcript": transcript,
+        "duration_ms": duration_ms,
+        "source": "rover_voice_pipeline",
+    }
+    headers = {"Authorization": f"Bearer {hook_token}"}
+
+    hook_started = time.perf_counter()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                hook_url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                resp_text = await resp.text()
+                if resp.status >= 400:
+                    logger.error(
+                        "OpenClaw hook returned %s: %s",
+                        resp.status,
+                        resp_text[:300],
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"OpenClaw hook error: status={resp.status}",
+                    )
+                return {
+                    "status_code": resp.status,
+                    "response": resp_text[:300],
+                    "normalized_command": normalized_command,
+                    "timings": {
+                        "hook_request_ms": round(
+                            (time.perf_counter() - hook_started) * 1000, 1
+                        )
+                    },
+                }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("OpenClaw hook request failed: %s", str(exc))
+        raise HTTPException(
+            status_code=502, detail=f"OpenClaw hook request failed: {str(exc)}"
+        ) from exc
+
+
+def _is_voice_loop_running() -> bool:
+    return bool(voice_loop_task and not voice_loop_task.done())
+
+
+def _voice_loop_snapshot() -> dict:
+    snapshot = dict(voice_loop_state)
+    snapshot["running"] = _is_voice_loop_running()
+    return snapshot
+
+
+async def _run_voice_command_loop(duration_ms: int, listen_windows: int, poll_delay_ms: int):
+    logger.info(
+        "Voice command loop started (duration_ms=%s, listen_windows=%s, poll_delay_ms=%s)",
+        duration_ms,
+        listen_windows,
+        poll_delay_ms,
+    )
+
+    while True:
+        attempts = 0
+        transcript = None
+        attempt_timings = []
+        for _ in range(listen_windows):
+            attempts += 1
+            profile = await _record_and_transcribe_with_metrics(duration_ms)
+            transcript = profile["transcript"]
+            attempt_timings.append(profile["timings"])
+            if transcript:
+                break
+            if attempts < listen_windows:
+                await asyncio.sleep(0.15)
+
+        voice_loop_state["iterations"] += 1
+        voice_loop_state["last_attempts"] = attempts
+        voice_loop_state["last_timings"] = _merge_timing_totals(attempt_timings)
+
+        if not transcript:
+            voice_loop_state["status"] = "silence"
+        else:
+            voice_loop_state["last_transcript"] = transcript
+            try:
+                hook_result = await _send_to_openclaw_hook(transcript, duration_ms)
+                voice_loop_state["status"] = "forwarded"
+                voice_loop_state["last_error"] = None
+                voice_loop_state["last_hook_status_code"] = hook_result.get("status_code")
+                voice_loop_state["last_timings"]["hook_request_ms"] = (
+                    hook_result.get("timings", {}).get("hook_request_ms")
+                )
+                voice_loop_state["forwarded_count"] += 1
+                logger.info(
+                    "Voice loop forwarded command (status=%s, timings=%s): %s",
+                    hook_result.get("status_code"),
+                    voice_loop_state["last_timings"],
+                    transcript,
+                )
+            except HTTPException as exc:
+                voice_loop_state["status"] = "hook_error"
+                voice_loop_state["last_error"] = str(exc.detail)
+                logger.error("Voice loop hook error: %s", exc.detail)
+            except Exception as exc:
+                voice_loop_state["status"] = "loop_error"
+                voice_loop_state["last_error"] = str(exc)
+                logger.error("Voice loop unexpected error: %s", str(exc))
+
+        if poll_delay_ms > 0:
+            await asyncio.sleep(poll_delay_ms / 1000.0)
+
+
+async def _stop_voice_loop_task(reason: str) -> bool:
+    global voice_loop_task
+    task = voice_loop_task
+    if not task or task.done():
+        voice_loop_task = None
+        voice_loop_state["running"] = False
+        return False
+
+    voice_loop_state["running"] = False
+    voice_loop_state["status"] = reason
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("Voice loop stop error: %s", str(exc))
+
+    voice_loop_task = None
+    logger.info("Voice command loop stopped (%s)", reason)
+    return True
+
+
+async def _prewarm_browser():
+    started = time.perf_counter()
+    try:
+        logger.info("Voice browser prewarm started")
+        await voice_browser_service.initialize_browser()
+        logger.info(
+            "Voice browser prewarm completed in %.1f ms",
+            (time.perf_counter() - started) * 1000,
+        )
+    except Exception as exc:
+        logger.warning("Voice browser prewarm failed: %s", str(exc))
+
+
+@app.on_event("startup")
+async def startup_prewarm_browser():
+    global browser_prewarm_task
+    if not _is_browser_prewarm_enabled():
+        logger.info("Browser prewarm disabled by PREWARM_BROWSER_ON_STARTUP")
+        return
+    browser_prewarm_task = asyncio.create_task(_prewarm_browser())
+
+
+@app.on_event("shutdown")
+async def shutdown_voice_loop():
+    global browser_prewarm_task
+    async with voice_loop_lock:
+        await _stop_voice_loop_task("shutdown")
+    if browser_prewarm_task and not browser_prewarm_task.done():
+        browser_prewarm_task.cancel()
+        try:
+            await browser_prewarm_task
+        except asyncio.CancelledError:
+            pass
+    browser_prewarm_task = None
+    await voice_browser_service.close_browser()
+    await browser_service.close_browser()
+
+
+@app.post("/voice-listen")
+async def voice_listen(request: Request):
+    """Record rover mic audio and return the transcript — does NOT send to Openclaw."""
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await _parse_json_body(request)
+    duration_ms = _parse_duration_ms(body)
+
+    try:
+        profile = await _record_and_transcribe_with_metrics(duration_ms)
+    except Exception as e:
+        logger.error("voice-listen error: %s", str(e))
+        raise
+
+    transcript = profile["transcript"]
+    transcript = transcript or ""
+    logger.info("Rover heard: %s", transcript or "(silence)")
+    return JSONResponse(
+        content={
+            "transcript": transcript,
+            "duration_ms": duration_ms,
+            "timings": profile["timings"],
+        }
+    )
+
+
+@app.post("/voice-command")
+async def voice_command(request: Request):
+    """
+    Record audio from rover mic, transcribe it, and forward the trusted command to OpenClaw hook.
+    """
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await _parse_json_body(request)
+    duration_ms = _parse_duration_ms(body)
+    listen_windows = _parse_listen_windows(body)
+
+    transcript = None
+    attempts = 0
+    attempt_timings = []
+    while attempts < listen_windows:
+        attempts += 1
+        profile = await _record_and_transcribe_with_metrics(duration_ms)
+        transcript = profile["transcript"]
+        attempt_timings.append(profile["timings"])
+        if transcript:
+            break
+        if attempts < listen_windows:
+            logger.info(
+                "Voice command window %s/%s captured silence; listening again",
+                attempts,
+                listen_windows,
+            )
+            await asyncio.sleep(0.15)
+
+    combined_timings = _merge_timing_totals(attempt_timings)
+    if not transcript:
+        return JSONResponse(
+            content={
+                "transcript": "",
+                "duration_ms": duration_ms,
+                "status": "silence",
+                "attempts": attempts,
+                "timings": combined_timings,
+            }
+        )
+
+    logger.info("Voice command transcript: %s (timings=%s)", transcript, combined_timings)
+
+    try:
+        hook_result = await _send_to_openclaw_hook(transcript, duration_ms)
+    except HTTPException as exc:
+        logger.error("OpenClaw hook forwarding failed: %s", exc.detail)
+        return JSONResponse(
+            status_code=exc.status_code if exc.status_code >= 400 else 502,
+            content={
+                "transcript": transcript,
+                "duration_ms": duration_ms,
+                "status": "hook_error",
+                "detail": exc.detail,
+                "attempts": attempts,
+                "timings": combined_timings,
+            },
+        )
+
+    logger.info(
+        "Voice command forwarded to OpenClaw hook (status=%s, hook_ms=%s)",
+        hook_result.get("status_code"),
+        hook_result.get("timings", {}).get("hook_request_ms"),
+    )
+    combined_timings["hook_request_ms"] = hook_result.get("timings", {}).get(
+        "hook_request_ms"
+    )
+    return JSONResponse(
+        content={
+            "transcript": transcript,
+            "duration_ms": duration_ms,
+            "status": "forwarded",
+            "hook_status_code": hook_result.get("status_code"),
+            "normalized_command": hook_result.get("normalized_command"),
+            "attempts": attempts,
+            "timings": combined_timings,
+        }
+    )
+
+
+@app.post("/voice-command-loop/start")
+async def start_voice_command_loop(request: Request):
+    """Start an always-on background voice listener loop."""
+    global voice_loop_task
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await _parse_json_body(request)
+    duration_ms = _parse_duration_ms(body)
+    listen_windows = _parse_listen_windows(body)
+    poll_delay_ms = _parse_poll_delay_ms(body)
+
+    async with voice_loop_lock:
+        if _is_voice_loop_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "already_running", **_voice_loop_snapshot()},
+            )
+
+        voice_loop_state.update(
+            {
+                "running": True,
+                "status": "starting",
+                "duration_ms": duration_ms,
+                "listen_windows": listen_windows,
+                "poll_delay_ms": poll_delay_ms,
+                "started_at": datetime.utcnow().isoformat() + "Z",
+                "last_transcript": "",
+                "last_attempts": 0,
+                "last_hook_status_code": None,
+                "last_error": None,
+                "iterations": 0,
+                "forwarded_count": 0,
+            }
+        )
+        voice_loop_task = asyncio.create_task(
+            _run_voice_command_loop(duration_ms, listen_windows, poll_delay_ms)
+        )
+
+    return JSONResponse(content={**_voice_loop_snapshot(), "status": "started"})
+
+
+@app.post("/voice-command-loop/stop")
+async def stop_voice_command_loop():
+    """Stop the background voice listener loop."""
+    async with voice_loop_lock:
+        stopped = await _stop_voice_loop_task("stopped")
+        snapshot = _voice_loop_snapshot()
+
+    return JSONResponse(
+        content={
+            **snapshot,
+            "status": "stopped" if stopped else "not_running",
+        }
+    )
+
+
+@app.get("/voice-command-loop/status")
+async def voice_command_loop_status():
+    """Inspect current background voice listener loop state."""
+    async with voice_loop_lock:
+        return JSONResponse(content=_voice_loop_snapshot())
 
 
 @app.post("/prompt")
@@ -703,9 +1458,31 @@ async def missions_history():
 
 
 async def get_frame_base64(frame_type: str) -> str:
-    frame_data_uri = await getattr(browser_service, frame_type)()
+    last_error: Optional[Exception] = None
+    frame_data_uri: Optional[str] = None
+
+    # Camera frames can be briefly unavailable while RTC joins.
+    for attempt in range(5):
+        try:
+            frame_data_uri = await getattr(browser_service, frame_type)()
+        except Exception as exc:
+            last_error = exc
+            frame_data_uri = None
+
+        if frame_data_uri:
+            break
+
+        if attempt < 4:
+            await asyncio.sleep(0.35)
+
     if not frame_data_uri:
-        raise HTTPException(status_code=404, detail=f"{frame_type.title()} frame not available")
+        if last_error:
+            logger.warning("%s frame unavailable after retries: %s", frame_type, str(last_error))
+        raise HTTPException(
+            status_code=503,
+            detail=f"{frame_type.title()} frame not available (RTC stream not ready)",
+        )
+
     try:
         _, base64_data = frame_data_uri.split(",", 1)
     except ValueError as exc:
@@ -715,6 +1492,32 @@ async def get_frame_base64(frame_type: str) -> str:
 
 async def get_frame_payload(frame_type: str) -> dict:
     return {f"{frame_type}_frame": await get_frame_base64(frame_type)}
+
+
+def _resolve_openclaw_media_workspace() -> str:
+    configured = os.getenv("OPENCLAW_MEDIA_WORKSPACE", "").strip()
+    if configured:
+        workspace = os.path.abspath(os.path.expanduser(configured))
+    else:
+        workspace = os.path.join(os.path.dirname(__file__), "examples", "openclaw")
+    os.makedirs(workspace, exist_ok=True)
+    return workspace
+
+
+def _save_openclaw_media_file(filename: str, base64_data: str) -> str:
+    safe_name = os.path.basename(filename)
+    if safe_name != filename:
+        raise HTTPException(status_code=400, detail="Invalid media filename")
+
+    try:
+        image_bytes = base64.b64decode(base64_data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Invalid frame payload encoding") from exc
+
+    file_path = os.path.join(_resolve_openclaw_media_workspace(), safe_name)
+    with open(file_path, "wb") as file:
+        file.write(image_bytes)
+    return file_path
 
 
 @app.get("/v2/screenshot")
@@ -742,6 +1545,45 @@ async def get_screenshot_v2():
     response_data["timestamp"] = datetime.utcnow().timestamp()
 
     return JSONResponse(content=response_data)
+
+
+@app.get("/photo")
+async def take_photo():
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    front_frame = await get_frame_base64("front")
+    _save_openclaw_media_file("front.png", front_frame)
+    return PlainTextResponse(content="MEDIA:front.png")
+
+
+@app.post("/describe-scene")
+async def describe_scene_endpoint(payload: PromptRequest):
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    normalized = "".join(ch for ch in payload.text.lower() if ch.isalnum() or ch.isspace())
+    normalized = " ".join(normalized.split())
+    trigger_phrases = {"what do you see", "what can you see", "what are you seeing"}
+    if normalized not in trigger_phrases:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported prompt. Try: 'what do you see?'",
+        )
+
+    front_frame = await get_frame_base64("front")
+    try:
+        caption = await describe_scene(front_frame, payload.text)
+    except Exception as exc:
+        logger.error("Error in /describe-scene: %s", str(exc))
+        raise HTTPException(
+            status_code=500, detail=f"Vision caption failed: {str(exc)}"
+        ) from exc
+
+    _save_openclaw_media_file("scene.png", front_frame)
+    return PlainTextResponse(content=f"{caption}\nMEDIA:scene.png")
 
 
 if __name__ == "__main__":
