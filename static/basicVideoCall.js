@@ -476,6 +476,7 @@ async function triggerRtcJoin() {
     rtcJoinPromise = null;
   }
 }
+window.triggerRtcJoin = triggerRtcJoin;
 
 async function ensureRtcReady(timeoutMs = 12000) {
   const joined = await triggerRtcJoin();
@@ -621,34 +622,107 @@ function toggleRemoteAudio() {
 window.toggleRemoteAudio = toggleRemoteAudio;
 
 /*
+ * Unique URL for Agora: SDK caches decoded buffers by string URL — same path + overwrite = stale/wrong audio.
+ */
+function ttsCacheBustUrl(audioUrl) {
+  try {
+    const u = new URL(audioUrl, window.location.origin);
+    u.searchParams.set("_ts", String(Date.now()));
+    return u.toString();
+  } catch (e) {
+    const sep = audioUrl.indexOf("?") >= 0 ? "&" : "?";
+    return `${audioUrl}${sep}_ts=${Date.now()}`;
+  }
+}
+
+var playAudioToRoverChain = Promise.resolve();
+
+async function playAudioToRoverImpl(audioUrl) {
+  const sourceUrl = ttsCacheBustUrl(audioUrl);
+  const audioTrack = await AgoraRTC.createBufferSourceAudioTrack({
+    source: sourceUrl,
+  });
+
+  let published = false;
+  let failSafe;
+  let onState;
+  try {
+    await client.publish(audioTrack);
+    published = true;
+
+    let sawPlaying = false;
+    const playbackDone = new Promise((resolve) => {
+      const ms = Math.ceil((audioTrack.duration || 3) * 1000) + 1500;
+      failSafe = setTimeout(() => {
+        if (onState) {
+          audioTrack.off("source-state-change", onState);
+        }
+        resolve();
+      }, Math.max(ms, 1500));
+
+      onState = (state) => {
+        if (state === "playing") {
+          sawPlaying = true;
+        } else if (state === "stopped" && sawPlaying) {
+          clearTimeout(failSafe);
+          audioTrack.off("source-state-change", onState);
+          resolve();
+        }
+      };
+      audioTrack.on("source-state-change", onState);
+    });
+
+    audioTrack.startProcessAudioBuffer();
+    await playbackDone;
+  } finally {
+    if (failSafe) {
+      clearTimeout(failSafe);
+    }
+    if (onState) {
+      try {
+        audioTrack.off("source-state-change", onState);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    if (published) {
+      try {
+        await client.unpublish(audioTrack);
+      } catch (e) {
+        console.warn("playAudioToRover unpublish:", e);
+      }
+    }
+    try {
+      audioTrack.close();
+    } catch (e) {
+      console.warn("playAudioToRover close:", e);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return "done";
+}
+
+/*
  * Play an audio file through the Agora RTC channel so it reaches the rover's speaker.
+ * Uses Agora's BufferSourceAudioTrack (not raw MediaStreamDestination + createCustomAudioTrack):
+ * the latter often encodes silence in Chromium/headless because Web Audio → MediaStream → WebRTC
+ * is unreliable; the buffer-source track uses the SDK's internal path.
+ *
+ * Serialized: overlapping calls would fight over one client.publish / unpublish cycle.
+ *
  * @param {string} audioUrl - URL to the audio file (served from /static/)
  */
 async function playAudioToRover(audioUrl) {
-  const response = await fetch(audioUrl);
-  const arrayBuffer = await response.arrayBuffer();
-  const audioContext = new AudioContext({ sampleRate: 48000 });
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-  const destination = audioContext.createMediaStreamDestination();
-  const source = audioContext.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(destination);
-
-  const audioTrack = AgoraRTC.createCustomAudioTrack({
-    mediaStreamTrack: destination.stream.getAudioTracks()[0],
+  const prev = playAudioToRoverChain;
+  let resolveNext;
+  playAudioToRoverChain = new Promise(function (resolve) {
+    resolveNext = resolve;
   });
-
-  await client.publish(audioTrack);
-  source.start(0);
-
-  return new Promise((resolve) => {
-    source.onended = async () => {
-      await client.unpublish(audioTrack);
-      audioTrack.close();
-      await audioContext.close();
-      resolve("done");
-    };
-  });
+  await prev;
+  try {
+    return await playAudioToRoverImpl(audioUrl);
+  } finally {
+    resolveNext();
+  }
 }
 window.playAudioToRover = playAudioToRover;

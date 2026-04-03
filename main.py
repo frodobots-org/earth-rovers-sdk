@@ -632,8 +632,10 @@ async def speak(request: Request):
     try:
         audio_path = await generate_speech(text, "static/tts_output")
         audio_filename = os.path.basename(audio_path)
-        audio_url = f"http://127.0.0.1:8000/static/{audio_filename}"
-        await browser_service.speak(audio_url)
+        # Unique query avoids Agora createBufferSourceAudioTrack URL-cache reusing stale AudioBuffer
+        # when the same static file is overwritten for each TTS.
+        audio_url = f"http://127.0.0.1:8000/static/{audio_filename}?v={time.time_ns()}"
+        await voice_browser_service.speak(audio_url)
         return {"message": "Speech sent to rover"}
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))

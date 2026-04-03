@@ -94,7 +94,7 @@ Add a `## Dance Routine` section to `AGENTS.md` with a bash script of movement c
 ## Architecture
 
 ```
-Chat Message → Openclaw Gateway → LLM Agent → curl to localhost:8000 → Earth Rover
+Chat Message → Openclaw Gateway → LLM Agent → curl to 127.0.0.1:8000 → Earth Rover
 ```
 
 ## Troubleshooting

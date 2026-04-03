@@ -23,6 +23,7 @@ class BrowserService:
         self.page = None
         self.default_viewport = {"width": 3840, "height": 2160}
         self.send_lock = None
+        self.speak_lock = None
         self.init_lock = None
         self.page_path = page_path
         self.require_rtm = require_rtm
@@ -227,14 +228,31 @@ class BrowserService:
 
     async def speak(self, audio_url: str):
         await self.initialize_browser()
-        await self.ensure_session_ready()
+        await self.ensure_session_ready(require_rtm=False)
 
-        result = await self.page.evaluate(
-            """async (audioUrl) => {
-                return await window.playAudioToRover(audioUrl);
-            }""",
-            audio_url,
-        )
+        if self.speak_lock is None:
+            import asyncio
+
+            self.speak_lock = asyncio.Lock()
+
+        async with self.speak_lock:
+            connected = await self.page.evaluate(
+                """async () => {
+                    if (typeof window.triggerRtcJoin === 'function') {
+                        return await window.triggerRtcJoin();
+                    }
+                    return Boolean(window.client && window.client.connectionState === 'CONNECTED');
+                }"""
+            )
+            if not connected:
+                raise RuntimeError("RTC channel not connected — cannot publish audio")
+
+            result = await self.page.evaluate(
+                """async (audioUrl) => {
+                    return await window.playAudioToRover(audioUrl);
+                }""",
+                audio_url,
+            )
 
         return result
 

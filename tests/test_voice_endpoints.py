@@ -86,6 +86,35 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.json()["transcript"], "hello rover")
         self.assertIn("timings", response.json())
 
+    def test_speak_uses_voice_browser_service_with_generated_static_audio(self):
+        with patch.object(
+            main,
+            "generate_speech",
+            new=AsyncMock(return_value="static/generated-audio.mp3"),
+        ) as generate_mock, patch.object(
+            main.voice_browser_service,
+            "speak",
+            new=AsyncMock(return_value="done"),
+        ) as voice_speak_mock, patch.object(
+            main.browser_service,
+            "speak",
+            new=AsyncMock(return_value="done"),
+        ) as browser_speak_mock:
+            response = self.client.post("/speak", json={"text": "hello rover"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"], "Speech sent to rover")
+        generate_mock.assert_awaited_once_with("hello rover", "static/tts_output")
+        self.assertEqual(voice_speak_mock.await_count, 1)
+        spoken_url = voice_speak_mock.await_args[0][0]
+        self.assertTrue(
+            spoken_url.startswith(
+                "http://127.0.0.1:8000/static/generated-audio.mp3?v="
+            ),
+            msg=f"unexpected speak URL: {spoken_url!r}",
+        )
+        browser_speak_mock.assert_not_awaited()
+
     def test_infers_turn_left_from_whisper_one_left(self):
         normalized = main._infer_normalized_voice_command("One left, 90 degrees.")
         self.assertEqual(normalized, "turn left 90 degrees")
