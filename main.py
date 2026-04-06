@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Any, Dict, List, Literal, Optional
@@ -109,6 +109,7 @@ voice_browser_service = BrowserService(page_path="/", require_rtm=False)
 
 voice_loop_task: Optional[asyncio.Task] = None
 voice_loop_lock = asyncio.Lock()
+turn_lock = asyncio.Lock()
 browser_prewarm_task: Optional[asyncio.Task] = None
 voice_loop_state: Dict[str, Any] = {
     "running": False,
@@ -476,6 +477,15 @@ async def turn(request: Request):
         1.0,
     )
     STALL_TIMEOUT = 0.8
+    TELEMETRY_MAX_AGE = min(
+        max(float(body.get("telemetry_max_age", 0.75)), 0.2),
+        5.0,
+    )
+    STOP_BURST_COUNT = min(max(int(body.get("stop_burst_count", 3)), 2), 5)
+    STOP_BURST_INTERVAL = min(
+        max(float(body.get("stop_burst_interval", 0.08)), 0.03),
+        0.3,
+    )
 
     def shortest_diff(target, current):
         d = target - current
@@ -501,6 +511,13 @@ async def turn(request: Request):
             sample_ts = None
         return heading, sample_ts
 
+    def telemetry_age_seconds(sample_ts):
+        # RTM telemetry timestamps are wall-clock epoch seconds in production.
+        # Ignore small synthetic/test counters so we do not misclassify them as ancient.
+        if sample_ts is None or sample_ts < 1_000_000_000:
+            return None
+        return time.time() - sample_ts
+
     async def get_heading_sample():
         data = await browser_service.data()
         return parse_sample(data)
@@ -509,6 +526,15 @@ async def turn(request: Request):
         cmd = {"linear": 0, "angular": angular, "lamp": 0}
         await browser_service.send_message(cmd)
 
+    async def send_stop_burst():
+        for idx in range(STOP_BURST_COUNT):
+            try:
+                await send_cmd(0)
+            except Exception as error:
+                logger.warning("Stop burst send failed (%s/%s): %s", idx + 1, STOP_BURST_COUNT, error)
+            if idx < STOP_BURST_COUNT - 1:
+                await asyncio.sleep(STOP_BURST_INTERVAL)
+
     async def wait_for_fresh_heading(previous_heading, previous_ts):
         deadline = asyncio.get_event_loop().time() + CONTROL_INTERVAL
         latest_heading, latest_ts = previous_heading, previous_ts
@@ -516,12 +542,12 @@ async def turn(request: Request):
         while asyncio.get_event_loop().time() < deadline:
             latest_heading, latest_ts = await get_heading_sample()
             if previous_ts is not None and latest_ts is not None and latest_ts > previous_ts:
-                return latest_heading, latest_ts
+                return latest_heading, latest_ts, True
             if abs(shortest_diff(latest_heading, previous_heading)) >= 0.5:
-                return latest_heading, latest_ts
+                return latest_heading, latest_ts, True
             await asyncio.sleep(0.03)
 
-        return latest_heading, latest_ts
+        return latest_heading, latest_ts, False
 
     def choose_turn_speed(abs_err, stalled):
         if abs_err >= 60:
@@ -544,59 +570,81 @@ async def turn(request: Request):
     if remaining != 0:
         steps.append(remaining)
 
-    results = []
-    for step_degrees in steps:
-        start, sample_ts = await get_heading_sample()
-        target_delta = step_degrees * HEADING_SIGN
-        target = wrap_360(start + target_delta)
-        start_time = asyncio.get_event_loop().time()
-        current = start
-        last_cmd = None
-        last_send_at = 0.0
-        best_abs_err = None
-        last_progress_at = start_time
-        iterations = 0
-        timed_out = False
+    async with turn_lock:
+        results = []
+        for step_degrees in steps:
+            start, sample_ts = await get_heading_sample()
+            target_delta = step_degrees * HEADING_SIGN
+            target = wrap_360(start + target_delta)
+            start_time = asyncio.get_event_loop().time()
+            current = start
+            last_cmd = None
+            last_send_at = 0.0
+            best_abs_err = None
+            last_progress_at = start_time
+            iterations = 0
+            timed_out = False
+            abort_reason = None
 
-        while True:
-            err = shortest_diff(target, current)
-            abs_err = abs(err)
+            try:
+                while True:
+                    err = shortest_diff(target, current)
+                    abs_err = abs(err)
 
-            if abs_err <= tolerance:
-                break
+                    if abs_err <= tolerance:
+                        break
 
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                timed_out = True
-                break
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    if elapsed > timeout:
+                        timed_out = True
+                        break
 
-            if best_abs_err is None or abs_err < best_abs_err - 1:
-                best_abs_err = abs_err
-                last_progress_at = asyncio.get_event_loop().time()
+                    if best_abs_err is None or abs_err < best_abs_err - 1:
+                        best_abs_err = abs_err
+                        last_progress_at = asyncio.get_event_loop().time()
 
-            stalled = (asyncio.get_event_loop().time() - last_progress_at) >= STALL_TIMEOUT
-            err_sign = 1 if err > 0 else (-1 if err < 0 else 0)
-            turn_speed = choose_turn_speed(abs_err, stalled)
-            cmd = round(err_sign * HEADING_SIGN * turn_speed, 3)
-            now = asyncio.get_event_loop().time()
-            if last_cmd != cmd or (now - last_send_at) >= COMMAND_REFRESH_INTERVAL:
-                await send_cmd(cmd)
-                last_cmd = cmd
-                last_send_at = now
+                    stalled = (asyncio.get_event_loop().time() - last_progress_at) >= STALL_TIMEOUT
+                    err_sign = 1 if err > 0 else (-1 if err < 0 else 0)
+                    turn_speed = choose_turn_speed(abs_err, stalled)
+                    cmd = round(err_sign * HEADING_SIGN * turn_speed, 3)
+                    now = asyncio.get_event_loop().time()
+                    if last_cmd != cmd or (now - last_send_at) >= COMMAND_REFRESH_INTERVAL:
+                        await send_cmd(cmd)
+                        last_cmd = cmd
+                        last_send_at = now
 
-            current, sample_ts = await wait_for_fresh_heading(current, sample_ts)
-            iterations += 1
+                    next_heading, next_ts, got_fresh_sample = await wait_for_fresh_heading(current, sample_ts)
+                    iterations += 1
 
-        # Stop
-        await send_cmd(0)
-        await asyncio.sleep(0.05)
-        await send_cmd(0)
+                    if not got_fresh_sample:
+                        abort_reason = "stale_heading"
+                        logger.warning(
+                            "Aborting /turn due to stale heading telemetry: current=%s target=%s last_ts=%s next_ts=%s",
+                            current,
+                            target,
+                            sample_ts,
+                            next_ts,
+                        )
+                        break
 
-        final, _ = await get_heading_sample()
-        net = shortest_diff(final, start)
-        error = shortest_diff(target, final)
-        results.append(
-            {
+                    telemetry_age = telemetry_age_seconds(next_ts)
+                    if telemetry_age is not None and telemetry_age > TELEMETRY_MAX_AGE:
+                        abort_reason = "stale_heading"
+                        logger.warning(
+                            "Aborting /turn due to old telemetry age %.3fs (max %.3fs)",
+                            telemetry_age,
+                            TELEMETRY_MAX_AGE,
+                        )
+                        break
+
+                    current, sample_ts = next_heading, next_ts
+            finally:
+                await send_stop_burst()
+
+            final, _ = await get_heading_sample()
+            net = shortest_diff(final, start)
+            error = shortest_diff(target, final)
+            step_result = {
                 "start": start,
                 "target": target,
                 "final": final,
@@ -605,17 +653,22 @@ async def turn(request: Request):
                 "iterations": iterations,
                 "timed_out": timed_out,
             }
-        )
+            if abort_reason:
+                step_result["aborted"] = abort_reason
+            results.append(step_result)
 
-        if len(steps) > 1:
-            await asyncio.sleep(0.3)
+            if abort_reason:
+                break
 
-    total_net = sum(r["net_delta"] for r in results)
-    return {
-        "requested": degrees,
-        "actual": round(total_net, 1),
-        "steps": results
-    }
+            if len(steps) > 1:
+                await asyncio.sleep(0.3)
+
+        total_net = sum(r["net_delta"] for r in results)
+        return {
+            "requested": degrees,
+            "actual": round(total_net, 1),
+            "steps": results
+        }
 
 
 @app.post("/speak")
@@ -1586,6 +1639,136 @@ async def describe_scene_endpoint(payload: PromptRequest):
 
     _save_openclaw_media_file("scene.png", front_frame)
     return PlainTextResponse(content=f"{caption}\nMEDIA:scene.png")
+
+
+@app.get("/v2/stream")
+async def stream_video(
+    camera: Literal["front", "rear"] = "front",
+    fps: int = 10,
+):
+    await need_start_mission()
+    fps = min(max(fps, 1), 15)
+    delay = 1.0 / fps
+
+    async def frame_generator():
+        while True:
+            try:
+                b64 = await get_frame_base64(camera)
+                img_bytes = base64.b64decode(b64)
+            except Exception:
+                break
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + img_bytes + b"\r\n"
+            )
+            await asyncio.sleep(delay)
+
+    return StreamingResponse(
+        frame_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/v2/clip")
+async def record_clip(
+    camera: Literal["front", "rear"] = "front",
+    duration: float = 10.0,
+    fps: int = 10,
+):
+    await need_start_mission()
+    duration = min(max(duration, 1.0), 60.0)
+    fps = min(max(fps, 1), 15)
+
+    try:
+        import cv2          # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenCV not installed; pip install opencv-python-headless",
+        )
+
+    frames = []
+    delay = 1.0 / fps
+    end_time = time.monotonic() + duration
+
+    while time.monotonic() < end_time:
+        b64 = await get_frame_base64(camera)
+        img_bytes = base64.b64decode(b64)
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is not None:
+            frames.append(frame)
+        await asyncio.sleep(delay)
+
+    if not frames:
+        raise HTTPException(status_code=500, detail="No frames captured")
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"clip_{camera}_{timestamp}.mp4"
+    workspace = _resolve_openclaw_media_workspace()
+    file_path = os.path.join(workspace, filename)
+
+    h, w = frames[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(file_path, fourcc, fps, (w, h))
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
+
+    return PlainTextResponse(content=f"MEDIA:{filename}")
+
+
+@app.get("/v2/gif")
+async def record_gif(
+    camera: Literal["front", "rear"] = "front",
+    duration: float = 3.0,
+    fps: int = 5,
+):
+    """Capture frames and save as an animated GIF (works inline on Discord & Telegram)."""
+    await need_start_mission()
+    duration = min(max(duration, 1.0), 10.0)
+    fps = min(max(fps, 1), 10)
+
+    try:
+        from PIL import Image  # noqa: PLC0415
+        import io as _io       # noqa: PLC0415
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="Pillow not installed; pip install Pillow",
+        )
+
+    pil_frames = []
+    delay = 1.0 / fps
+    end_time = time.monotonic() + duration
+
+    while time.monotonic() < end_time:
+        b64 = await get_frame_base64(camera)
+        img_bytes = base64.b64decode(b64)
+        frame = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
+        pil_frames.append(frame)
+        await asyncio.sleep(delay)
+
+    if not pil_frames:
+        raise HTTPException(status_code=500, detail="No frames captured")
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"clip_{camera}_{timestamp}.gif"
+    workspace = _resolve_openclaw_media_workspace()
+    file_path = os.path.join(workspace, filename)
+
+    frame_duration_ms = int(1000 / fps)
+    pil_frames[0].save(
+        file_path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=frame_duration_ms,
+        loop=0,
+        optimize=False,
+    )
+
+    return PlainTextResponse(content=f"MEDIA:{filename}")
 
 
 if __name__ == "__main__":

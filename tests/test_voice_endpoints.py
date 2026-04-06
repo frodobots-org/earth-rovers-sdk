@@ -321,6 +321,36 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.assertGreater(first_cmd["angular"], 0)
         self.assertEqual(send_message_mock.await_args_list[-1].args[0]["angular"], 0)
 
+    def test_turn_endpoint_aborts_on_stale_heading_and_stops(self):
+        data_mock = AsyncMock(
+            side_effect=[
+                {"orientation": 16, "timestamp": "1.0"},
+                {"orientation": 16, "timestamp": "1.0"},
+                {"orientation": 16, "timestamp": "1.0"},
+                {"orientation": 16, "timestamp": "1.0"},
+            ]
+        )
+        send_message_mock = AsyncMock(return_value={"success": True})
+
+        with patch.object(main.browser_service, "data", new=data_mock), patch.object(
+            main.browser_service, "send_message", new=send_message_mock
+        ):
+            response = self.client.post(
+                "/turn",
+                json={"degrees": 90, "timeout": 2, "control_interval": 0.05},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["requested"], 90.0)
+        self.assertEqual(payload["steps"][0]["aborted"], "stale_heading")
+        self.assertFalse(payload["steps"][0]["timed_out"])
+        self.assertGreaterEqual(send_message_mock.await_count, 4)
+        self.assertGreater(send_message_mock.await_args_list[0].args[0]["angular"], 0)
+        self.assertTrue(
+            all(call.args[0]["angular"] == 0 for call in send_message_mock.await_args_list[1:])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

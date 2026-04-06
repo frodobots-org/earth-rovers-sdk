@@ -10,3 +10,4 @@ numpy==1.26.4
 edge-tts>=6.1.0
 google-genai>=1.0.0
 openai
+Pillow>=10.0.0
