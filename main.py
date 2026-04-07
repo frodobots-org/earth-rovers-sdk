@@ -484,7 +484,7 @@ async def turn(request: Request):
     timeout = min(float(body.get("timeout", 20)), 30)
 
     HEADING_SIGN = -1  # +angular decreases heading on this rover
-    CONTROL_INTERVAL = min(max(float(body.get("control_interval", 0.15)), 0.05), 0.5)
+    CONTROL_INTERVAL = min(max(float(body.get("control_interval", 0.4)), 0.05), 0.5)
     COMMAND_REFRESH_INTERVAL = min(
         max(float(body.get("command_refresh_interval", 0.35)), 0.1),
         1.0,
@@ -516,6 +516,8 @@ async def turn(request: Request):
         return a
 
     def parse_sample(data):
+        if not data:
+            return 0.0, None
         heading = float(data.get("orientation", 0))
         sample_ts = data.get("timestamp")
         try:
@@ -630,15 +632,13 @@ async def turn(request: Request):
                     iterations += 1
 
                     if not got_fresh_sample:
-                        abort_reason = "stale_heading"
-                        logger.warning(
-                            "Aborting /turn due to stale heading telemetry: current=%s target=%s last_ts=%s next_ts=%s",
+                        logger.debug(
+                            "No fresh heading sample: current=%s target=%s last_ts=%s next_ts=%s",
                             current,
                             target,
                             sample_ts,
                             next_ts,
                         )
-                        break
 
                     telemetry_age = telemetry_age_seconds(next_ts)
                     if telemetry_age is not None and telemetry_age > TELEMETRY_MAX_AGE:
