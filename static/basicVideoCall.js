@@ -404,17 +404,45 @@ function getCodec() {
   return value;
 }
 
+function isVideoTrackCapturable(videoTrack) {
+  if (!videoTrack || !videoTrack.getMediaStreamTrack) {
+    return true;
+  }
+  const media = videoTrack.getMediaStreamTrack();
+  if (!media) {
+    return false;
+  }
+  if (media.muted || media.readyState !== "live") {
+    return false;
+  }
+  return true;
+}
+
 async function captureFrameAsBase64(videoTrack) {
-  const frame = await videoTrack.getCurrentFrameData();
-  const canvas = document.createElement("canvas");
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  const ctx = canvas.getContext("2d");
-  ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL(
-    `image/${window.imageParams["imageFormat"]}`,
-    window.imageParams["imageQuality"]
-  );
+  try {
+    const frame = await videoTrack.getCurrentFrameData();
+    if (
+      !frame ||
+      typeof frame.width !== "number" ||
+      typeof frame.height !== "number" ||
+      frame.width < 1 ||
+      frame.height < 1
+    ) {
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+    const ctx = canvas.getContext("2d");
+    ctx.putImageData(frame, 0, 0);
+    return canvas.toDataURL(
+      `image/${window.imageParams["imageFormat"]}`,
+      window.imageParams["imageQuality"]
+    );
+  } catch (e) {
+    console.warn("captureFrameAsBase64:", e && e.message ? e.message : e);
+    return null;
+  }
 }
 
 // Add at the beginning of the file
@@ -425,6 +453,9 @@ const lastBase64Frames = {};
 async function getLastBase64Frame(uid) {
   const user = remoteUsers[uid];
   if (!user || !user.videoTrack || !user.videoTrack.captureEnabled) {
+    return null;
+  }
+  if (!isVideoTrackCapturable(user.videoTrack)) {
     return null;
   }
 

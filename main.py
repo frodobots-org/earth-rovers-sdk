@@ -127,6 +127,19 @@ voice_loop_state: Dict[str, Any] = {
     "forwarded_count": 0,
 }
 
+checkin_loop_task: Optional[asyncio.Task] = None
+checkin_loop_lock = asyncio.Lock()
+checkin_loop_state: Dict[str, Any] = {
+    "running": False,
+    "status": "idle",
+    "interval_seconds": None,
+    "started_at": None,
+    "last_checkin_at": None,
+    "last_hook_status_code": None,
+    "last_error": None,
+    "checkin_count": 0,
+}
+
 
 def _is_browser_prewarm_enabled() -> bool:
     return os.getenv("PREWARM_BROWSER_ON_STARTUP", "true").strip().lower() not in {
@@ -1128,6 +1141,124 @@ async def _stop_voice_loop_task(reason: str) -> bool:
     return True
 
 
+def _is_checkin_loop_running() -> bool:
+    return bool(checkin_loop_task and not checkin_loop_task.done())
+
+
+def _checkin_loop_snapshot() -> dict:
+    snapshot = dict(checkin_loop_state)
+    snapshot["running"] = _is_checkin_loop_running()
+    return snapshot
+
+
+def _build_checkin_message(data: dict, iteration: int) -> str:
+    battery = data.get("battery", "?")
+    signal = data.get("signal_level", "?")
+    orientation = data.get("orientation", "?")
+    speed = data.get("speed", "?")
+    lamp = "on" if data.get("lamp") else "off"
+    gps_signal = data.get("gps_signal", "?")
+    lat = data.get("latitude", "?")
+    lon = data.get("longitude", "?")
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        f"Rover check-in #{iteration} — {ts}\n"
+        f"Battery: {battery}% | Signal: {signal}/5 | GPS: {gps_signal}\n"
+        f"Heading: {orientation}° | Speed: {speed} | Lamp: {lamp}\n"
+        f"Location: {lat}, {lon}"
+    )
+
+
+async def _run_checkin_loop(interval_seconds: int):
+    logger.info("Check-in loop started (interval_seconds=%s)", interval_seconds)
+    checkin_loop_state["status"] = "waiting"
+    while True:
+        await asyncio.sleep(interval_seconds)
+        checkin_loop_state["checkin_count"] += 1
+        iteration = checkin_loop_state["checkin_count"]
+        checkin_loop_state["last_checkin_at"] = datetime.utcnow().isoformat() + "Z"
+
+        hook_url = os.getenv("OPENCLAW_HOOK_URL", "").strip()
+        hook_token = os.getenv("OPENCLAW_HOOK_TOKEN", "").strip()
+        if not hook_url or not hook_token:
+            logger.error("Check-in loop: OPENCLAW_HOOK_URL or OPENCLAW_HOOK_TOKEN not configured")
+            checkin_loop_state["status"] = "config_error"
+            checkin_loop_state["last_error"] = "OPENCLAW_HOOK_URL or OPENCLAW_HOOK_TOKEN missing"
+            continue
+
+        try:
+            rover_data = await browser_service.data()
+        except Exception as exc:
+            logger.error("Check-in loop: failed to fetch rover data: %s", str(exc))
+            checkin_loop_state["status"] = "data_error"
+            checkin_loop_state["last_error"] = f"rover data fetch failed: {exc}"
+            continue
+
+        hook_channel = os.getenv("OPENCLAW_HOOK_CHANNEL", "").strip()
+        hook_to = os.getenv("OPENCLAW_HOOK_TO", "").strip()
+
+        message = _build_checkin_message(rover_data, iteration)
+        payload: Dict[str, Any] = {
+            "message": message,
+            "text": message,
+            "source": "rover_scheduled_checkin",
+        }
+        if hook_channel and hook_to:
+            payload["channel"] = hook_channel
+            payload["to"] = hook_to
+            payload["sessionKey"] = f"agent:main:{hook_channel}:direct:{hook_to}"
+        headers = {"Authorization": f"Bearer {hook_token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    hook_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    resp_text = await resp.text()
+                    checkin_loop_state["last_hook_status_code"] = resp.status
+                    if resp.status >= 400:
+                        logger.error(
+                            "Check-in hook returned %s: %s", resp.status, resp_text[:300]
+                        )
+                        checkin_loop_state["status"] = "hook_error"
+                        checkin_loop_state["last_error"] = f"status={resp.status}"
+                    else:
+                        checkin_loop_state["status"] = "waiting"
+                        checkin_loop_state["last_error"] = None
+                        logger.info("Check-in #%s sent (status=%s)", iteration, resp.status)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Check-in loop error: %s", str(exc))
+            checkin_loop_state["status"] = "loop_error"
+            checkin_loop_state["last_error"] = str(exc)
+
+
+async def _stop_checkin_loop_task(reason: str) -> bool:
+    global checkin_loop_task
+    task = checkin_loop_task
+    if not task or task.done():
+        checkin_loop_task = None
+        checkin_loop_state["running"] = False
+        return False
+
+    checkin_loop_state["running"] = False
+    checkin_loop_state["status"] = reason
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("Check-in loop stop error: %s", str(exc))
+
+    checkin_loop_task = None
+    logger.info("Check-in loop stopped (%s)", reason)
+    return True
+
+
 async def _prewarm_browser():
     started = time.perf_counter()
     try:
@@ -1155,6 +1286,8 @@ async def shutdown_voice_loop():
     global browser_prewarm_task
     async with voice_loop_lock:
         await _stop_voice_loop_task("shutdown")
+    async with checkin_loop_lock:
+        await _stop_checkin_loop_task("shutdown")
     if browser_prewarm_task and not browser_prewarm_task.done():
         browser_prewarm_task.cancel()
         try:
@@ -1339,6 +1472,58 @@ async def voice_command_loop_status():
     """Inspect current background voice listener loop state."""
     async with voice_loop_lock:
         return JSONResponse(content=_voice_loop_snapshot())
+
+
+@app.post("/checkin-loop/start")
+async def start_checkin_loop(request: Request):
+    """Start a background timer that sends unprompted status check-ins to OpenClaw."""
+    global checkin_loop_task
+    body = await _parse_json_body(request)
+    interval_seconds = int(
+        body.get("interval_seconds") or os.getenv("OPENCLAW_CHECKIN_INTERVAL_SECONDS", "300")
+    )
+
+    async with checkin_loop_lock:
+        if _is_checkin_loop_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "already_running", **_checkin_loop_snapshot()},
+            )
+
+        checkin_loop_state.update(
+            {
+                "running": True,
+                "status": "starting",
+                "interval_seconds": interval_seconds,
+                "started_at": datetime.utcnow().isoformat() + "Z",
+                "last_checkin_at": None,
+                "last_hook_status_code": None,
+                "last_error": None,
+                "checkin_count": 0,
+            }
+        )
+        checkin_loop_task = asyncio.create_task(_run_checkin_loop(interval_seconds))
+
+    return JSONResponse(content={**_checkin_loop_snapshot(), "status": "started"})
+
+
+@app.post("/checkin-loop/stop")
+async def stop_checkin_loop():
+    """Stop the background check-in loop."""
+    async with checkin_loop_lock:
+        stopped = await _stop_checkin_loop_task("stopped")
+        snapshot = _checkin_loop_snapshot()
+
+    return JSONResponse(
+        content={"status": "stopped" if stopped else "not_running", **snapshot}
+    )
+
+
+@app.get("/checkin-loop/status")
+async def checkin_loop_status():
+    """Inspect current check-in loop state."""
+    async with checkin_loop_lock:
+        return JSONResponse(content=_checkin_loop_snapshot())
 
 
 @app.post("/prompt")
