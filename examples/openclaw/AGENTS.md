@@ -117,11 +117,12 @@ Returns plain text: `MEDIA:clip_front_<timestamp>.gif`
 - `duration`: seconds to record (default 3, max 10)
 - `fps`: frames per second (default 5, max 10)
 
-### Live Stream (browser URL — do NOT curl)
+### Live Stream (browser URL — do NOT curl the stream)
 ```
-GET /v2/stream?camera=front&fps=10
+GET /v2/stream-url?camera=front&fps=10
 ```
-Returns a continuous MJPEG stream. Give the user this URL to open in a browser — do NOT curl it.
+Returns the **public** stream URL as plain text (ngrok URL when tunnel is active, localhost otherwise).
+Call this endpoint first, then give the returned URL to the user to open in their browser.
 - `camera`: `front` (default) or `rear`
 - `fps`: 1–15 (default 10)
 
@@ -179,7 +180,7 @@ GET /interventions/history
 | send a video / record a gif / show me a clip | `curl -s "http://localhost:8000/v2/gif?duration=3&fps=5"` |
 | record a longer clip / save video | `curl -s "http://localhost:8000/v2/clip?duration=10&fps=10"` |
 | record rear camera gif | `curl -s "http://localhost:8000/v2/gif?camera=rear&duration=3"` |
-| live stream / stream the camera | Reply: "Open this URL in your browser to watch the live stream: http://localhost:8000/v2/stream" — do NOT curl it |
+| live stream / stream the camera | `curl -s "http://localhost:8000/v2/stream-url"` → reply: "Open this URL in your browser to watch the live stream: <returned URL>" — do NOT curl the stream URL itself |
 | what do you see? | `curl -s -X POST http://localhost:8000/describe-scene -H "Content-Type: application/json" -d '{"text":"what do you see?"}'` |
 | say hello | `curl -s -X POST http://localhost:8000/speak -H "Content-Type: application/json" -d '{"text": "hello"}'` |
 | lamp on | `curl -s -X POST http://localhost:8000/control -H "Content-Type: application/json" -d '{"command": {"linear": 0, "angular": 0, "lamp": 1}}'` |

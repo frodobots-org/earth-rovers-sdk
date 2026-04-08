@@ -24,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Any, Dict, List, Literal, Optional
 
+from pyngrok import ngrok as _ngrok
+
 from browser_service import BrowserService
 from rtm_client import RtmClient
 from tts_service import generate_speech
@@ -36,6 +38,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("http_logger")
 
 app = FastAPI()
+
+_public_base_url = None  # set to ngrok URL at startup when NGROK_ENABLED=true
 
 
 # Middleware
@@ -1439,8 +1443,18 @@ async def startup_prewarm_browser():
     global browser_prewarm_task
     if not _is_browser_prewarm_enabled():
         logger.info("Browser prewarm disabled by PREWARM_BROWSER_ON_STARTUP")
-        return
-    browser_prewarm_task = asyncio.create_task(_prewarm_browser())
+    else:
+        browser_prewarm_task = asyncio.create_task(_prewarm_browser())
+
+    if os.getenv("NGROK_ENABLED", "").lower() == "true":
+        global _public_base_url
+        auth_token = os.getenv("NGROK_AUTHTOKEN")
+        if auth_token:
+            _ngrok.set_auth_token(auth_token)
+        tunnel = _ngrok.connect(8000)
+        _public_base_url = tunnel.public_url
+        logger.info(f"ngrok public URL: {tunnel.public_url}")
+        logger.info(f"Stream: {tunnel.public_url}/v2/stream")
 
 
 @app.on_event("shutdown")
@@ -1467,6 +1481,10 @@ async def shutdown_voice_loop():
     browser_prewarm_task = None
     await voice_browser_service.close_browser()
     await browser_service.close_browser()
+    if os.getenv("NGROK_ENABLED", "").lower() == "true":
+        for t in _ngrok.get_tunnels():
+            _ngrok.disconnect(t.public_url)
+        _ngrok.kill()
 
 
 @app.post("/voice-listen")
@@ -2076,6 +2094,13 @@ async def describe_scene_endpoint(payload: PromptRequest):
 
     _save_openclaw_media_file("scene.png", front_frame)
     return PlainTextResponse(content=f"{caption}\nMEDIA:scene.png")
+
+
+@app.get("/v2/stream-url")
+async def get_stream_url(camera: Literal["front", "rear"] = "front", fps: int = 10):
+    """Returns the publicly accessible stream URL (ngrok if enabled, else localhost)."""
+    base = _public_base_url or "http://localhost:8000"
+    return PlainTextResponse(f"{base}/v2/stream?camera={camera}&fps={fps}")
 
 
 @app.get("/v2/stream")
