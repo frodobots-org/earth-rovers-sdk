@@ -11,6 +11,9 @@ import unicodedata
 from datetime import datetime
 import asyncio
 
+import cv2
+import numpy as np
+
 import aiohttp
 import requests
 from dotenv import load_dotenv
@@ -138,6 +141,33 @@ checkin_loop_state: Dict[str, Any] = {
     "last_hook_status_code": None,
     "last_error": None,
     "checkin_count": 0,
+}
+
+# ---------------------------------------------------------------------------
+# Color tracking (HSV ranges, background task, state)
+# H: 0-179, S: 0-255, V: 0-255 in OpenCV. Red wraps around H=0 so it needs
+# two mask pairs combined with bitwise OR.
+# ---------------------------------------------------------------------------
+_TRACK_COLOR_RANGES: Dict[str, List[tuple]] = {
+    "red":    [((0, 120, 70), (10, 255, 255)), ((160, 120, 70), (179, 255, 255))],
+    "green":  [((35, 80, 50), (85, 255, 255))],
+    "blue":   [((90, 80, 50), (130, 255, 255))],
+    "yellow": [((18, 100, 80), (35, 255, 255))],
+    "pink":   [((0, 40, 150), (10, 150, 255)), ((140, 60, 100), (179, 255, 255))],
+}
+
+track_color_task: Optional[asyncio.Task] = None
+track_color_lock = asyncio.Lock()
+track_color_state: Dict[str, Any] = {
+    "running": False,
+    "status": "idle",
+    "color": None,
+    "duration_seconds": None,
+    "started_at": None,
+    "linear": 0.0,
+    "angular": 0.0,
+    "fill_pct": None,
+    "last_error": None,
 }
 
 
@@ -1151,6 +1181,138 @@ def _checkin_loop_snapshot() -> dict:
     return snapshot
 
 
+# -- Color tracking helpers --------------------------------------------------
+
+def _is_track_color_running() -> bool:
+    return bool(track_color_task and not track_color_task.done())
+
+
+def _track_color_snapshot() -> dict:
+    snapshot = dict(track_color_state)
+    snapshot["running"] = _is_track_color_running()
+    return snapshot
+
+
+def _detect_color_blob(frame_bgr: np.ndarray, color_name: str) -> Optional[tuple]:
+    """Sync: detect the largest blob of color_name in frame_bgr.
+    Returns (cx_norm, fill_ratio) where cx_norm is in [-1, 1] relative to
+    frame centre, or None if no blob found.  Runs in a thread executor."""
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for lower, upper in _TRACK_COLOR_RANGES.get(color_name, []):
+        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, np.array(lower), np.array(upper)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
+    if area < 500:
+        return None
+    M = cv2.moments(largest)
+    if M["m00"] == 0:
+        return None
+    cx = int(M["m10"] / M["m00"])
+    h, w = frame_bgr.shape[:2]
+    cx_norm = (cx - w / 2) / (w / 2)   # [-1, 1]
+    fill_ratio = area / (h * w)
+    return cx_norm, fill_ratio
+
+
+async def _run_track_color_loop(
+    color: str,
+    duration_seconds: int,
+    speed: float,
+    kp_angular: float,
+    stop_fill: float,
+    search_angular: float,
+) -> None:
+    """Background task: visual servo toward a colored object."""
+    logger.info("Color tracking started (color=%s, duration=%ss)", color, duration_seconds)
+    track_color_state["status"] = "searching"
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + duration_seconds
+
+    try:
+        while loop.time() < deadline:
+            # Fetch front frame
+            try:
+                frame_b64 = await get_frame_base64("front")
+            except Exception as exc:
+                logger.warning("track_color: frame unavailable: %s", exc)
+                await asyncio.sleep(0.2)
+                continue
+
+            # Decode frame
+            try:
+                image_bytes = base64.b64decode(frame_b64)
+                image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            except Exception as exc:
+                logger.warning("track_color: decode error: %s", exc)
+                await asyncio.sleep(0.2)
+                continue
+
+            # Detect blob (CPU-bound — run in thread)
+            blob = await loop.run_in_executor(None, _detect_color_blob, frame, color)
+
+            if blob is None:
+                state = "searching"
+                linear, angular = 0.0, search_angular
+                fill_pct = 0.0
+            else:
+                cx_norm, fill_ratio = blob
+                fill_pct = fill_ratio * 100
+                if fill_ratio >= stop_fill:
+                    state = "arrived"
+                    linear, angular = 0.0, 0.0
+                else:
+                    state = "tracking"
+                    # Dead zone: ignore tiny offsets to reduce jitter
+                    effective_cx = cx_norm if abs(cx_norm) >= 0.05 else 0.0
+                    angular = max(-1.0, min(1.0, kp_angular * effective_cx))
+                    # Suppress forward motion when card is off-center so the rover
+                    # turns to face the target before driving toward it.
+                    center_factor = max(0.0, min(1.0, 1.0 - abs(cx_norm) / 0.4))
+                    linear = max(0.0, min(speed, speed * (1.0 - fill_ratio / stop_fill) * center_factor))
+
+            # Send control command
+            try:
+                await browser_service.send_message({"linear": linear, "angular": angular, "lamp": 0})
+            except Exception as exc:
+                logger.warning("track_color: send_message error: %s", exc)
+
+            track_color_state.update({
+                "status": state,
+                "linear": round(linear, 3),
+                "angular": round(angular, 3),
+                "fill_pct": round(fill_pct, 1),
+                "last_error": None,
+            })
+
+            if state == "arrived":
+                logger.info("Color tracking: target reached (fill=%.1f%%)", fill_pct)
+                break
+
+            await asyncio.sleep(0.1)  # 10 Hz
+
+    except asyncio.CancelledError:
+        logger.info("Color tracking cancelled")
+        raise
+    except Exception as exc:
+        logger.error("Color tracking loop error: %s", exc)
+        track_color_state["last_error"] = str(exc)
+    finally:
+        try:
+            await browser_service.send_message({"linear": 0, "angular": 0, "lamp": 0})
+        except Exception:
+            pass
+        track_color_state.update({"running": False, "status": "idle"})
+        logger.info("Color tracking stopped")
+
+
 def _build_checkin_message(data: dict, iteration: int) -> str:
     battery = data.get("battery", "?")
     signal = data.get("signal_level", "?")
@@ -1283,11 +1445,19 @@ async def startup_prewarm_browser():
 
 @app.on_event("shutdown")
 async def shutdown_voice_loop():
-    global browser_prewarm_task
+    global browser_prewarm_task, track_color_task
     async with voice_loop_lock:
         await _stop_voice_loop_task("shutdown")
     async with checkin_loop_lock:
         await _stop_checkin_loop_task("shutdown")
+    async with track_color_lock:
+        if track_color_task and not track_color_task.done():
+            track_color_task.cancel()
+            try:
+                await track_color_task
+            except asyncio.CancelledError:
+                pass
+        track_color_task = None
     if browser_prewarm_task and not browser_prewarm_task.done():
         browser_prewarm_task.cancel()
         try:
@@ -1524,6 +1694,88 @@ async def checkin_loop_status():
     """Inspect current check-in loop state."""
     async with checkin_loop_lock:
         return JSONResponse(content=_checkin_loop_snapshot())
+
+
+# ---------------------------------------------------------------------------
+# Color tracking endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/track-color")
+async def start_track_color(request: Request):
+    """Start a background visual-servo loop that follows a colored object.
+
+    Body params (all optional):
+      color           – red | green | blue | yellow | pink  (default: red)
+      duration_seconds – how long to track before auto-stopping (default: 120)
+      speed           – max forward speed 0-1 (default: 0.35)
+      kp_angular      – proportional gain for heading correction (default: 0.6)
+      stop_fill       – blob fill fraction [0-1] to consider "arrived" (default: 0.15)
+      search_angular  – rotation speed when target not visible (default: 0.35)
+    """
+    global track_color_task
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await _parse_json_body(request)
+    color = str(body.get("color", "red")).lower()
+    if color not in _TRACK_COLOR_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown color '{color}'. Choose from: {', '.join(_TRACK_COLOR_RANGES)}",
+        )
+    duration_seconds = int(body.get("duration_seconds", 120))
+    speed = float(body.get("speed", 0.35))
+    kp_angular = float(body.get("kp_angular", 0.6))
+    stop_fill = float(body.get("stop_fill", 0.15))
+    search_angular = float(body.get("search_angular", 0.35))
+
+    async with track_color_lock:
+        if _is_track_color_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "already_running", **_track_color_snapshot()},
+            )
+        track_color_state.update({
+            "running": True,
+            "status": "starting",
+            "color": color,
+            "duration_seconds": duration_seconds,
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "linear": 0.0,
+            "angular": 0.0,
+            "fill_pct": None,
+            "last_error": None,
+        })
+        track_color_task = asyncio.create_task(
+            _run_track_color_loop(color, duration_seconds, speed, kp_angular, stop_fill, search_angular)
+        )
+
+    return JSONResponse(content={**_track_color_snapshot(), "status": "started"})
+
+
+@app.post("/track-color/stop")
+async def stop_track_color():
+    """Stop the color tracking loop immediately."""
+    global track_color_task
+    async with track_color_lock:
+        task = track_color_task
+        if not task or task.done():
+            return JSONResponse(content={"status": "not_running"})
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        track_color_task = None
+        track_color_state.update({"running": False, "status": "idle"})
+    return JSONResponse(content={"status": "stopped"})
+
+
+@app.get("/track-color/status")
+async def track_color_status():
+    """Return current color tracking state."""
+    return JSONResponse(content=_track_color_snapshot())
 
 
 @app.post("/prompt")
