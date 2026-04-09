@@ -107,6 +107,7 @@ class PromptRequest(BaseModel):
 # In-memory storage for the response
 auth_response_data = {}
 checkpoints_list_data = {}
+last_rover_action: str = ""  # human-readable description of the last executed rover command
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
@@ -492,6 +493,15 @@ async def control(request: Request):
 
     try:
         await browser_service.send_message(command)
+        global last_rover_action
+        linear = command.get("linear", 0)
+        angular = command.get("angular", 0)
+        if linear > 0:
+            last_rover_action = "move forward"
+        elif linear < 0:
+            last_rover_action = "move backward"
+        elif angular != 0:
+            last_rover_action = "turn in place"
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
@@ -711,6 +721,9 @@ async def turn(request: Request):
                 await asyncio.sleep(0.3)
 
         total_net = sum(r["net_delta"] for r in results)
+        global last_rover_action
+        direction = "right" if total_net >= 0 else "left"
+        last_rover_action = f"turn {direction} {abs(round(total_net, 1))} degrees"
         return {
             "requested": degrees,
             "actual": round(total_net, 1),
@@ -740,6 +753,39 @@ async def speak(request: Request):
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
+
+
+@app.post("/status-report")
+async def status_report(request: Request):
+    """Return battery, location, and last action in conversational English.
+
+    Optional JSON body: {"channel": "speak" | "text" | "both"}  (default: "both")
+    """
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    channel = body.get("channel", "both")
+
+    reply = await _generate_status_reply()
+
+    if channel in ("speak", "both"):
+        try:
+            await _speak_text(reply)
+        except Exception as e:
+            logger.error("Status report TTS failed: %s", e)
+
+    if channel in ("text", "both") and auth_response_data:
+        try:
+            RtmClient(auth_response_data).send_message({"text": reply})
+        except Exception as e:
+            logger.warning("Status report RTM reply failed: %s", e)
+
+    return {"reply": reply, "channel": channel}
 
 
 async def _record_and_transcribe_with_metrics(duration_ms: int):
@@ -991,6 +1037,60 @@ def _infer_normalized_voice_command(transcript: str) -> Optional[str]:
     return None
 
 
+def _detect_status_request(transcript: str) -> bool:
+    """Return True when the transcript is a greeting or status inquiry."""
+    normalized = _normalize_transcript_text(transcript)
+    patterns = [
+        r"\bhow are you\b",
+        r"\bhow s it going\b",
+        r"\bhow is it going\b",
+        r"\bwhat s your status\b",
+        r"\bwhat is your status\b",
+        r"\bstatus report\b",
+        r"\bstatus update\b",
+        r"\bgive me (a |your )?status\b",
+        r"\bhow re (you|things)\b",
+        r"\bhow are (you|things)\b",
+    ]
+    return any(re.search(p, normalized) for p in patterns)
+
+
+async def _speak_text(text: str) -> None:
+    """Generate TTS audio and play it on the rover speaker."""
+    audio_path = await generate_speech(text, "static/tts_output")
+    audio_filename = os.path.basename(audio_path)
+    audio_url = f"http://127.0.0.1:8000/static/{audio_filename}?v={time.time_ns()}"
+    await voice_browser_service.speak(audio_url)
+
+
+async def _generate_status_reply() -> str:
+    """Fetch live telemetry and compose a conversational status message."""
+    data = {}
+    try:
+        data = await browser_service.data() or {}
+    except Exception:
+        pass
+
+    battery = data.get("battery")
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    action = last_rover_action or "nothing yet"
+
+    battery_str = f"Battery is at {battery}%." if battery is not None else "Battery level unknown."
+    if lat is not None and lon is not None:
+        location_str = (
+            f"I'm currently at {float(lat):.4f}\u00b0 latitude, "
+            f"{float(lon):.4f}\u00b0 longitude."
+        )
+    else:
+        location_str = "GPS location isn't available right now."
+
+    return (
+        f"Hey! I'm doing well. {battery_str} {location_str} "
+        f"Last thing I did was {action}."
+    )
+
+
 def _build_openclaw_hook_message(
     transcript: str, normalized_command: Optional[str]
 ) -> str:
@@ -1124,29 +1224,41 @@ async def _run_voice_command_loop(duration_ms: int, listen_windows: int, poll_de
             voice_loop_state["status"] = "silence"
         else:
             voice_loop_state["last_transcript"] = transcript
-            try:
-                hook_result = await _send_to_openclaw_hook(transcript, duration_ms)
-                voice_loop_state["status"] = "forwarded"
-                voice_loop_state["last_error"] = None
-                voice_loop_state["last_hook_status_code"] = hook_result.get("status_code")
-                voice_loop_state["last_timings"]["hook_request_ms"] = (
-                    hook_result.get("timings", {}).get("hook_request_ms")
-                )
-                voice_loop_state["forwarded_count"] += 1
-                logger.info(
-                    "Voice loop forwarded command (status=%s, timings=%s): %s",
-                    hook_result.get("status_code"),
-                    voice_loop_state["last_timings"],
-                    transcript,
-                )
-            except HTTPException as exc:
-                voice_loop_state["status"] = "hook_error"
-                voice_loop_state["last_error"] = str(exc.detail)
-                logger.error("Voice loop hook error: %s", exc.detail)
-            except Exception as exc:
-                voice_loop_state["status"] = "loop_error"
-                voice_loop_state["last_error"] = str(exc)
-                logger.error("Voice loop unexpected error: %s", str(exc))
+            if _detect_status_request(transcript):
+                try:
+                    reply = await _generate_status_reply()
+                    await _speak_text(reply)
+                    voice_loop_state["status"] = "status_reported"
+                    voice_loop_state["last_error"] = None
+                    logger.info("Voice loop: status report spoken in response to greeting")
+                except Exception as exc:
+                    voice_loop_state["status"] = "loop_error"
+                    voice_loop_state["last_error"] = str(exc)
+                    logger.error("Voice loop status report error: %s", str(exc))
+            else:
+                try:
+                    hook_result = await _send_to_openclaw_hook(transcript, duration_ms)
+                    voice_loop_state["status"] = "forwarded"
+                    voice_loop_state["last_error"] = None
+                    voice_loop_state["last_hook_status_code"] = hook_result.get("status_code")
+                    voice_loop_state["last_timings"]["hook_request_ms"] = (
+                        hook_result.get("timings", {}).get("hook_request_ms")
+                    )
+                    voice_loop_state["forwarded_count"] += 1
+                    logger.info(
+                        "Voice loop forwarded command (status=%s, timings=%s): %s",
+                        hook_result.get("status_code"),
+                        voice_loop_state["last_timings"],
+                        transcript,
+                    )
+                except HTTPException as exc:
+                    voice_loop_state["status"] = "hook_error"
+                    voice_loop_state["last_error"] = str(exc.detail)
+                    logger.error("Voice loop hook error: %s", exc.detail)
+                except Exception as exc:
+                    voice_loop_state["status"] = "loop_error"
+                    voice_loop_state["last_error"] = str(exc)
+                    logger.error("Voice loop unexpected error: %s", str(exc))
 
         if poll_delay_ms > 0:
             await asyncio.sleep(poll_delay_ms / 1000.0)
@@ -1559,6 +1671,23 @@ async def voice_command(request: Request):
         )
 
     logger.info("Voice command transcript: %s (timings=%s)", transcript, combined_timings)
+
+    if _detect_status_request(transcript):
+        try:
+            reply = await _generate_status_reply()
+            await _speak_text(reply)
+            logger.info("Voice command: status report spoken in response to greeting")
+        except Exception as exc:
+            logger.error("Voice command status report error: %s", str(exc))
+        return JSONResponse(
+            content={
+                "transcript": transcript,
+                "duration_ms": duration_ms,
+                "status": "status_reported",
+                "attempts": attempts,
+                "timings": combined_timings,
+            }
+        )
 
     try:
         hook_result = await _send_to_openclaw_hook(transcript, duration_ms)

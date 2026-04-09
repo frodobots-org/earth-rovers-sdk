@@ -1,19 +1,20 @@
 """
 Color Card Tracking Example - Earth Rover SDK
 
-Hold a colored card in front of the rover's camera.
-The rover will turn to center it, then drive toward it,
-stopping when the card fills ~15% of the frame.
+Hold a colored card in front of (or behind) the rover's camera.
+The rover uses both front and rear cameras to locate the card,
+turns to center it, then drives toward it, stopping when the card
+fills ~15% of the front frame.
 
-Supported colors: red, green, blue, yellow, pink
+Supported colors: red, green, blue, yellow, pink, skyblue
 
 Usage:
-    python examples/basics/17_color_tracking.py --color red
-    python examples/basics/17_color_tracking.py --color blue --speed 0.3 --kp 0.4
+    python examples/basics/17_color_tracking.py --color skyblue
+    python examples/basics/17_color_tracking.py --color red --speed 0.3 --kp 0.8
 
 Controls:
-    q  — quit
-    Ctrl+C — stop and exit
+    q       — quit
+    Ctrl+C  — stop and exit
 """
 
 import argparse
@@ -51,25 +52,31 @@ COLOR_RANGES: dict[str, list[tuple]] = {
         # Hot pink / magenta (hue toward purple-red end)
         ((140, 60, 100), (179, 255, 255)),
     ],
+    "skyblue": [
+        # Sky blue — very low saturation floor to catch pale/pastel blues
+        ((85, 15, 100), (120, 200, 255)),
+    ],
 }
 
 # ---------------------------------------------------------------------------
 # Tunable defaults
 # ---------------------------------------------------------------------------
-KP_ANGULAR = 0.8       # proportional gain: angular correction per unit offset
-MAX_FORWARD = 0.45     # max linear speed (rover units, 0–1)
-STOP_FILL = 0.15       # stop when blob occupies this fraction of frame area
-MIN_BLOB_AREA = 500    # px² — ignore blobs smaller than this (noise filter)
-SEARCH_ANGULAR = 0.35  # rotation speed when no target is visible
-LOOP_HZ = 10           # control loop frequency
+KP_ANGULAR = 0.8         # proportional gain: angular correction per unit offset
+MAX_FORWARD = 0.45       # max linear speed (rover units, 0–1)
+STOP_FILL = 0.15         # stop when blob occupies this fraction of frame area
+MIN_BLOB_AREA = 500      # px² — hard noise floor
+MIN_DETECT_FILL = 0.015  # blob must be ≥1.5% of frame to count as a real card
+SEARCH_ANGULAR = 0.35    # rotation speed when no target is visible
+LOOP_HZ = 10             # control loop frequency
 
 # Overlay colours (BGR)
-_GREEN = (0, 255, 0)
-_WHITE = (255, 255, 255)
+_GREEN  = (0, 255, 0)
+_WHITE  = (255, 255, 255)
 _YELLOW = (0, 220, 255)
-_RED = (0, 0, 220)
+_RED    = (0, 0, 220)
+_CYAN   = (255, 220, 0)
 
-# Shared session — set in track_color(), used by send_command / fetch_front_frame
+# Shared session — initialised in track_color()
 _session: requests.Session | None = None
 
 
@@ -90,26 +97,33 @@ def send_command(linear: float, angular: float, lamp: int = 0) -> None:
             timeout=0.5,
         )
     except Exception:
-        pass  # swallow transient errors; loop will retry next tick
+        pass  # swallow transient errors; loop retries next tick
 
 
 def stop() -> None:
     send_command(0.0, 0.0)
 
 
-def fetch_front_frame() -> np.ndarray | None:
-    """Fetch the front camera frame and return it as a BGR numpy array."""
+def _decode_b64_frame(b64: str) -> np.ndarray | None:
+    """Decode a base64 image string to a BGR numpy array."""
     try:
-        resp = _session.get(f"{BASE_URL}/v2/front", timeout=1.0)
-        data = resp.json()
-        b64 = data.get("front_frame")
-        if not b64:
-            return None
         image_bytes = base64.b64decode(b64)
         image_array = np.frombuffer(image_bytes, dtype=np.uint8)
         return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     except Exception:
         return None
+
+
+def fetch_both_frames() -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Fetch front and rear frames in a single request. Returns (front, rear)."""
+    try:
+        resp = _session.get(f"{BASE_URL}/v2/screenshot", timeout=1.5)
+        data = resp.json()
+        front = _decode_b64_frame(data.get("front_frame") or "")
+        rear  = _decode_b64_frame(data.get("rear_frame") or "")
+        return front, rear
+    except Exception:
+        return None, None
 
 
 def build_color_mask(hsv_frame: np.ndarray, color_name: str) -> np.ndarray:
@@ -128,10 +142,13 @@ def build_color_mask(hsv_frame: np.ndarray, color_name: str) -> np.ndarray:
     return mask
 
 
-def find_largest_blob(mask: np.ndarray) -> tuple[int, int, float] | None:
-    """
-    Find the largest blob in a binary mask.
-    Returns (cx, cy, area) in pixels, or None if no blob exceeds MIN_BLOB_AREA.
+def find_largest_blob(mask: np.ndarray, frame_area: int) -> tuple[int, int, float] | None:
+    """Find the largest blob in a binary mask.
+
+    Returns (cx, cy, area) in pixels, or None if blob is too small to be a card.
+    Two filters:
+      - MIN_BLOB_AREA px²: hard noise floor
+      - MIN_DETECT_FILL: blob must fill at least 1.5% of the frame
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -139,6 +156,8 @@ def find_largest_blob(mask: np.ndarray) -> tuple[int, int, float] | None:
     largest = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest)
     if area < MIN_BLOB_AREA:
+        return None
+    if frame_area > 0 and (area / frame_area) < MIN_DETECT_FILL:
         return None
     M = cv2.moments(largest)
     if M["m00"] == 0:
@@ -157,6 +176,7 @@ def draw_overlay(
     state: str,
     linear: float,
     angular: float,
+    label: str = "",
 ) -> np.ndarray:
     """Return an annotated copy of the frame for display."""
     out = frame.copy()
@@ -171,32 +191,24 @@ def draw_overlay(
         cx_blob, cy_blob, blob_area = blob
         fill_pct = blob_area / frame_area * 100
 
-        # Draw contours from mask
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, _GREEN, 2)
-
-        # Centroid dot
         cv2.circle(out, (cx_blob, cy_blob), 8, _GREEN, -1)
-
-        # Line from frame centre to blob centroid
         cv2.line(out, (cx_frame, cy_frame), (cx_blob, cy_blob), _YELLOW, 1)
-
         fill_str = f"{fill_pct:.1f}%"
     else:
         fill_str = "—"
 
-    # Status text (top-left)
-    color_label = color_name.upper()
-    state_color = _GREEN if state == "TRACKING" else (_YELLOW if state == "SEARCHING" else _RED)
+    tracking = "TRACKING" in state
+    state_color = _GREEN if tracking else (_YELLOW if "SEARCH" in state else _CYAN)
     lines = [
-        (f"Target: {color_label}  Fill: {fill_str}", _WHITE),
-        (f"State: {state}  Lin: {linear:+.2f}  Ang: {angular:+.2f}", state_color),
+        (f"{label}  {color_name.upper()}  Fill: {fill_str}", _WHITE),
+        (f"{state}  Lin: {linear:+.2f}  Ang: {angular:+.2f}", state_color),
         ("'q' to quit", _WHITE),
     ]
     for i, (text, color) in enumerate(lines):
         cv2.putText(out, text, (10, 25 + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
     return out
 
 
@@ -218,38 +230,96 @@ def track_color(
 
     print(f"=== Color Tracking: {color_name.upper()} ===")
     print(f"  Speed: {max_forward:.2f}  KP: {kp_angular:.2f}  Stop fill: {stop_fill:.0%}")
-    print("Hold the card in front of the camera. Press 'q' or Ctrl+C to stop.\n")
+    print("Hold the card in front of (or behind) the rover. Press 'q' or Ctrl+C to stop.\n")
 
     state = "SEARCHING"
     linear = 0.0
     angular = search_angular
-    mask = None
-    blob = None
-    frame_area = 1  # safe default before first frame
+    fill_ratio = 0.0
+    offset_norm = 0.0
+    active_cam = "front"
+    last_seen_angular = search_angular
+    lost_ticks = 0
+    fc = 0  # frame counter for periodic printing
+
+    # placeholders so draw_overlay always has valid args
+    front_frame_disp: np.ndarray | None = None
+    rear_frame_disp:  np.ndarray | None = None
+    front_mask_disp:  np.ndarray | None = None
+    rear_mask_disp:   np.ndarray | None = None
+    front_blob_disp = None
+    rear_blob_disp  = None
+    rh = rw = 1
 
     try:
         while True:
             t_start = time.time()
 
-            frame = fetch_front_frame()
-            if frame is None:
+            front_frame, rear_frame = fetch_both_frames()
+            if front_frame is None and rear_frame is None:
                 send_command(0.0, 0.0)
                 time.sleep(loop_dt)
                 continue
 
-            frame_h, frame_w = frame.shape[:2]
+            # -- Detect on front camera --
+            front_blob = None
+            front_mask_out = np.zeros((1, 1), dtype=np.uint8)
+            fh = fw = 1
+            if front_frame is not None:
+                fh, fw = front_frame.shape[:2]
+                front_hsv = cv2.cvtColor(front_frame, cv2.COLOR_BGR2HSV)
+                front_mask_out = build_color_mask(front_hsv, color_name)
+                front_blob = find_largest_blob(front_mask_out, fh * fw)
+
+            # -- Detect on rear camera --
+            rear_blob = None
+            rear_mask_out = np.zeros((1, 1), dtype=np.uint8)
+            if rear_frame is not None:
+                rh, rw = rear_frame.shape[:2]
+                rear_hsv = cv2.cvtColor(rear_frame, cv2.COLOR_BGR2HSV)
+                rear_mask_out = build_color_mask(rear_hsv, color_name)
+                rear_blob = find_largest_blob(rear_mask_out, rh * rw)
+
+            # Save for display
+            front_frame_disp = front_frame
+            rear_frame_disp  = rear_frame
+            front_mask_disp  = front_mask_out
+            rear_mask_disp   = rear_mask_out
+            front_blob_disp  = front_blob
+            rear_blob_disp   = rear_blob
+
+            # -- Choose camera: front takes priority --
+            if front_blob is not None:
+                active_cam = "front"
+                blob = front_blob
+                frame_h, frame_w = fh, fw
+            elif rear_blob is not None:
+                active_cam = "rear"
+                blob = rear_blob
+                frame_h, frame_w = rh, rw
+            else:
+                active_cam = "front"
+                blob = None
+                frame_h, frame_w = fh, fw
+
             frame_area = frame_h * frame_w
             cx_frame = frame_w / 2
 
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            mask = build_color_mask(hsv, color_name)
-            blob = find_largest_blob(mask)
-
+            # -- Control --
             if blob is None:
-                state = "SEARCHING"
-                linear = 0.0
-                angular = search_angular
+                lost_ticks += 1
+                fill_ratio = 0.0
+                offset_norm = 0.0
+                if lost_ticks <= int(LOOP_HZ * 1.0):
+                    state = "LAST_SEEN"
+                    linear = 0.0
+                    angular = last_seen_angular
+                else:
+                    state = "SEARCHING"
+                    linear = 0.0
+                    angular = search_angular
             else:
+                lost_ticks = 0
                 cx_blob, cy_blob, blob_area = blob
                 fill_ratio = blob_area / frame_area
 
@@ -257,31 +327,72 @@ def track_color(
                     state = "ARRIVED"
                     linear = 0.0
                     angular = 0.0
+                    offset_norm = 0.0
                 else:
-                    state = "TRACKING"
                     offset_norm = (cx_blob - cx_frame) / (frame_w / 2)
-
-                    # Dead zone: ignore tiny offsets to reduce jitter
                     if abs(offset_norm) < 0.05:
                         offset_norm = 0.0
-                    angular = clamp(kp_angular * offset_norm, -1.0, 1.0)
 
-                    # Suppress forward speed when card is off-center.
-                    # center_factor → 1 when centred, → 0 when |offset| ≥ 0.4
-                    # This makes the rover turn first, then drive forward.
-                    center_factor = clamp(1.0 - abs(offset_norm) / 0.4, 0.0, 1.0)
-                    linear = clamp(
-                        max_forward * (1.0 - fill_ratio / stop_fill) * center_factor,
-                        0.0,
-                        max_forward,
-                    )
+                    if active_cam == "front":
+                        # Front camera is mirrored: negate offset to turn correctly
+                        state = "TRACKING(F)"
+                        angular = clamp(-kp_angular * offset_norm, -1.0, 1.0)
+                        center_factor = clamp(1.0 - abs(offset_norm), 0.0, 1.0)
+                        linear = clamp(
+                            max_forward * (1.0 - fill_ratio / stop_fill) * center_factor,
+                            0.0, max_forward,
+                        )
+                    else:
+                        # Rear camera: spin in place toward the card, no forward motion
+                        state = "TRACKING(R)"
+                        angular = clamp(kp_angular * offset_norm, -1.0, 1.0)
+                        linear = 0.0
+
+                    last_seen_angular = angular
 
             send_command(linear, angular)
 
-            # Display
-            display = draw_overlay(frame, mask if mask is not None else np.zeros_like(frame[:, :, 0]),
-                                   blob, frame_area, color_name, state, linear, angular)
-            cv2.imshow("Color Tracking", display)
+            # Periodic terminal log
+            fc += 1
+            if fc % 10 == 0:
+                print(f"  [{state}]  cam={active_cam}  fill={fill_ratio*100:.1f}%"
+                      f"  offset={offset_norm:+.2f}  lin={linear:.2f}  ang={angular:+.2f}")
+
+            # -- Display: side-by-side front + rear --
+            base_frame = front_frame_disp if front_frame_disp is not None else \
+                         (rear_frame_disp if rear_frame_disp is not None else
+                          np.zeros((240, 320, 3), dtype=np.uint8))
+            bh, bw = base_frame.shape[:2]
+
+            ann_front = draw_overlay(
+                front_frame_disp if front_frame_disp is not None else np.zeros((bh, bw, 3), dtype=np.uint8),
+                front_mask_disp if front_mask_disp is not None else np.zeros((bh, bw), dtype=np.uint8),
+                front_blob_disp, fh * fw, color_name,
+                state if active_cam == "front" else "IDLE",
+                linear if active_cam == "front" else 0.0,
+                angular if active_cam == "front" else 0.0,
+                label="[FRONT]",
+            )
+            if rear_frame_disp is not None:
+                ann_rear = draw_overlay(
+                    rear_frame_disp,
+                    rear_mask_disp if rear_mask_disp is not None else np.zeros((rh, rw), dtype=np.uint8),
+                    rear_blob_disp, rh * rw, color_name,
+                    state if active_cam == "rear" else "IDLE",
+                    linear if active_cam == "rear" else 0.0,
+                    angular if active_cam == "rear" else 0.0,
+                    label="[REAR]",
+                )
+                # Resize rear to match front height
+                af_h, af_w = ann_front.shape[:2]
+                ar_h, ar_w = ann_rear.shape[:2]
+                if af_h != ar_h:
+                    ann_rear = cv2.resize(ann_rear, (int(ar_w * af_h / ar_h), af_h))
+                display = np.hstack([ann_front, ann_rear])
+            else:
+                display = ann_front
+
+            cv2.imshow("Color Tracking — Dual Cam", display)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -294,7 +405,6 @@ def track_color(
                 time.sleep(1.0)
                 break
 
-            # Pace to LOOP_HZ
             elapsed = time.time() - t_start
             time.sleep(max(0.0, loop_dt - elapsed))
 
@@ -312,7 +422,7 @@ def track_color(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Drive the rover toward a colored card using HSV color tracking."
+        description="Drive the rover toward a colored card using dual-camera HSV tracking."
     )
     parser.add_argument(
         "--color",
