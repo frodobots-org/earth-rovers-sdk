@@ -104,6 +104,11 @@ class PromptRequest(BaseModel):
     text: str
 
 
+class ObstacleAlertRequest(BaseModel):
+    description: str
+    action: Optional[str] = None
+
+
 # In-memory storage for the response
 auth_response_data = {}
 checkpoints_list_data = {}
@@ -112,7 +117,7 @@ last_rover_action: str = ""  # human-readable description of the last executed r
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 browser_service = BrowserService()
-voice_browser_service = BrowserService(page_path="/", require_rtm=False)
+voice_browser_service = BrowserService(page_path="/voice-sdk", require_rtm=False)
 
 
 voice_loop_task: Optional[asyncio.Task] = None
@@ -149,6 +154,30 @@ checkin_loop_state: Dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# Rescue Ping (autonomous SOS monitor — battery, flip, GPS stall)
+# ---------------------------------------------------------------------------
+rescue_ping_task: Optional[asyncio.Task] = None
+rescue_ping_lock = asyncio.Lock()
+rescue_ping_state: Dict[str, Any] = {
+    "running": False,
+    "status": "idle",
+    "started_at": None,
+    "poll_interval_seconds": 10,
+    "battery_threshold": 10,
+    "gps_stall_seconds": 60,
+    "reping_interval_seconds": 300,
+    "last_alert_at": None,
+    "last_alert_reason": None,
+    "last_ack_at": None,
+    "alert_count": 0,
+    "last_error": None,
+}
+# Internal tracking variables reset each time the loop starts
+_rescue_flip_count: int = 0
+_rescue_last_gps: Optional[tuple] = None
+_rescue_gps_stable_since: Optional[float] = None
+
+# ---------------------------------------------------------------------------
 # Color tracking (HSV ranges, background task, state)
 # H: 0-179, S: 0-255, V: 0-255 in OpenCV. Red wraps around H=0 so it needs
 # two mask pairs combined with bitwise OR.
@@ -172,6 +201,18 @@ track_color_state: Dict[str, Any] = {
     "linear": 0.0,
     "angular": 0.0,
     "fill_pct": None,
+    "last_error": None,
+}
+
+# ---------------------------------------------------------------------------
+# Obstacle Alert (agent-driven narration of path blockages)
+# ---------------------------------------------------------------------------
+obstacle_alert_state: Dict[str, Any] = {
+    "last_at": None,
+    "last_description": None,
+    "last_action": None,
+    "alert_count": 0,
+    "last_hook_status_code": None,
     "last_error": None,
 }
 
@@ -424,17 +465,20 @@ async def end_mission():
         raise HTTPException(status_code=500, detail=f"Failed to end mission: {str(e)}")
 
 
-async def render_index_html(is_spectator: bool):
+async def render_index_html(is_spectator: bool, rtm_disabled: bool = False):
     await need_start_mission()
     if not auth_response_data:
         await auth()
 
     token_type: Literal["SPECTATOR_", ""] = "SPECTATOR_" if is_spectator else ""
 
+    # rtm_disabled: use operator RTC credentials but suppress RTM (for voice-only headless sessions)
+    rtm_token = "" if (is_spectator or rtm_disabled) else auth_response_data.get("RTM_TOKEN", "")
+
     template_vars = {
         "appid": auth_response_data.get("APP_ID", ""),
         "rtc_token": auth_response_data.get(f"{token_type}RTC_TOKEN", ""),
-        "rtm_token": "" if is_spectator else auth_response_data.get("RTM_TOKEN", ""),
+        "rtm_token": rtm_token,
         "channel": auth_response_data.get("CHANNEL_NAME", ""),
         "uid": auth_response_data.get(f"{token_type}USERID", ""),
         "bot_uid": auth_response_data.get("BOT_UID", ""),
@@ -462,6 +506,14 @@ async def get_index(request: Request):
 @app.get("/sdk")
 async def sdk(request: Request):
     return await render_index_html(is_spectator=False)
+
+
+@app.get("/voice-sdk")
+async def voice_sdk(request: Request):
+    # Operator RTC credentials with RTM disabled — used by voice_browser_service so the
+    # rover trusts audio published from the operator UID without conflicting with
+    # browser_service's RTM session.
+    return await render_index_html(is_spectator=False, rtm_disabled=True)
 
 
 @app.post("/control-legacy")
@@ -525,7 +577,7 @@ async def turn(request: Request):
         max(abs(body.get("min_speed", max_speed * 0.5)), 0.12),
     )
     tolerance = float(body.get("tolerance", 3.0))
-    timeout = min(float(body.get("timeout", 20)), 30)
+    timeout = min(float(body.get("timeout", 12)), 30)
 
     HEADING_SIGN = -1  # +angular decreases heading on this rover
     CONTROL_INTERVAL = min(max(float(body.get("control_interval", 0.4)), 0.05), 0.5)
@@ -737,18 +789,13 @@ async def speak(request: Request):
     if not auth_response_data:
         await auth()
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     text = body.get("text")
     if not text:
         raise HTTPException(status_code=400, detail="Text not provided")
 
     try:
-        audio_path = await generate_speech(text, "static/tts_output")
-        audio_filename = os.path.basename(audio_path)
-        # Unique query avoids Agora createBufferSourceAudioTrack URL-cache reusing stale AudioBuffer
-        # when the same static file is overwritten for each TTS.
-        audio_url = f"http://127.0.0.1:8000/static/{audio_filename}?v={time.time_ns()}"
-        await voice_browser_service.speak(audio_url)
+        await _speak_text(text)
         return {"message": "Speech sent to rover"}
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))
@@ -1484,7 +1531,9 @@ async def _run_checkin_loop(interval_seconds: int):
         if hook_channel and hook_to:
             payload["channel"] = hook_channel
             payload["to"] = hook_to
-            payload["sessionKey"] = f"agent:main:{hook_channel}:direct:{hook_to}"
+            omit_key = os.getenv("OPENCLAW_HOOK_OMIT_SESSION_KEY", "").lower() in ("1", "true", "yes")
+            if not omit_key:
+                payload["sessionKey"] = f"agent:main:{hook_channel}:direct:{hook_to}"
         headers = {"Authorization": f"Bearer {hook_token}"}
         try:
             async with aiohttp.ClientSession() as session:
@@ -1537,6 +1586,297 @@ async def _stop_checkin_loop_task(reason: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Obstacle Alert helpers
+# ---------------------------------------------------------------------------
+
+def _obstacle_alert_snapshot() -> dict:
+    return dict(obstacle_alert_state)
+
+
+async def _send_obstacle_hook(description: str, action: Optional[str]) -> None:
+    """POST obstacle alert to OpenClaw webhook — warn-only if not configured."""
+    hook_url = os.getenv("OPENCLAW_HOOK_URL", "").strip()
+    hook_token = os.getenv("OPENCLAW_HOOK_TOKEN", "").strip()
+    if not hook_url or not hook_token:
+        logger.warning("Obstacle alert: hook not configured — skipping, speech still played")
+        obstacle_alert_state["last_error"] = "hook not configured"
+        return
+
+    narrative = f"there's a {description}, {action}" if action else f"there's a {description}"
+    hook_channel = os.getenv("OPENCLAW_HOOK_CHANNEL", "").strip()
+    hook_to = os.getenv("OPENCLAW_HOOK_TO", "").strip()
+    payload: Dict[str, Any] = {
+        "message": narrative,
+        "text": narrative,
+        "source": "rover_obstacle_alert",
+        "description": description,
+    }
+    if action:
+        payload["action"] = action
+    if hook_channel and hook_to:
+        payload["channel"] = hook_channel
+        payload["to"] = hook_to
+        omit_key = os.getenv("OPENCLAW_HOOK_OMIT_SESSION_KEY", "").lower() in ("1", "true", "yes")
+        if not omit_key:
+            payload["sessionKey"] = f"agent:main:{hook_channel}:direct:{hook_to}"
+
+    headers = {"Authorization": f"Bearer {hook_token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                hook_url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                obstacle_alert_state["last_hook_status_code"] = resp.status
+                if resp.status >= 400:
+                    resp_text = await resp.text()
+                    logger.error("Obstacle alert hook %s: %s", resp.status, resp_text[:300])
+                    obstacle_alert_state["last_error"] = f"hook status={resp.status}"
+                else:
+                    logger.info(
+                        "Obstacle alert hook sent (description=%r action=%r)", description, action
+                    )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("Obstacle alert hook error: %s", exc)
+        obstacle_alert_state["last_error"] = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Rescue Ping helpers
+# ---------------------------------------------------------------------------
+
+def _is_rescue_ping_running() -> bool:
+    return bool(rescue_ping_task and not rescue_ping_task.done())
+
+
+def _rescue_ping_snapshot() -> dict:
+    snapshot = dict(rescue_ping_state)
+    snapshot["running"] = _is_rescue_ping_running()
+    return snapshot
+
+
+def _build_rescue_sos_message(reasons: list, data: dict) -> str:
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    battery = data.get("battery", "?")
+    lat = data.get("latitude", "?")
+    lon = data.get("longitude", "?")
+    gps_signal = data.get("gps_signal", "?")
+    reason_text = " | ".join(reasons)
+    lines = [
+        f"SOS ALERT — {ts}",
+        f"Reason: {reason_text}",
+        f"Battery: {battery}% | GPS signal: {gps_signal}",
+        f"Location: {lat}, {lon}",
+        "MEDIA:sos.png",
+    ]
+    return "\n".join(lines)
+
+
+async def _send_rescue_sos(reasons: list, data: dict) -> None:
+    hook_url = os.getenv("OPENCLAW_HOOK_URL", "").strip()
+    hook_token = os.getenv("OPENCLAW_HOOK_TOKEN", "").strip()
+    if not hook_url or not hook_token:
+        logger.error("Rescue ping: OPENCLAW_HOOK_URL or OPENCLAW_HOOK_TOKEN not configured")
+        rescue_ping_state["last_error"] = "hook not configured"
+        return
+
+    # Capture and save photo for the SOS
+    try:
+        frame_b64 = await get_frame_base64("front")
+        _save_openclaw_media_file("sos.png", frame_b64)
+    except Exception as exc:
+        logger.warning("Rescue ping: photo capture failed: %s", exc)
+
+    message = _build_rescue_sos_message(reasons, data)
+    hook_channel = os.getenv("OPENCLAW_HOOK_CHANNEL", "").strip()
+    hook_to = os.getenv("OPENCLAW_HOOK_TO", "").strip()
+    payload: Dict[str, Any] = {
+        "message": message,
+        "text": message,
+        "source": "rover_rescue_ping",
+    }
+    if hook_channel and hook_to:
+        payload["channel"] = hook_channel
+        payload["to"] = hook_to
+        omit_key = os.getenv("OPENCLAW_HOOK_OMIT_SESSION_KEY", "").lower() in ("1", "true", "yes")
+        if not omit_key:
+            payload["sessionKey"] = f"agent:main:{hook_channel}:direct:{hook_to}"
+
+    headers = {"Authorization": f"Bearer {hook_token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                hook_url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                rescue_ping_state["last_hook_status_code"] = resp.status
+                if resp.status >= 400:
+                    resp_text = await resp.text()
+                    logger.error(
+                        "Rescue ping hook returned %s: %s", resp.status, resp_text[:300]
+                    )
+                    rescue_ping_state["last_error"] = f"hook status={resp.status}"
+                else:
+                    logger.info(
+                        "Rescue ping SOS sent (reasons=%s, status=%s)", reasons, resp.status
+                    )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("Rescue ping send error: %s", exc)
+        rescue_ping_state["last_error"] = str(exc)
+
+
+async def _run_rescue_ping_loop(
+    poll_interval: int,
+    battery_threshold: int,
+    gps_stall_seconds: int,
+    reping_interval: int,
+):
+    global _rescue_flip_count, _rescue_last_gps, _rescue_gps_stable_since
+
+    # Reset internal tracking on each start
+    _rescue_flip_count = 0
+    _rescue_last_gps = None
+    _rescue_gps_stable_since = None
+
+    logger.info(
+        "Rescue ping started (battery<=%s%%, gps_stall=%ss, reping=%ss)",
+        battery_threshold, gps_stall_seconds, reping_interval,
+    )
+    rescue_ping_state["status"] = "monitoring"
+
+    try:
+        while True:
+            await asyncio.sleep(poll_interval)
+
+            try:
+                data = await browser_service.data()
+            except Exception as exc:
+                logger.warning("Rescue ping: data fetch failed: %s", exc)
+                rescue_ping_state["last_error"] = str(exc)
+                continue
+
+            if not data:
+                continue
+
+            now = time.time()
+            reasons: list = []
+
+            # --- Battery check ---
+            battery = data.get("battery")
+            if battery is not None:
+                try:
+                    if float(battery) <= battery_threshold:
+                        reasons.append(f"battery at {battery}%")
+                except (ValueError, TypeError):
+                    pass
+
+            # --- Flip check (Z accelerometer < -0.3 for 3 consecutive reads) ---
+            accels = data.get("accels")
+            if isinstance(accels, dict):
+                z = accels.get("z")
+                if z is not None:
+                    try:
+                        if float(z) < -0.3:
+                            _rescue_flip_count += 1
+                        else:
+                            _rescue_flip_count = 0
+                        if _rescue_flip_count >= 3:
+                            reasons.append("rover flipped")
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                _rescue_flip_count = 0
+
+            # --- GPS stall check (same lat/lon for gps_stall_seconds with signal) ---
+            lat = data.get("latitude")
+            lon = data.get("longitude")
+            gps_sig = data.get("gps_signal", 0)
+            if lat is not None and lon is not None:
+                try:
+                    if float(gps_sig) > 0:
+                        gps = (lat, lon)
+                        if _rescue_last_gps == gps:
+                            if _rescue_gps_stable_since is None:
+                                _rescue_gps_stable_since = now
+                            elif now - _rescue_gps_stable_since >= gps_stall_seconds:
+                                stall_dur = int(now - _rescue_gps_stable_since)
+                                reasons.append(f"GPS stalled {stall_dur}s")
+                        else:
+                            _rescue_last_gps = gps
+                            _rescue_gps_stable_since = None
+                    else:
+                        # No GPS signal — reset stall tracking
+                        _rescue_gps_stable_since = None
+                except (ValueError, TypeError):
+                    pass
+
+            if not reasons:
+                if rescue_ping_state["status"] == "alert":
+                    rescue_ping_state["status"] = "monitoring"
+                continue
+
+            # Check if suppressed by a recent ack
+            last_ack = rescue_ping_state.get("last_ack_at")
+            if last_ack and (now - last_ack) < reping_interval:
+                logger.debug("Rescue ping: alert suppressed by ack (reasons=%s)", reasons)
+                continue
+
+            # Honour re-ping interval — don't spam
+            last_alert = rescue_ping_state.get("last_alert_at")
+            if last_alert and (now - last_alert) < reping_interval:
+                continue
+
+            # Fire SOS
+            rescue_ping_state["last_alert_at"] = now
+            rescue_ping_state["last_alert_reason"] = ", ".join(reasons)
+            rescue_ping_state["alert_count"] += 1
+            rescue_ping_state["status"] = "alert"
+            rescue_ping_state["last_error"] = None
+            logger.warning("Rescue ping ALERT (reasons=%s)", reasons)
+            await _send_rescue_sos(reasons, data)
+
+    except asyncio.CancelledError:
+        logger.info("Rescue ping loop cancelled")
+        raise
+    except Exception as exc:
+        logger.error("Rescue ping loop error: %s", exc)
+        rescue_ping_state["last_error"] = str(exc)
+        rescue_ping_state["status"] = "error"
+    finally:
+        rescue_ping_state.update({"running": False, "status": "idle"})
+        logger.info("Rescue ping stopped")
+
+
+async def _stop_rescue_ping_task(reason: str) -> bool:
+    global rescue_ping_task
+    task = rescue_ping_task
+    if not task or task.done():
+        rescue_ping_task = None
+        rescue_ping_state["running"] = False
+        return False
+
+    rescue_ping_state["running"] = False
+    rescue_ping_state["status"] = reason
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("Rescue ping stop error: %s", exc)
+
+    rescue_ping_task = None
+    logger.info("Rescue ping stopped (%s)", reason)
+    return True
+
+
 async def _prewarm_browser():
     started = time.perf_counter()
     try:
@@ -1576,6 +1916,8 @@ async def shutdown_voice_loop():
         await _stop_voice_loop_task("shutdown")
     async with checkin_loop_lock:
         await _stop_checkin_loop_task("shutdown")
+    async with rescue_ping_lock:
+        await _stop_rescue_ping_task("shutdown")
     async with track_color_lock:
         if track_color_task and not track_color_task.done():
             track_color_task.cancel()
@@ -1841,6 +2183,136 @@ async def checkin_loop_status():
     """Inspect current check-in loop state."""
     async with checkin_loop_lock:
         return JSONResponse(content=_checkin_loop_snapshot())
+
+
+# ---------------------------------------------------------------------------
+# Rescue Ping endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/rescue-ping/start")
+async def start_rescue_ping(request: Request):
+    """Start the autonomous SOS monitor (battery ≤ threshold, flip, GPS stall)."""
+    global rescue_ping_task
+    body = await _parse_json_body(request)
+
+    battery_threshold = int(body.get("battery_threshold", rescue_ping_state["battery_threshold"]))
+    gps_stall_seconds = int(body.get("gps_stall_seconds", rescue_ping_state["gps_stall_seconds"]))
+    reping_interval = int(
+        body.get("reping_interval_seconds", rescue_ping_state["reping_interval_seconds"])
+    )
+    poll_interval = int(
+        body.get("poll_interval_seconds", rescue_ping_state["poll_interval_seconds"])
+    )
+
+    async with rescue_ping_lock:
+        if _is_rescue_ping_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "already_running", **_rescue_ping_snapshot()},
+            )
+
+        rescue_ping_state.update({
+            "running": True,
+            "status": "starting",
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "poll_interval_seconds": poll_interval,
+            "battery_threshold": battery_threshold,
+            "gps_stall_seconds": gps_stall_seconds,
+            "reping_interval_seconds": reping_interval,
+            "last_alert_at": None,
+            "last_alert_reason": None,
+            "last_ack_at": None,
+            "alert_count": 0,
+            "last_error": None,
+        })
+        rescue_ping_task = asyncio.create_task(
+            _run_rescue_ping_loop(
+                poll_interval, battery_threshold, gps_stall_seconds, reping_interval
+            )
+        )
+
+    return JSONResponse(content={**_rescue_ping_snapshot(), "status": "started"})
+
+
+@app.post("/rescue-ping/stop")
+async def stop_rescue_ping():
+    """Stop the rescue ping monitor."""
+    async with rescue_ping_lock:
+        stopped = await _stop_rescue_ping_task("stopped")
+        snapshot = _rescue_ping_snapshot()
+    return JSONResponse(
+        content={"status": "stopped" if stopped else "not_running", **snapshot}
+    )
+
+
+@app.get("/rescue-ping/status")
+async def rescue_ping_status():
+    """Inspect current rescue ping monitor state."""
+    async with rescue_ping_lock:
+        return JSONResponse(content=_rescue_ping_snapshot())
+
+
+@app.post("/rescue-ping/ack")
+async def rescue_ping_ack():
+    """Acknowledge the SOS alert — suppresses re-pings for reping_interval_seconds."""
+    rescue_ping_state["last_ack_at"] = time.time()
+    if rescue_ping_state["status"] == "alert":
+        rescue_ping_state["status"] = "monitoring"
+    logger.info("Rescue ping acknowledged")
+    return JSONResponse(content={"status": "acknowledged", **_rescue_ping_snapshot()})
+
+
+# ---------------------------------------------------------------------------
+# Obstacle Alert endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/obstacle-alert")
+async def obstacle_alert(payload: ObstacleAlertRequest):
+    """Agent calls this BEFORE executing an avoidance maneuver.
+
+    Body: {"description": "chair blocking path", "action": "going around left"}
+    Speaks the narrative through the rover's physical speaker and sends it to Telegram.
+    """
+    await need_start_mission()
+    description = payload.description.strip()
+    action = payload.action.strip() if payload.action else None
+    if not description:
+        raise HTTPException(status_code=400, detail="description must not be empty")
+
+    narrative = f"there's a {description}, {action}" if action else f"there's a {description}"
+
+    obstacle_alert_state["last_at"] = time.time()
+    obstacle_alert_state["last_description"] = description
+    obstacle_alert_state["last_action"] = action
+    obstacle_alert_state["alert_count"] += 1
+    obstacle_alert_state["last_error"] = None
+
+    spoken = False
+    try:
+        await _speak_text(narrative)
+        spoken = True
+    except Exception as exc:
+        logger.error("Obstacle alert TTS failed: %s", exc)
+        obstacle_alert_state["last_error"] = f"tts: {exc}"
+
+    hook_sent = False
+    try:
+        await _send_obstacle_hook(description, action)
+        hook_sent = obstacle_alert_state.get("last_error") is None
+    except Exception as exc:
+        logger.error("Obstacle alert hook dispatch failed: %s", exc)
+        obstacle_alert_state["last_error"] = str(exc)
+
+    logger.info(
+        "Obstacle alert: narrative=%r spoken=%s hook_sent=%s", narrative, spoken, hook_sent
+    )
+    return JSONResponse(content={"narrative": narrative, "spoken": spoken, "hook_sent": hook_sent})
+
+
+@app.get("/obstacle-alert/status")
+async def obstacle_alert_status():
+    """Inspect the last obstacle alert state."""
+    return JSONResponse(content=_obstacle_alert_snapshot())
 
 
 # ---------------------------------------------------------------------------

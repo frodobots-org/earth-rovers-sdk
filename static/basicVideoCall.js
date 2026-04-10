@@ -670,9 +670,11 @@ var playAudioToRoverChain = Promise.resolve();
 
 async function playAudioToRoverImpl(audioUrl) {
   const sourceUrl = ttsCacheBustUrl(audioUrl);
+  console.log("[playAudioToRover] fetching audio:", sourceUrl);
   const audioTrack = await AgoraRTC.createBufferSourceAudioTrack({
     source: sourceUrl,
   });
+  console.log("[playAudioToRover] track created, duration:", audioTrack.duration, "clientState:", client && client.connectionState);
 
   let published = false;
   let failSafe;
@@ -680,11 +682,14 @@ async function playAudioToRoverImpl(audioUrl) {
   try {
     await client.publish(audioTrack);
     published = true;
+    console.log("[playAudioToRover] published OK");
 
     let sawPlaying = false;
     const playbackDone = new Promise((resolve) => {
       const ms = Math.ceil((audioTrack.duration || 3) * 1000) + 1500;
+      console.log("[playAudioToRover] failsafe in", ms, "ms, duration:", audioTrack.duration);
       failSafe = setTimeout(() => {
+        console.log("[playAudioToRover] failsafe fired, sawPlaying:", sawPlaying);
         if (onState) {
           audioTrack.off("source-state-change", onState);
         }
@@ -692,6 +697,7 @@ async function playAudioToRoverImpl(audioUrl) {
       }, Math.max(ms, 1500));
 
       onState = (state) => {
+        console.log("[playAudioToRover] state-change:", state, "sawPlaying:", sawPlaying);
         if (state === "playing") {
           sawPlaying = true;
         } else if (state === "stopped" && sawPlaying) {
