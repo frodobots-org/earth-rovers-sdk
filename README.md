@@ -54,14 +54,14 @@ TTS_PROVIDER=edge
 TTS_API_KEY=
 # Voice name (default: en-US-GuyNeural for edge, Kore for gemini)
 TTS_VOICE=en-US-GuyNeural
-# Vision Provider (currently "openai")
-VISION_PROVIDER=openai
-# API key required for on-demand camera captioning
-OPENAI_API_KEY=
+# Vision / STT Provider (Gemini)
+VISION_PROVIDER=gemini
+# API key required for on-demand camera captioning and voice transcription
+GEMINI_API_KEY=
 # Vision model name
-OPENAI_VISION_MODEL=gpt-4.1-mini
-# Optional timeout for vision calls in seconds
-OPENAI_VISION_TIMEOUT_SECONDS=15
+GEMINI_VISION_MODEL=gemini-2.5-flash
+# Speech-to-text model (used by /voice-command)
+GEMINI_STT_MODEL=gemini-2.5-flash
 ```
 
 2. Install the SDK
@@ -305,10 +305,9 @@ curl --location 'http://localhost:8000/prompt' \
 **Environment variables:**
 
 ```bash
-VISION_PROVIDER="openai"
-OPENAI_API_KEY=""                  # Required
-OPENAI_VISION_MODEL="gpt-4.1-mini" # Optional override
-OPENAI_VISION_TIMEOUT_SECONDS=15   # Optional timeout
+VISION_PROVIDER="gemini"
+GEMINI_API_KEY=""                     # Required
+GEMINI_VISION_MODEL="gemini-2.5-flash" # Optional override
 ```
 
 Example Response:

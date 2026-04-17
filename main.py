@@ -113,6 +113,7 @@ class ObstacleAlertRequest(BaseModel):
 auth_response_data = {}
 checkpoints_list_data = {}
 last_rover_action: str = ""  # human-readable description of the last executed rover command
+personality_mode: str = "friendly"  # one of: friendly | sarcastic | formal
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
@@ -835,11 +836,38 @@ async def status_report(request: Request):
     return {"reply": reply, "channel": channel}
 
 
+@app.post("/personality")
+async def set_personality(request: Request):
+    """Get or set the rover's personality mode.
+
+    GET-style: POST with empty body returns current mode.
+    POST body: {"mode": "friendly" | "sarcastic" | "formal"}
+    """
+    global personality_mode
+    valid_modes = {"friendly", "sarcastic", "formal"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not body or "mode" not in body:
+        return {"personality": personality_mode, "available": sorted(valid_modes)}
+
+    mode = str(body["mode"]).lower()
+    if mode not in valid_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Choose: {', '.join(sorted(valid_modes))}",
+        )
+    personality_mode = mode
+    return {"personality": personality_mode}
+
+
 async def _record_and_transcribe_with_metrics(duration_ms: int):
     """Shared helper: record rover mic audio and return transcript plus timing metrics."""
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
 
     timings = {
         "capture_ms": 0,
@@ -879,34 +907,42 @@ async def _record_and_transcribe_with_metrics(duration_ms: int):
         suffix = ".mp3"
 
     def _transcribe(path: str):
-        from openai import OpenAI
+        from google import genai
+        from google.genai import types
 
-        client = OpenAI(api_key=openai_api_key)
-        model = os.getenv("OPENAI_WHISPER_MODEL", "gpt-4o-mini-transcribe")
-        language = os.getenv("OPENAI_TRANSCRIPTION_LANGUAGE", "en").strip()
+        client = genai.Client(api_key=gemini_api_key)
+        model = os.getenv("GEMINI_STT_MODEL", "gemini-2.5-flash")
         prompt = os.getenv(
-            "OPENAI_TRANSCRIPTION_PROMPT",
+            "GEMINI_TRANSCRIPTION_PROMPT",
             (
-                "Transcribe short rover voice commands in English. "
-                "Prefer literal command words and digits. "
+                "Transcribe this short rover voice command verbatim in English. "
+                "Return only the spoken words — no punctuation beyond apostrophes, no commentary. "
+                "If the audio contains no speech, return an empty string. "
                 "Common phrases include: turn left 90 degrees, turn right 90 degrees, "
                 "move forward, move backward, stop, what do you see, describe surroundings."
             ),
         ).strip()
 
-        request_kwargs = {"model": model}
-        if prompt:
-            request_kwargs["prompt"] = prompt
-        if language:
-            request_kwargs["language"] = language
+        if suffix == ".wav":
+            mime_type = "audio/wav"
+        elif suffix == ".mp3":
+            mime_type = "audio/mp3"
+        elif suffix == ".ogg":
+            mime_type = "audio/ogg"
+        else:
+            mime_type = "audio/webm"
 
         with open(path, "rb") as f:
-            request_kwargs["file"] = f
-            result = client.audio.transcriptions.create(
-                **request_kwargs,
-            )
-        text = result.text.strip()
-        # Filter Whisper hallucinations (silence artifacts)
+            audio_bytes = f.read()
+
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                prompt,
+            ],
+        )
+        text = (response.text or "").strip()
         import re
         if not text or not re.search(r'[a-zA-Z0-9]', text):
             return None
@@ -1111,7 +1147,7 @@ async def _speak_text(text: str) -> None:
 
 
 async def _generate_status_reply() -> str:
-    """Fetch live telemetry and compose a conversational status message."""
+    """Fetch live telemetry and compose a status message in the current personality mode."""
     data = {}
     try:
         data = await browser_service.data() or {}
@@ -1123,15 +1159,42 @@ async def _generate_status_reply() -> str:
     lon = data.get("longitude")
     action = last_rover_action or "nothing yet"
 
-    battery_str = f"Battery is at {battery}%." if battery is not None else "Battery level unknown."
-    if lat is not None and lon is not None:
-        location_str = (
-            f"I'm currently at {float(lat):.4f}\u00b0 latitude, "
-            f"{float(lon):.4f}\u00b0 longitude."
+    if personality_mode == "sarcastic":
+        battery_str = (
+            f"Battery's at {battery}%, since you're so curious."
+            if battery is not None
+            else "No idea about the battery. Shocking, I know."
         )
-    else:
-        location_str = "GPS location isn't available right now."
+        location_str = (
+            f"Parked at {float(lat):.4f}\u00b0, {float(lon):.4f}\u00b0 — thrilling stuff."
+            if lat is not None and lon is not None
+            else "GPS is a mystery. Classic."
+        )
+        return (
+            f"Oh great, a status check. {battery_str} {location_str} "
+            f"Last exciting achievement: {action}. Don't all cheer at once."
+        )
 
+    if personality_mode == "formal":
+        battery_str = (
+            f"Battery: {battery}%."
+            if battery is not None
+            else "Battery: unknown."
+        )
+        location_str = (
+            f"Position: {float(lat):.4f}\u00b0 N, {float(lon):.4f}\u00b0 E."
+            if lat is not None and lon is not None
+            else "Position: unavailable."
+        )
+        return f"Status report. {battery_str} {location_str} Last action: {action}."
+
+    # Default: friendly
+    battery_str = f"Battery is at {battery}%." if battery is not None else "Battery level unknown."
+    location_str = (
+        f"I'm currently at {float(lat):.4f}\u00b0 latitude, {float(lon):.4f}\u00b0 longitude."
+        if lat is not None and lon is not None
+        else "GPS location isn't available right now."
+    )
     return (
         f"Hey! I'm doing well. {battery_str} {location_str} "
         f"Last thing I did was {action}."
