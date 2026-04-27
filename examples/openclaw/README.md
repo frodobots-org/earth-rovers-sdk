@@ -61,6 +61,13 @@ hypercorn main:app --reload
 
 Message your agent through your connected channel. It knows the full rover API and will use `curl` to control it.
 
+Short commands supported by the bundled prompt include:
+- `safe nav on` or `/autonav on`
+- `safe nav off` or `/autonav off`
+- `safe nav status` or `/autonav status`
+
+These call the SDK's built-in autonomous navigation endpoints. If they do not work in chat, re-copy `examples/openclaw/*.md` into the active OpenClaw workspace and restart the agent session so the updated prompt is loaded.
+
 ## How Images Work
 
 When the agent takes a screenshot, it saves the file and outputs `MEDIA:front.png`. Openclaw detects the `MEDIA:` prefix and automatically attaches the image to the reply. The file must be saved inside the workspace directory (not `/tmp/`).

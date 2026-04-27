@@ -1,4 +1,5 @@
 import unittest
+from itertools import repeat
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -321,14 +322,9 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.assertGreater(first_cmd["angular"], 0)
         self.assertEqual(send_message_mock.await_args_list[-1].args[0]["angular"], 0)
 
-    def test_turn_endpoint_aborts_on_stale_heading_and_stops(self):
+    def test_turn_endpoint_times_out_on_nonadvancing_synthetic_heading_and_stops(self):
         data_mock = AsyncMock(
-            side_effect=[
-                {"orientation": 16, "timestamp": "1.0"},
-                {"orientation": 16, "timestamp": "1.0"},
-                {"orientation": 16, "timestamp": "1.0"},
-                {"orientation": 16, "timestamp": "1.0"},
-            ]
+            side_effect=repeat({"orientation": 16, "timestamp": "1.0"})
         )
         send_message_mock = AsyncMock(return_value={"success": True})
 
@@ -343,13 +339,13 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["requested"], 90.0)
-        self.assertEqual(payload["steps"][0]["aborted"], "stale_heading")
-        self.assertFalse(payload["steps"][0]["timed_out"])
+        self.assertNotIn("aborted", payload["steps"][0])
+        self.assertTrue(payload["steps"][0]["timed_out"])
         self.assertGreaterEqual(send_message_mock.await_count, 4)
         self.assertGreater(send_message_mock.await_args_list[0].args[0]["angular"], 0)
-        self.assertTrue(
-            all(call.args[0]["angular"] == 0 for call in send_message_mock.await_args_list[1:])
-        )
+        angular_commands = [call.args[0]["angular"] for call in send_message_mock.await_args_list]
+        self.assertTrue(all(value > 0 for value in angular_commands[:-3]))
+        self.assertEqual(angular_commands[-3:], [0, 0, 0])
 
 
 if __name__ == "__main__":

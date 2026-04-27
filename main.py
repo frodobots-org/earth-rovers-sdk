@@ -30,6 +30,7 @@ from browser_service import BrowserService
 from rtm_client import RtmClient
 from tts_service import generate_speech
 from vision_service import describe_scene
+from autonav_service import decide as autonav_decide
 
 load_dotenv()
 
@@ -204,6 +205,32 @@ track_color_state: Dict[str, Any] = {
     "fill_pct": None,
     "last_error": None,
 }
+
+# ---------------------------------------------------------------------------
+# Autonomous Navigation (Gemini Flash closed-loop maze driving)
+# ---------------------------------------------------------------------------
+autonav_loop_task: Optional[asyncio.Task] = None
+autonav_loop_lock = asyncio.Lock()
+autonav_loop_state: Dict[str, Any] = {
+    "running": False,
+    "status": "idle",  # idle|starting|waiting|deciding|acting|stopped|error|battery_low
+    "started_at": None,
+    "iterations": 0,
+    "config": {},
+    "last_decision": None,
+    "last_action_at": None,
+    "last_error": None,
+    "error_streak": 0,
+    "history": [],
+    "log_dir": None,
+    # Calibrated color profile of the current environment. Populated from
+    # early good-looking ticks (frames with a clear horizon) so later ticks
+    # can compare current frame colors against a learned floor/wall baseline.
+    "floor_rgb": None,       # rolling mean of bottom-half RGB
+    "wall_rgb": None,        # rolling mean of top-half RGB
+    "color_sample_count": 0,
+}
+
 
 # ---------------------------------------------------------------------------
 # Obstacle Alert (agent-driven narration of path blockages)
@@ -563,37 +590,36 @@ async def control(request: Request):
         ) from e
 
 
-@app.post("/turn")
-async def turn(request: Request):
-    """Precise in-place turn using heading feedback from the orientation sensor."""
+async def _perform_turn(degrees: float, opts: Optional[dict] = None) -> dict:
+    """Execute a precise in-place turn. Shared by /turn endpoint and internal callers."""
     await need_start_mission()
     if not auth_response_data:
         await auth()
 
-    body = await request.json()
-    degrees = float(body.get("degrees", 90))
-    max_speed = min(max(abs(body.get("speed", 0.45)), 0.12), 0.7)
+    opts = opts or {}
+    degrees = float(degrees)
+    max_speed = min(max(abs(opts.get("speed", 0.45)), 0.12), 0.7)
     min_speed = min(
         max_speed,
-        max(abs(body.get("min_speed", max_speed * 0.5)), 0.12),
+        max(abs(opts.get("min_speed", max_speed * 0.5)), 0.12),
     )
-    tolerance = float(body.get("tolerance", 3.0))
-    timeout = min(float(body.get("timeout", 12)), 30)
+    tolerance = float(opts.get("tolerance", 3.0))
+    timeout = min(float(opts.get("timeout", 12)), 30)
 
     HEADING_SIGN = -1  # +angular decreases heading on this rover
-    CONTROL_INTERVAL = min(max(float(body.get("control_interval", 0.4)), 0.05), 0.5)
+    CONTROL_INTERVAL = min(max(float(opts.get("control_interval", 0.4)), 0.05), 0.5)
     COMMAND_REFRESH_INTERVAL = min(
-        max(float(body.get("command_refresh_interval", 0.35)), 0.1),
+        max(float(opts.get("command_refresh_interval", 0.35)), 0.1),
         1.0,
     )
     STALL_TIMEOUT = 0.8
     TELEMETRY_MAX_AGE = min(
-        max(float(body.get("telemetry_max_age", 0.75)), 0.2),
+        max(float(opts.get("telemetry_max_age", 0.75)), 0.2),
         5.0,
     )
-    STOP_BURST_COUNT = min(max(int(body.get("stop_burst_count", 3)), 2), 5)
+    STOP_BURST_COUNT = min(max(int(opts.get("stop_burst_count", 3)), 2), 5)
     STOP_BURST_INTERVAL = min(
-        max(float(body.get("stop_burst_interval", 0.08)), 0.03),
+        max(float(opts.get("stop_burst_interval", 0.08)), 0.03),
         0.3,
     )
 
@@ -782,6 +808,14 @@ async def turn(request: Request):
             "actual": round(total_net, 1),
             "steps": results
         }
+
+
+@app.post("/turn")
+async def turn(request: Request):
+    """Precise in-place turn using heading feedback from the orientation sensor."""
+    body = await request.json()
+    degrees = body.get("degrees", 90)
+    return await _perform_turn(degrees, body)
 
 
 @app.post("/speak")
@@ -1650,6 +1684,1856 @@ async def _stop_checkin_loop_task(reason: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Autonomous Navigation helpers
+# ---------------------------------------------------------------------------
+
+def _is_autonav_loop_running() -> bool:
+    return bool(autonav_loop_task and not autonav_loop_task.done())
+
+
+def _autonav_loop_snapshot() -> dict:
+    snapshot = dict(autonav_loop_state)
+    snapshot["running"] = _is_autonav_loop_running()
+    return snapshot
+
+
+async def _autonav_stop_burst(count: int = 3, interval: float = 0.08) -> None:
+    """Send zero-velocity commands a few times in quick succession to hard-stop the rover."""
+    for idx in range(count):
+        try:
+            await browser_service.send_message({"linear": 0, "angular": 0, "lamp": 0})
+        except Exception as exc:
+            logger.warning("Autonav stop burst %s/%s failed: %s", idx + 1, count, exc)
+        if idx < count - 1:
+            await asyncio.sleep(interval)
+
+
+def _autonav_log_root() -> str:
+    configured = os.getenv("AUTONAV_LOG_DIR", "").strip()
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(os.path.dirname(__file__), "autonav_logs")
+
+
+def _autonav_tick_logging_enabled() -> bool:
+    return os.getenv("AUTONAV_SAVE_TICK_LOGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _autonav_start_run_dir() -> str:
+    """Create and return a fresh per-run log directory."""
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(_autonav_log_root(), run_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _autonav_write_tick(
+    log_dir: Optional[str],
+    tick: int,
+    payload: Dict[str, Any],
+    front_b64: Optional[str],
+    rear_b64: Optional[str],
+    path_zone_b64: Optional[str] = None,
+) -> None:
+    """Write one tick's JSON + frames to disk. No-op if log_dir is falsy or IO fails."""
+    if not log_dir:
+        return
+    try:
+        stem = os.path.join(log_dir, f"tick_{tick:04d}")
+        with open(f"{stem}.json", "w") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+        if front_b64:
+            with open(f"{stem}_front.jpg", "wb") as fh:
+                fh.write(base64.b64decode(front_b64))
+        if path_zone_b64:
+            with open(f"{stem}_path_zone.jpg", "wb") as fh:
+                fh.write(base64.b64decode(path_zone_b64))
+        if rear_b64:
+            with open(f"{stem}_rear.jpg", "wb") as fh:
+                fh.write(base64.b64decode(rear_b64))
+    except Exception as exc:
+        logger.warning("Autonav tick-log write failed (tick=%s): %s", tick, exc)
+
+
+def _frame_uniformity(frame_b64: str) -> Optional[float]:
+    """Grayscale pixel stddev of the front frame. Low values mean the camera
+    sees a near-uniform surface. Not sufficient on its own — a textured wall
+    filling the frame has high stddev but is still a wall. Pair with
+    _frame_top_bottom_delta() to catch both cases.
+    Returns None on decode failure (treat as unknown)."""
+    try:
+        from PIL import Image
+        import io
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("L")
+        img.thumbnail((320, 240))
+        arr = np.asarray(img, dtype=np.float32)
+        return float(arr.std())
+    except Exception as exc:
+        logger.debug("Frame uniformity decode failed: %s", exc)
+        return None
+
+
+def _frame_top_bottom_delta(frame_b64: str) -> Optional[float]:
+    """Mean-brightness difference between the top half and the bottom half of
+    the frame (0-255 scale). A real corridor view has a visible horizon so
+    the bottom is noticeably darker/lighter than the top. A wall pressed
+    against the fisheye has the same color top-to-bottom even if textured.
+    Low delta (<8) plus high uniformity = wall-up-close even with texture.
+    Returns None on decode failure."""
+    try:
+        from PIL import Image
+        import io
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("L")
+        img.thumbnail((320, 240))
+        arr = np.asarray(img, dtype=np.float32)
+        h = arr.shape[0]
+        if h < 2:
+            return None
+        top_mean = float(arr[: h // 2].mean())
+        bot_mean = float(arr[h // 2 :].mean())
+        return abs(top_mean - bot_mean)
+    except Exception as exc:
+        logger.debug("Frame top/bottom delta failed: %s", exc)
+        return None
+
+
+def _frame_color_samples(frame_b64: str) -> Optional[Dict[str, Any]]:
+    """Return mean RGB of the top half and bottom half of the frame plus a
+    grayscale horizon delta. Used to build a calibrated per-run color profile
+    of floor-vs-wall so we can detect obstacles (bottom no longer matches
+    learned floor) and wall-close (both halves match learned wall).
+    Returns None on decode failure."""
+    try:
+        from PIL import Image
+        import io
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((320, 240))
+        arr = np.asarray(img, dtype=np.float32)
+        h = arr.shape[0]
+        if h < 2:
+            return None
+        top = arr[: h // 2]
+        bot = arr[h // 2 :]
+        return {
+            "top_rgb": [round(float(top[..., c].mean()), 1) for c in range(3)],
+            "bot_rgb": [round(float(bot[..., c].mean()), 1) for c in range(3)],
+        }
+    except Exception as exc:
+        logger.debug("Frame color sampling failed: %s", exc)
+        return None
+
+
+def _frame_path_crop_base64(frame_b64: str) -> Optional[str]:
+    """Return a zoomed JPEG crop of the rover's immediate driving lane."""
+    try:
+        from PIL import Image
+        import io
+
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        w, h = img.size
+        crop = img.crop(
+            (
+                int(w * 0.18),
+                int(h * 0.48),
+                int(w * 0.82),
+                int(h * 0.95),
+            )
+        )
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=82)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.debug("Frame path crop failed: %s", exc)
+        return None
+
+
+def _frame_path_profile(
+    frame_b64: str,
+    floor_rgb: Optional[List[float]],
+    wall_rgb: Optional[List[float]],
+) -> Optional[Dict[str, Any]]:
+    """Estimate whether the immediate lane is blocked and which side looks more open."""
+    try:
+        from PIL import Image
+        import io
+
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((256, 144))
+        arr = np.asarray(img, dtype=np.float32)
+        h, w = arr.shape[:2]
+        if h < 10 or w < 10:
+            return None
+
+        def _region_rgb(y0: float, y1: float, x0: float, x1: float) -> List[float]:
+            region = arr[int(h * y0) : int(h * y1), int(w * x0) : int(w * x1)]
+            return [float(region[..., c].mean()) for c in range(3)]
+
+        def _gray_std(y0: float, y1: float, x0: float, x1: float) -> float:
+            region = arr[int(h * y0) : int(h * y1), int(w * x0) : int(w * x1)]
+            gray = region.mean(axis=2)
+            return float(gray.std())
+
+        left_rgb = _region_rgb(0.58, 0.92, 0.02, 0.30)
+        center_rgb = _region_rgb(0.58, 0.92, 0.35, 0.65)
+        right_rgb = _region_rgb(0.58, 0.92, 0.70, 0.98)
+        left_tall_std = _gray_std(0.20, 0.95, 0.00, 0.28)
+        right_tall_std = _gray_std(0.20, 0.95, 0.72, 0.99)
+
+        left_floor = _rgb_distance(left_rgb, floor_rgb)
+        left_wall = _rgb_distance(left_rgb, wall_rgb)
+        center_floor = _rgb_distance(center_rgb, floor_rgb)
+        center_wall = _rgb_distance(center_rgb, wall_rgb)
+        right_floor = _rgb_distance(right_rgb, floor_rgb)
+        right_wall = _rgb_distance(right_rgb, wall_rgb)
+
+        center_blocked = bool(
+            center_floor is not None
+            and center_wall is not None
+            and center_wall < 22.0
+            and center_wall + 10.0 < center_floor
+        )
+
+        preferred_turn: Optional[str] = None
+        std_gap = right_tall_std - left_tall_std
+        open_side_turn: Optional[str] = None
+        if std_gap >= 8.0:
+            open_side_turn = "turn_right"
+        elif std_gap <= -8.0:
+            open_side_turn = "turn_left"
+        left_floor_like = bool(
+            left_floor is not None
+            and left_wall is not None
+            and left_floor < 24.0
+            and left_floor + 8.0 < left_wall
+        )
+        right_floor_like = bool(
+            right_floor is not None
+            and right_wall is not None
+            and right_floor < 24.0
+            and right_floor + 8.0 < right_wall
+        )
+        if center_blocked:
+            if std_gap >= 8.0:
+                preferred_turn = "turn_right"
+            elif std_gap <= -8.0:
+                preferred_turn = "turn_left"
+            elif right_floor_like and not left_floor_like:
+                preferred_turn = "turn_right"
+            elif left_floor_like and not right_floor_like:
+                preferred_turn = "turn_left"
+            elif std_gap > 0:
+                preferred_turn = "turn_right"
+            elif std_gap < 0:
+                preferred_turn = "turn_left"
+
+        return {
+            "center_blocked": center_blocked,
+            "preferred_turn": preferred_turn,
+            "open_side_turn": open_side_turn,
+            "left_tall_std": round(left_tall_std, 1),
+            "right_tall_std": round(right_tall_std, 1),
+            "side_std_gap": round(std_gap, 1),
+            "left_floor_dist": round(left_floor, 1) if left_floor is not None else None,
+            "left_wall_dist": round(left_wall, 1) if left_wall is not None else None,
+            "center_floor_dist": round(center_floor, 1) if center_floor is not None else None,
+            "center_wall_dist": round(center_wall, 1) if center_wall is not None else None,
+            "right_floor_dist": round(right_floor, 1) if right_floor is not None else None,
+            "right_wall_dist": round(right_wall, 1) if right_wall is not None else None,
+        }
+    except Exception as exc:
+        logger.debug("Frame path profile failed: %s", exc)
+        return None
+
+
+def _format_path_profile_summary(path_profile: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not path_profile:
+        return None
+    return (
+        "center_blocked="
+        f"{path_profile.get('center_blocked')}; "
+        f"preferred_turn={path_profile.get('preferred_turn')}; "
+        f"open_side_turn={path_profile.get('open_side_turn')}; "
+        f"center(df={path_profile.get('center_floor_dist')}, dw={path_profile.get('center_wall_dist')}); "
+        f"left_std={path_profile.get('left_tall_std')}; "
+        f"right_std={path_profile.get('right_tall_std')}"
+    )
+
+
+def _apply_center_block_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+) -> Dict[str, Any]:
+    """If the immediate lane is blocked, prevent forward motion into the obstacle."""
+    if decision.get("action") != "forward" or not path_profile or not path_profile.get("center_blocked"):
+        return decision
+
+    forced_turn = path_profile.get("preferred_turn")
+    if forced_turn not in ("turn_left", "turn_right"):
+        return decision
+
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return {
+        **decision,
+        "action": forced_turn,
+        "linear_speed": 0.0,
+        "turn_degrees": round(min(max_turn_deg, 70.0), 1),
+        "duration_ms": decision.get("duration_ms", 700),
+        "confidence": max(float(decision.get("confidence") or 0.0), 0.85),
+        "reason": (
+            "[center-block-override] My immediate lane is blocked by a nearby surface, "
+            f"so I turn {direction_text} toward the more open side."
+        )[:240],
+        "comment_front": (
+            f"A nearby surface fills my immediate lane; the {direction_text} side shows more usable space."
+        )[:240],
+        "plan_of_action": (
+            f"I will turn {direction_text} to clear the nearby obstruction, then check the lane again."
+        )[:240],
+        "reasoning_steps": [
+            "The immediate driving lane in front of me is blocked at very close range.",
+            "Moving forward would push me into the nearby surface instead of through open floor.",
+            f"The {direction_text} side shows more usable depth and structure than the opposite side.",
+            f"I will turn {direction_text} first, then re-check before moving forward.",
+        ],
+    }
+
+
+def _choose_recovery_turn(
+    path_profile: Optional[Dict[str, Any]],
+    last_turn_direction: Optional[str] = None,
+    preferred_turn: Optional[str] = None,
+) -> str:
+    for candidate in (
+        preferred_turn,
+        path_profile.get("preferred_turn") if path_profile else None,
+        path_profile.get("open_side_turn") if path_profile else None,
+    ):
+        if candidate in ("turn_left", "turn_right"):
+            return candidate
+    if last_turn_direction == "turn_left":
+        return "turn_right"
+    if last_turn_direction == "turn_right":
+        return "turn_left"
+    return "turn_right"
+
+
+def _blocked_turn_step_degrees(step_index: int, max_turn_deg: float) -> float:
+    """Blocked-lane search turns sweep 45 -> 90 -> 135 -> 180 degrees."""
+    staircase = (45.0, 90.0, 135.0, 180.0)
+    bounded_index = max(1, int(step_index))
+    target_turn = staircase[min(bounded_index - 1, len(staircase) - 1)]
+    return round(min(max_turn_deg, target_turn), 1)
+
+
+def _apply_repeat_turn_escalation(
+    decision: Dict[str, Any],
+    max_turn_deg: float,
+    last_turn_direction: Optional[str],
+    consecutive_turns: int = 0,
+) -> Dict[str, Any]:
+    """Apply the blocked-turn staircase: 45, then 90, then 135, then 180."""
+    action = decision.get("action")
+    if action not in ("turn_left", "turn_right"):
+        return decision
+
+    prior_same_direction_turns = consecutive_turns if last_turn_direction == action else 0
+    turn_step = min(prior_same_direction_turns + 1, 4)
+    current_turn = round(float(decision.get("turn_degrees") or 0.0), 1)
+    staged_turn = _blocked_turn_step_degrees(turn_step, max_turn_deg)
+    if abs(staged_turn - current_turn) <= 1e-6:
+        return decision
+
+    direction_text = "left" if action == "turn_left" else "right"
+    return {
+        **decision,
+        "turn_degrees": staged_turn,
+        "reason": (
+            f"{decision.get('reason', '')} [turn-search-staircase: step {turn_step}/4, "
+            f"so I turn {direction_text} {staged_turn:.0f} degrees.]"
+        )[:240],
+        "comment_front": (
+            f"I am searching for a usable lane, so I use turn step {turn_step}: {staged_turn:.0f} degrees to the {direction_text}."
+        )[:240],
+        "plan_of_action": (
+            f"I will turn {direction_text} {staged_turn:.0f} degrees, then check whether the center lane has opened."
+        )[:240],
+    }
+
+
+def _apply_turn_commitment_override(
+    decision: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    clear_forward_lane: bool,
+) -> Dict[str, Any]:
+    """Avoid immediate left/right bouncing while searching for a new lane."""
+    action = decision.get("action")
+    if action not in ("turn_left", "turn_right") or clear_forward_lane or not history:
+        return decision
+
+    last_action = history[-1].get("action")
+    if last_action not in ("turn_left", "turn_right") or last_action == action:
+        return decision
+
+    direction_text = "left" if last_action == "turn_left" else "right"
+    return {
+        **decision,
+        "action": last_action,
+        "reason": (
+            f"{decision.get('reason', '')} [turn-commitment: I just turned {direction_text} and will keep "
+            "searching that way instead of bouncing to the opposite side.]"
+        )[:240],
+        "comment_front": (
+            f"My lane is still blocked, so I keep turning {direction_text} rather than undoing the previous search turn."
+        )[:240],
+        "plan_of_action": (
+            f"I will continue turning {direction_text} to finish the search sweep, then re-check the lane."
+        )[:240],
+    }
+
+
+def _build_recovery_turn_decision(
+    path_profile: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+    reason_tag: str,
+    reason_text: str,
+    comment_text: str,
+    plan_text: str,
+    reasoning_steps: List[str],
+    preferred_turn: Optional[str] = None,
+    last_turn_direction: Optional[str] = None,
+    default_turn_deg: float = 70.0,
+) -> Dict[str, Any]:
+    action = _choose_recovery_turn(path_profile, last_turn_direction, preferred_turn)
+    turn_degrees = round(min(max_turn_deg, default_turn_deg), 1)
+    return {
+        "action": action,
+        "linear_speed": 0.0,
+        "turn_degrees": turn_degrees,
+        "duration_ms": 800,
+        "confidence": 1.0,
+        "reason": f"{reason_tag} {reason_text}"[:240],
+        "comment_front": comment_text[:240],
+        "comment_rear": "",
+        "plan_of_action": plan_text[:240],
+        "reasoning_steps": reasoning_steps[:4],
+    }
+
+
+def _apply_wall_escape_cycle_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    recent_wall_escape_count: int,
+    max_turn_deg: float,
+) -> Dict[str, Any]:
+    """Break repeated forward/backward wall-skim loops with a committed turn."""
+    if (
+        decision.get("action") != "forward"
+        or not path_profile
+        or recent_wall_escape_count < 2
+    ):
+        return decision
+
+    forced_turn = path_profile.get("open_side_turn")
+    if forced_turn not in ("turn_left", "turn_right"):
+        return decision
+
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return {
+        **decision,
+        "action": forced_turn,
+        "linear_speed": 0.0,
+        "turn_degrees": round(min(max_turn_deg, 65.0), 1),
+        "duration_ms": decision.get("duration_ms", 700),
+        "confidence": max(float(decision.get("confidence") or 0.0), 0.85),
+        "reason": (
+            f"[wall-escape-cycle-override] I have repeated wall escapes, so I turn {direction_text} "
+            "to break the forward/backward loop."
+        )[:240],
+        "comment_front": (
+            f"I am hugging a wall at close range; the {direction_text} side shows more open structure."
+        )[:240],
+        "plan_of_action": (
+            f"I will turn {direction_text} to move away from the wall, then reassess before driving forward."
+        )[:240],
+        "reasoning_steps": [
+            "I have just repeated the same forward-then-backward recovery cycle multiple times.",
+            "That pattern means going straight is not clearing the nearby wall or obstacle.",
+            f"The {direction_text} side shows more open structure than the opposite side.",
+            f"I will turn {direction_text} now to break the loop and create a better forward angle.",
+        ],
+    }
+
+
+def _apply_no_backward_policy(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+    last_turn_direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Convert reverse recovery into turn-and-recheck recovery."""
+    if decision.get("action") != "backward":
+        return decision
+
+    action = _choose_recovery_turn(path_profile, last_turn_direction)
+    direction_text = "left" if action == "turn_left" else "right"
+    return {
+        **decision,
+        "action": action,
+        "linear_speed": 0.0,
+        "turn_degrees": round(min(max_turn_deg, 70.0), 1),
+        "duration_ms": decision.get("duration_ms", 800),
+        "confidence": max(float(decision.get("confidence") or 0.0), 0.85),
+        "reason": (
+            f"[no-backward-policy] I turn {direction_text} to reacquire a valid lane instead of reversing."
+        )[:240],
+        "comment_front": (
+            f"My forward lane is not valid right now, so I turn {direction_text} to search for a clearer path."
+        )[:240],
+        "plan_of_action": (
+            f"I will turn {direction_text}, then re-check the immediate lane before moving again."
+        )[:240],
+        "reasoning_steps": [
+            "My immediate lane is not reliable enough for another straight move.",
+            "Instead of reversing, I will rotate to search for a usable forward lane.",
+            f"The {direction_text} side is the best available recovery direction from recent structure.",
+            f"I will turn {direction_text} now and then reassess the view.",
+        ],
+    }
+
+
+def _build_local_forward_decision(
+    max_linear: float,
+    max_forward_ms: int,
+    reason_text: str,
+) -> Dict[str, Any]:
+    return {
+        "action": "forward",
+        "linear_speed": round(min(max_linear, 0.25), 3),
+        "turn_degrees": 0.0,
+        "duration_ms": min(max_forward_ms, 700),
+        "confidence": 0.95,
+        "reason": reason_text[:240],
+        "comment_front": "My immediate lane is clearly floor and safe for a short forward move."[:240],
+        "comment_rear": "",
+        "plan_of_action": "I will move forward briefly, then re-check the lane before choosing again."[:240],
+        "reasoning_steps": [
+            "The center lane looks like floor at immediate driving distance.",
+            "The center lane does not look wall-like or blocked.",
+            "Recent history does not indicate that I am repeating the same wall view.",
+            "A short forward move is the safest way to make progress and re-evaluate.",
+        ],
+    }
+
+
+def _has_clear_forward_lane(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+) -> bool:
+    """True when the current frame shows a genuinely usable short forward lane."""
+    if not path_profile or path_profile.get("center_blocked"):
+        return False
+
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+
+    obvious_clear = (
+        center_floor is not None
+        and center_wall is not None
+        and center_floor <= 10.0
+        and center_wall >= 30.0
+        and (bot_dist_to_floor is None or bot_dist_to_floor <= 24.0)
+        and (bot_dist_to_wall is None or bot_dist_to_wall >= bot_dist_to_floor + 2.0)
+        and (uniformity is None or uniformity >= 10.0)
+        and (tb_delta is None or tb_delta >= 8.0)
+    )
+    if obvious_clear:
+        return True
+
+    strong_center_profile = (
+        center_floor is not None
+        and center_floor <= 12.0
+        and center_wall is not None
+        and center_wall >= 25.0
+        and (bot_dist_to_floor is None or bot_dist_to_floor <= 16.0)
+        and (uniformity is None or uniformity >= 20.0)
+    )
+    if strong_center_profile:
+        return True
+
+    reopened_lane = (
+        center_floor is not None
+        and center_wall is not None
+        and center_floor <= 26.0
+        and center_wall >= 45.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor <= 16.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 14.0
+        and (uniformity is None or uniformity >= 20.0)
+        and (tb_delta is None or tb_delta >= 12.0)
+    )
+    if reopened_lane:
+        return True
+
+    visual_corridor = (
+        path_profile.get("open_side_turn") is None
+        and abs(float(path_profile.get("side_std_gap") or 0.0)) <= 6.0
+        and center_wall is not None
+        and center_wall >= 45.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= 25.0
+        and (uniformity is None or 15.0 <= uniformity <= 40.0)
+        and (tb_delta is None or tb_delta >= 10.0)
+    )
+    if visual_corridor:
+        return True
+
+    corridor_reopened = (
+        path_profile.get("open_side_turn") is None
+        and center_floor is not None
+        and center_floor <= 34.0
+        and center_wall is not None
+        and center_wall >= 55.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor <= 34.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 20.0
+        and (uniformity is None or uniformity >= 25.0)
+        and (tb_delta is None or tb_delta >= 18.0)
+    )
+    return corridor_reopened
+
+
+def _apply_visual_forward_override(
+    decision: Dict[str, Any],
+    clear_forward_lane: bool,
+    max_linear: float,
+    max_forward_ms: int,
+) -> Dict[str, Any]:
+    """If the current frame is clearly drivable, don't let a turn override that."""
+    if decision.get("action") not in ("turn_left", "turn_right") or not clear_forward_lane:
+        return decision
+
+    return _build_local_forward_decision(
+        max_linear=max_linear,
+        max_forward_ms=max_forward_ms,
+        reason_text=(
+            "The current frame shows a usable forward corridor, so I move forward instead of turning."
+        ),
+    )
+
+
+def _is_pressed_against_wall(
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+    looks_like_wall_at_floor: bool,
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+) -> bool:
+    """True only when wall-close signals exist and we do not also have a strong forward lane."""
+    raw_pressed = (
+        (uniformity is not None and uniformity < 8.0)
+        or (
+            tb_delta is not None
+            and tb_delta < 6.0
+            and (uniformity is None or uniformity < 25.0)
+        )
+        or looks_like_wall_at_floor
+    )
+    if not raw_pressed:
+        return False
+
+    return not _has_clear_forward_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    )
+
+
+def _detect_side_opening_only_turn(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+    color_sample_count: Optional[int] = None,
+    recent_wall_escape_count: int = 0,
+) -> Optional[str]:
+    """Detect cases where only a side opening is viable and center is not convincingly drivable."""
+    if not path_profile or path_profile.get("center_blocked"):
+        return None
+
+    open_side_turn = path_profile.get("open_side_turn")
+    if open_side_turn not in ("turn_left", "turn_right"):
+        return None
+
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    side_std_gap = abs(float(path_profile.get("side_std_gap") or 0.0))
+
+    if (
+        center_floor is not None
+        and center_floor >= 18.0
+        and center_wall is not None
+        and center_wall >= 55.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor >= 28.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 20.0
+        and side_std_gap >= 20.0
+        and (uniformity is None or uniformity >= 25.0)
+        and (tb_delta is None or tb_delta >= 10.0)
+    ):
+        return open_side_turn
+
+    early_uncertain_side_opening = (
+        color_sample_count is not None
+        and color_sample_count <= 2
+        and recent_wall_escape_count >= 1
+        and center_floor is not None
+        and center_floor >= 30.0
+        and center_wall is not None
+        and center_wall >= 45.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor >= 26.0
+        and side_std_gap >= 10.0
+        and (uniformity is None or uniformity >= 20.0)
+        and (tb_delta is None or tb_delta >= 12.0)
+    )
+    if early_uncertain_side_opening:
+        return open_side_turn
+
+    return None
+
+
+def _decide_from_local_controller(
+    path_profile: Optional[Dict[str, Any]],
+    persistent_wall_turn: Optional[str],
+    recent_wall_escape_count: int,
+    color_sample_count: int,
+    spin_detected: bool,
+    max_linear: float,
+    max_turn_deg: float,
+    max_forward_ms: int,
+    last_turn_direction: Optional[str],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Primary local controller. Returns None when the scene is genuinely ambiguous."""
+    if path_profile and path_profile.get("center_blocked"):
+        forced_turn = _choose_recovery_turn(
+            path_profile, last_turn_direction, path_profile.get("preferred_turn")
+        )
+        direction_text = "left" if forced_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-center-block]",
+            reason_text=(
+                f"the immediate lane is blocked, so I turn {direction_text} toward the clearer side"
+            ),
+            comment_text=(
+                f"A nearby barrier fills my immediate lane, so I turn {direction_text} instead of driving forward."
+            ),
+            plan_text=f"I will turn {direction_text}, then re-check for a valid center lane.",
+            reasoning_steps=[
+                "The immediate center lane is blocked at close range.",
+                "Driving forward would push me into a barrier instead of through open floor.",
+                f"The {direction_text} side is the best available recovery direction.",
+                f"I will turn {direction_text} first and reassess the lane after the turn.",
+            ],
+            preferred_turn=forced_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=70.0,
+        )
+
+    if persistent_wall_turn:
+        direction_text = "left" if persistent_wall_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-persistent-wall]",
+            reason_text=(
+                f"recent forward frames stayed almost unchanged, so I turn {direction_text} off the wall"
+            ),
+            comment_text=(
+                f"My recent forward views keep showing the same nearby wall, so I turn {direction_text}."
+            ),
+            plan_text=f"I will turn {direction_text} to change my angle on the wall, then reassess.",
+            reasoning_steps=[
+                "Several recent forward ticks produced nearly the same close wall view.",
+                "That means I am not progressing into open space.",
+                f"The repeated open side is to the {direction_text}.",
+                f"I will turn {direction_text} now to find a usable forward lane.",
+            ],
+            preferred_turn=persistent_wall_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=55.0,
+        )
+
+    if _has_clear_forward_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        return _build_local_forward_decision(
+            max_linear=max_linear,
+            max_forward_ms=max_forward_ms,
+            reason_text=(
+                "The immediate lane has reopened with strong floor evidence, so a short forward move is safe."
+            ),
+        )
+
+    side_opening_turn = _detect_side_opening_only_turn(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+        color_sample_count=color_sample_count,
+        recent_wall_escape_count=recent_wall_escape_count,
+    )
+    if side_opening_turn:
+        direction_text = "left" if side_opening_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-side-opening-only]",
+            reason_text=(
+                f"the viable opening is to the {direction_text}; the center lane is not clear enough for forward"
+            ),
+            comment_text=(
+                f"I see usable space to the {direction_text}, but the center lane is not convincingly open."
+            ),
+            plan_text=f"I will turn {direction_text} toward the side opening, then re-check the lane.",
+            reasoning_steps=[
+                "The center lane does not show strong enough floor evidence for a safe straight move.",
+                "Most usable structure and opening appear on one side rather than in the center.",
+                f"The better recovery direction is {direction_text}.",
+                f"I will turn {direction_text} first and reassess before moving forward.",
+            ],
+            preferred_turn=side_opening_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=60.0,
+        )
+
+    if recent_wall_escape_count >= 2 and path_profile and path_profile.get("open_side_turn"):
+        forced_turn = path_profile.get("open_side_turn")
+        direction_text = "left" if forced_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-wall-cycle]",
+            reason_text=(
+                f"recent wall recoveries repeat the same pattern, so I turn {direction_text} to break the loop"
+            ),
+            comment_text=(
+                f"I am repeating the same wall recovery cycle, so I turn {direction_text} instead of probing forward."
+            ),
+            plan_text=f"I will turn {direction_text} decisively, then check the center lane again.",
+            reasoning_steps=[
+                "Recent history shows repeated recovery near the same wall.",
+                "Another straight move would likely repeat the same non-progressing scene.",
+                f"The best recovery direction is {direction_text}.",
+                f"I will turn {direction_text} to create a new forward angle.",
+            ],
+            preferred_turn=forced_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=65.0,
+        )
+
+    if spin_detected:
+        forced_turn = _choose_recovery_turn(path_profile, last_turn_direction)
+        direction_text = "left" if forced_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-spin-break]",
+            reason_text=f"I turn {direction_text} decisively to break the turn loop",
+            comment_text=(
+                f"I have been turning without finding a lane, so I commit to a larger {direction_text} turn."
+            ),
+            plan_text=f"I will turn {direction_text} more decisively, then re-check the lane.",
+            reasoning_steps=[
+                "Recent actions show a turn loop without meaningful forward progress.",
+                "A larger committed turn is better than another small adjustment.",
+                f"The best recovery direction is {direction_text}.",
+                f"I will turn {direction_text} and reassess the lane after the turn.",
+            ],
+            preferred_turn=forced_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=80.0,
+        )
+
+    if not path_profile:
+        return None
+
+    if _has_clear_forward_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        return _build_local_forward_decision(
+            max_linear=max_linear,
+            max_forward_ms=max_forward_ms,
+            reason_text="The immediate center lane is clearly floor, so a short forward move is safe.",
+        )
+
+    return None
+
+
+def _build_nav_signature(
+    orientation: Any,
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    path_profile: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Compact per-tick signature used to spot repeated wall-hugging frames."""
+    return {
+        "orientation": round(float(orientation), 1)
+        if isinstance(orientation, (int, float))
+        else None,
+        "front_uniformity": round(float(uniformity), 1) if uniformity is not None else None,
+        "front_tb_delta": round(float(tb_delta), 1) if tb_delta is not None else None,
+        "bot_dist_to_floor": round(float(bot_dist_to_floor), 1)
+        if bot_dist_to_floor is not None
+        else None,
+        "bot_dist_to_wall": round(float(bot_dist_to_wall), 1)
+        if bot_dist_to_wall is not None
+        else None,
+        "open_side_turn": path_profile.get("open_side_turn") if path_profile else None,
+        "center_floor_dist": path_profile.get("center_floor_dist") if path_profile else None,
+        "center_wall_dist": path_profile.get("center_wall_dist") if path_profile else None,
+        "left_wall_dist": path_profile.get("left_wall_dist") if path_profile else None,
+        "right_wall_dist": path_profile.get("right_wall_dist") if path_profile else None,
+    }
+
+
+def _heading_delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    delta = abs(float(a) - float(b))
+    if delta > 180:
+        delta = 360 - delta
+    return delta
+
+
+def _signatures_match_for_wall_loop(
+    current_sig: Dict[str, Any],
+    previous_sig: Dict[str, Any],
+) -> bool:
+    if not current_sig or not previous_sig:
+        return False
+    if not current_sig.get("open_side_turn"):
+        return False
+    if current_sig.get("open_side_turn") != previous_sig.get("open_side_turn"):
+        return False
+
+    heading_delta = _heading_delta(
+        current_sig.get("orientation"), previous_sig.get("orientation")
+    )
+    if heading_delta is not None and heading_delta > 12.0:
+        return False
+
+    checks = (
+        ("front_uniformity", 2.5),
+        ("front_tb_delta", 3.5),
+        ("bot_dist_to_floor", 3.0),
+        ("bot_dist_to_wall", 3.0),
+        ("center_floor_dist", 3.0),
+        ("center_wall_dist", 6.0),
+    )
+    compared = 0
+    matched = 0
+    for key, threshold in checks:
+        cur = current_sig.get(key)
+        prev = previous_sig.get(key)
+        if cur is None or prev is None:
+            continue
+        compared += 1
+        if abs(float(cur) - float(prev)) <= threshold:
+            matched += 1
+    return compared >= 4 and matched >= 4
+
+
+def _detect_persistent_wall_ahead_turn(
+    history: List[Dict[str, Any]],
+    current_sig: Dict[str, Any],
+) -> Optional[str]:
+    """If repeated forward ticks look visually unchanged, stop treating them as progress."""
+    if not current_sig.get("open_side_turn"):
+        return None
+
+    forward_streak: List[Dict[str, Any]] = []
+    for item in reversed(history):
+        if item.get("action") != "forward":
+            break
+        forward_streak.append(item)
+        if len(forward_streak) >= 4:
+            break
+
+    if len(forward_streak) < 3:
+        return None
+
+    matched = 0
+    for item in forward_streak:
+        prev_sig = item.get("nav_signature") or {}
+        if _signatures_match_for_wall_loop(current_sig, prev_sig):
+            matched += 1
+
+    if matched >= 2:
+        return current_sig.get("open_side_turn")
+    return None
+
+
+def _apply_persistent_wall_ahead_override(
+    decision: Dict[str, Any],
+    forced_turn: Optional[str],
+    max_turn_deg: float,
+) -> Dict[str, Any]:
+    """Use recent history to break repeated forward commands into a nearby wall."""
+    if decision.get("action") != "forward" or forced_turn not in ("turn_left", "turn_right"):
+        return decision
+
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return {
+        **decision,
+        "action": forced_turn,
+        "linear_speed": 0.0,
+        "turn_degrees": round(min(max_turn_deg, 55.0), 1),
+        "duration_ms": decision.get("duration_ms", 700),
+        "confidence": max(float(decision.get("confidence") or 0.0), 0.9),
+        "reason": (
+            f"[persistent-wall-ahead-override] Recent forward frames stayed visually unchanged, "
+            f"so I turn {direction_text} instead of driving into the same nearby wall."
+        )[:240],
+        "comment_front": (
+            f"My recent forward views keep showing the same nearby wall; the {direction_text} side is the repeat opening."
+        )[:240],
+        "plan_of_action": (
+            f"I will turn {direction_text} to change my angle on the wall, then reassess the lane."
+        )[:240],
+        "reasoning_steps": [
+            "Several recent forward ticks produced nearly the same close-range view instead of a new scene.",
+            "That means I am still facing the same nearby wall rather than progressing into open space.",
+            f"The repeated open side is to the {direction_text}.",
+            f"I will turn {direction_text} now to get off the wall and find a usable forward lane.",
+        ],
+    }
+
+
+def _apply_history_forward_turn_overrides(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    recent_wall_escape_count: int,
+    persistent_wall_turn: Optional[str],
+    max_turn_deg: float,
+    clear_forward_lane: bool,
+) -> Dict[str, Any]:
+    """Use history-based turn overrides only when the current frame is not clearly drivable."""
+    if decision.get("action") != "forward" or clear_forward_lane:
+        return decision
+
+    if recent_wall_escape_count >= 2:
+        decision = _apply_wall_escape_cycle_override(
+            decision, path_profile, recent_wall_escape_count, max_turn_deg
+        )
+
+    if persistent_wall_turn and decision.get("action") == "forward":
+        decision = _apply_persistent_wall_ahead_override(
+            decision, persistent_wall_turn, max_turn_deg
+        )
+
+    return decision
+
+
+def _apply_side_opening_only_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+    color_sample_count: Optional[int],
+    recent_wall_escape_count: int,
+    max_turn_deg: float,
+    last_turn_direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """If only a side opening is viable, prevent forward motion into the obstruction."""
+    if decision.get("action") != "forward":
+        return decision
+
+    forced_turn = _detect_side_opening_only_turn(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+        color_sample_count=color_sample_count,
+        recent_wall_escape_count=recent_wall_escape_count,
+    )
+    if forced_turn not in ("turn_left", "turn_right"):
+        return decision
+
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return _build_recovery_turn_decision(
+        path_profile=path_profile,
+        max_turn_deg=max_turn_deg,
+        reason_tag="[side-opening-only-override]",
+        reason_text=(
+            f"the center lane is not clear enough, so I turn {direction_text} toward the side opening"
+        ),
+        comment_text=(
+            f"I do not have a convincing straight lane; the usable opening is to the {direction_text}."
+        ),
+        plan_text=f"I will turn {direction_text}, then re-check whether forward is truly open.",
+        reasoning_steps=[
+            "The center lane lacks strong floor evidence for a safe short forward move.",
+            "The most usable opening is on one side instead of straight ahead.",
+            f"The safer recovery direction is {direction_text}.",
+            f"I will turn {direction_text} first and then reassess the lane.",
+        ],
+        preferred_turn=forced_turn,
+        last_turn_direction=last_turn_direction,
+        default_turn_deg=60.0,
+    )
+
+
+def _rgb_distance(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
+    """Euclidean distance between two RGB triples on the 0-255 scale. None if
+    either is missing."""
+    if not a or not b or len(a) != 3 or len(b) != 3:
+        return None
+    import math
+    return math.sqrt(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)))
+
+
+async def _run_autonav_loop(config: Dict[str, Any]):
+    tick_interval = max(0.3, float(config["tick_ms"]) / 1000.0)
+    max_linear = float(config["max_linear"])
+    max_turn_deg = float(config["max_turn_deg"])
+    max_forward_ms = int(config["max_forward_ms"])
+    battery_floor = int(config["battery_floor"])
+    history_size = int(config["history_size"])
+    max_errors = int(config["max_errors"])
+    model = config.get("model") or None
+
+    autonav_loop_state["status"] = "waiting"
+    last_turn_direction: Optional[str] = None
+    consecutive_turns = 0
+    log_dir: Optional[str] = autonav_loop_state.get("log_dir")
+
+    logger.info(
+        "Autonav loop started (tick=%.2fs, max_linear=%.2f, max_turn_deg=%.1f)",
+        tick_interval,
+        max_linear,
+        max_turn_deg,
+    )
+
+    try:
+        while True:
+            tick_start = asyncio.get_event_loop().time()
+            iteration = autonav_loop_state["iterations"] + 1
+            autonav_loop_state["iterations"] = iteration
+
+            # 1. Telemetry -----------------------------------------------------
+            try:
+                rover_data = await browser_service.data()
+            except Exception as exc:
+                autonav_loop_state["error_streak"] = autonav_loop_state.get("error_streak", 0) + 1
+                autonav_loop_state["last_error"] = f"telemetry: {exc}"
+                logger.warning("Autonav telemetry error: %s", exc)
+                if autonav_loop_state["error_streak"] >= max_errors:
+                    autonav_loop_state["status"] = "error"
+                    await _autonav_stop_burst()
+                    break
+                await asyncio.sleep(tick_interval)
+                continue
+
+            battery = rover_data.get("battery")
+            try:
+                battery_val = int(battery) if battery is not None else None
+            except (TypeError, ValueError):
+                battery_val = None
+
+            if battery_val is not None and battery_val <= battery_floor:
+                autonav_loop_state["status"] = "battery_low"
+                autonav_loop_state["last_error"] = f"battery {battery_val}% <= floor {battery_floor}"
+                logger.warning("Autonav stopping: battery %s%% <= floor %s%%", battery_val, battery_floor)
+                await _autonav_stop_burst()
+                break
+
+            # 2. Fetch frames --------------------------------------------------
+            autonav_loop_state["status"] = "deciding"
+            history = autonav_loop_state["history"]
+
+            recent = [h.get("action") for h in history[-5:]]
+            recent_wall_escape_count = sum(
+                1
+                for item in history[-6:]
+                if str(item.get("reason", "")).startswith("[wall-proximity ")
+            )
+            recent_turn_count = sum(1 for a in recent if a in ("turn_left", "turn_right"))
+            recent_has_forward = any(a == "forward" for a in recent)
+            # Note: we do NOT check observed_speed anymore — this rover's
+            # speed telemetry is GPS-derived and reads near-zero whenever
+            # GPS is unavailable, even while the rover is clearly moving.
+            # Trust the action pattern, not the speed metric.
+            spin_detected = (
+                len(recent) >= 4 and recent_turn_count >= 4 and not recent_has_forward
+            )
+
+            try:
+                front_b64 = await get_frame_base64("front")
+            except Exception as exc:
+                autonav_loop_state["error_streak"] = autonav_loop_state.get("error_streak", 0) + 1
+                autonav_loop_state["last_error"] = f"front frame: {exc}"
+                logger.warning("Autonav front-frame error: %s", exc)
+                if autonav_loop_state["error_streak"] >= max_errors:
+                    autonav_loop_state["status"] = "error"
+                    await _autonav_stop_burst()
+                    break
+                await asyncio.sleep(tick_interval)
+                continue
+
+            uniformity = _frame_uniformity(front_b64)
+            tb_delta = _frame_top_bottom_delta(front_b64)
+            color_sample = _frame_color_samples(front_b64)
+
+            # Color calibration: on frames with a clear horizon (tb_delta >= 12),
+            # blend the current sample into the running floor/wall baseline.
+            # Cap at MAX_COLOR_SAMPLES so early readings dominate (the first few
+            # normal ticks define "what floor/wall look like in this run").
+            MAX_COLOR_SAMPLES = 6
+            if (
+                color_sample
+                and tb_delta is not None
+                and tb_delta >= 12.0
+                and autonav_loop_state.get("color_sample_count", 0) < MAX_COLOR_SAMPLES
+            ):
+                n = autonav_loop_state.get("color_sample_count", 0)
+                prev_floor = autonav_loop_state.get("floor_rgb")
+                prev_wall = autonav_loop_state.get("wall_rgb")
+                if prev_floor is None:
+                    autonav_loop_state["floor_rgb"] = list(color_sample["bot_rgb"])
+                    autonav_loop_state["wall_rgb"] = list(color_sample["top_rgb"])
+                else:
+                    autonav_loop_state["floor_rgb"] = [
+                        round((prev_floor[i] * n + color_sample["bot_rgb"][i]) / (n + 1), 1)
+                        for i in range(3)
+                    ]
+                    autonav_loop_state["wall_rgb"] = [
+                        round((prev_wall[i] * n + color_sample["top_rgb"][i]) / (n + 1), 1)
+                        for i in range(3)
+                    ]
+                autonav_loop_state["color_sample_count"] = n + 1
+                if n == 0:
+                    logger.info(
+                        "Autonav color calibration started: floor=%s wall=%s",
+                        autonav_loop_state["floor_rgb"],
+                        autonav_loop_state["wall_rgb"],
+                    )
+
+            # Per-tick comparison against the learned baseline.
+            floor_rgb = autonav_loop_state.get("floor_rgb")
+            wall_rgb = autonav_loop_state.get("wall_rgb")
+            bot_dist_to_floor = _rgb_distance(
+                color_sample["bot_rgb"] if color_sample else None, floor_rgb
+            )
+            top_dist_to_wall = _rgb_distance(
+                color_sample["top_rgb"] if color_sample else None, wall_rgb
+            )
+            bot_dist_to_wall = _rgb_distance(
+                color_sample["bot_rgb"] if color_sample else None, wall_rgb
+            )
+            # Multi-signal detection for "nose-pressed against a surface":
+            #   (a) truly flat frame: stddev < 8 — e.g. pure white wall.
+            #   (b) textured but single-surface: small top/bottom mean delta
+            #       (<6) combined with moderate stddev.
+            #   (c) calibrated mismatch: the bottom half of the frame is
+            #       closer in color to the learned WALL than to the learned
+            #       FLOOR — meaning where floor should be, we see wall.
+            looks_like_wall_at_floor = False
+            if (
+                color_sample
+                and bot_dist_to_wall is not None
+                and bot_dist_to_floor is not None
+                and autonav_loop_state.get("color_sample_count", 0) >= 2
+            ):
+                # Needs a clear bias toward wall over floor to trip — not just
+                # a lighting shift. Require bot is significantly closer to wall
+                # AND far enough from floor to avoid false positives.
+                looks_like_wall_at_floor = (
+                    bot_dist_to_wall < bot_dist_to_floor - 15
+                    and bot_dist_to_floor > 25
+                )
+            path_zone_b64 = _frame_path_crop_base64(front_b64)
+            path_profile = _frame_path_profile(front_b64, floor_rgb, wall_rgb)
+            pressed_against_wall = _is_pressed_against_wall(
+                uniformity=uniformity,
+                tb_delta=tb_delta,
+                looks_like_wall_at_floor=looks_like_wall_at_floor,
+                path_profile=path_profile,
+                bot_dist_to_floor=bot_dist_to_floor,
+                bot_dist_to_wall=bot_dist_to_wall,
+            )
+            path_profile_summary = _format_path_profile_summary(path_profile)
+            current_nav_signature = _build_nav_signature(
+                rover_data.get("orientation"),
+                uniformity,
+                tb_delta,
+                bot_dist_to_floor,
+                bot_dist_to_wall,
+                path_profile,
+            )
+            persistent_wall_turn = _detect_persistent_wall_ahead_turn(
+                history, current_nav_signature
+            )
+            clear_forward_lane = _has_clear_forward_lane(
+                path_profile=path_profile,
+                bot_dist_to_floor=bot_dist_to_floor,
+                bot_dist_to_wall=bot_dist_to_wall,
+                uniformity=uniformity,
+                tb_delta=tb_delta,
+            )
+
+            want_rear = pressed_against_wall
+            if history and not want_rear:
+                last_action = history[-1].get("action")
+                if last_action == "backward" or spin_detected:
+                    want_rear = True
+
+            rear_b64: Optional[str] = None
+            if want_rear and auth_response_data.get("BOT_TYPE") == "zero":
+                try:
+                    rear_b64 = await get_frame_base64("rear")
+                except Exception as exc:
+                    logger.info("Autonav rear frame unavailable (continuing without): %s", exc)
+                    rear_b64 = None
+
+            # 3. Hint for loop/spin detection ---------------------------------
+            hint_parts: List[str] = []
+            if clear_forward_lane and (
+                spin_detected
+                or recent_wall_escape_count >= 2
+                or persistent_wall_turn is not None
+            ):
+                hint_parts.append(
+                    "Visual priority: the current images show a reopened center lane. If the center remains clearly open in front of me, prefer forward over stale history."
+                )
+            elif spin_detected:
+                hint_parts.append(
+                    f"You have turned {recent_turn_count} of the last {len(recent)} ticks with no "
+                    "forward progress. This tick, do not reverse. Pick ONE direction and use the "
+                    "blocked-lane turn staircase: 45°, then 90°, then 135°, then 180° if needed."
+                )
+            elif consecutive_turns >= 3 and last_turn_direction:
+                hint_parts.append(
+                    f"You have chosen {last_turn_direction} {consecutive_turns} times in a row. "
+                    "Break the spin with the next blocked-lane turn step: 45°, then 90°, then 135°, then 180°."
+                )
+            if path_profile and path_profile.get("center_blocked"):
+                preferred_turn = path_profile.get("preferred_turn")
+                preferred_text = ""
+                if preferred_turn == "turn_left":
+                    preferred_text = " Prefer the left side."
+                elif preferred_turn == "turn_right":
+                    preferred_text = " Prefer the right side."
+                hint_parts.append(
+                    "Local path guardrail: the immediate center lane is blocked by a nearby surface. "
+                    "Do NOT choose forward on this tick; choose a turn toward the more open side."
+                    + preferred_text
+                )
+            if recent_wall_escape_count >= 2 and path_profile and not clear_forward_lane:
+                open_side_turn = path_profile.get("open_side_turn")
+                open_side_text = ""
+                if open_side_turn == "turn_left":
+                    open_side_text = " Prefer a left turn."
+                elif open_side_turn == "turn_right":
+                    open_side_text = " Prefer a right turn."
+                hint_parts.append(
+                    "Recent wall-proximity escapes show I am stuck in a forward/backward loop near a wall. "
+                    "Break the cycle with a committed turn instead of another forward probe."
+                    + open_side_text
+                )
+            if pressed_against_wall:
+                wall_text = "left" if persistent_wall_turn == "turn_left" else "right" if persistent_wall_turn == "turn_right" else None
+                preferred_text = f" Prefer turning {wall_text}." if wall_text else ""
+                hint_parts.append(
+                    "Visual guardrail: the current front frame looks nose-close to a wall or obstacle. "
+                    "Base this decision on what is visible in the current images and avoid forward unless the center lane is clearly open."
+                    + preferred_text
+                )
+            if persistent_wall_turn and not clear_forward_lane:
+                direction_text = "left" if persistent_wall_turn == "turn_left" else "right"
+                hint_parts.append(
+                    "History guardrail: several recent forward ticks produced an almost unchanged close wall view, "
+                    f"so this is not a real clear path. Turn {direction_text} instead of choosing forward again."
+                )
+            hint: Optional[str] = " ".join(hint_parts) if hint_parts else None
+
+            # 4. Ask Gemini ----------------------------------------------------
+            gemini_debug: Dict[str, Any] = {}
+            decision_source = "gemini"
+            try:
+                decision = await autonav_decide(
+                    front_b64=front_b64,
+                    rear_b64=rear_b64,
+                    front_path_b64=path_zone_b64,
+                    telemetry={
+                        "orientation": rover_data.get("orientation"),
+                        "speed": rover_data.get("speed"),
+                        "battery": battery_val,
+                        "front_uniformity": (
+                            round(uniformity, 1) if uniformity is not None else None
+                        ),
+                        "front_tb_delta": (
+                            round(tb_delta, 1) if tb_delta is not None else None
+                        ),
+                        "learned_floor_rgb": floor_rgb,
+                        "learned_wall_rgb": wall_rgb,
+                        "current_bot_rgb": color_sample["bot_rgb"] if color_sample else None,
+                        "current_top_rgb": color_sample["top_rgb"] if color_sample else None,
+                        "bot_dist_to_floor": (
+                            round(bot_dist_to_floor, 1) if bot_dist_to_floor is not None else None
+                        ),
+                        "bot_dist_to_wall": (
+                            round(bot_dist_to_wall, 1) if bot_dist_to_wall is not None else None
+                        ),
+                        "path_profile_summary": path_profile_summary,
+                    },
+                    history=history,
+                    max_linear=max_linear,
+                    max_turn_deg=max_turn_deg,
+                    max_forward_ms=max_forward_ms,
+                    hint=hint,
+                    model=model,
+                    debug_out=gemini_debug,
+                )
+                gemini_raw_decision = dict(decision)
+            except Exception as exc:
+                autonav_loop_state["error_streak"] = autonav_loop_state.get("error_streak", 0) + 1
+                autonav_loop_state["last_error"] = f"gemini: {exc}"
+                logger.warning("Autonav Gemini error: %s", exc)
+                if autonav_loop_state["error_streak"] >= max_errors:
+                    autonav_loop_state["status"] = "error"
+                    await _autonav_stop_burst()
+                    break
+                await asyncio.sleep(tick_interval)
+                continue
+
+            # Speed-based stuck override removed: on rovers with unreliable
+            # speed telemetry (e.g. GPS-derived when GPS is down), this
+            # triggered constant false positives and fought with Gemini.
+
+            # Contradiction override: if Gemini picks a turn but admits in its own
+            # reason/comment that the immediate path is clear, force forward.
+            # Observed failure mode: Gemini says "IMAGE 2 is clear" and still picks
+            # turn_left because it's anticipating a future corridor bend. Anticipatory
+            # turning is wrong; each forward burst should be followed by re-evaluation.
+            if decision["action"] in ("turn_left", "turn_right"):
+                text_blob = " ".join(
+                    [
+                        str(decision.get("reason", "")),
+                        str(decision.get("comment_front", "")),
+                        " ".join(decision.get("reasoning_steps") or []),
+                    ]
+                ).lower()
+                admits_clear = any(
+                    phrase in text_blob
+                    for phrase in (
+                        "immediate path is clear",
+                        "immediate forward path is clear",
+                        "immediate forward path appears clear",
+                        "immediate forward path appears mostly clear",
+                        "forward path is clear",
+                        "path is clear of obstacles",
+                        "no immediate obstacle",
+                        "no immediate obstacles",
+                        "no obstacles directly",
+                        "clear path directly ahead",
+                        "center-bottom is clear",
+                        "center of the frame is clear",
+                    )
+                )
+                if admits_clear:
+                    logger.info(
+                        "Autonav contradiction override: Gemini picked %s but admitted "
+                        "immediate path is clear — forcing forward",
+                        decision["action"],
+                    )
+                    decision = dict(decision)
+                    decision["action"] = "forward"
+                    decision["linear_speed"] = min(max(0.18, 0.15), max_linear)
+                    decision["duration_ms"] = 700
+                    decision["turn_degrees"] = 0.0
+                    decision["reason"] = (
+                        (decision.get("reason", "") + " [contradiction-override: forward]").strip()
+                    )
+
+            if decision["action"] in ("turn_left", "turn_right") and clear_forward_lane:
+                logger.info(
+                    "Autonav visual-forward override: current frame is clearly drivable, so overriding %s to forward",
+                    decision["action"],
+                )
+                decision = _apply_visual_forward_override(
+                    decision=decision,
+                    clear_forward_lane=clear_forward_lane,
+                    max_linear=max_linear,
+                    max_forward_ms=max_forward_ms,
+                )
+
+            if path_profile and path_profile.get("center_blocked") and decision["action"] == "forward":
+                logger.info(
+                    "Autonav center-block override: Gemini picked forward with blocked lane "
+                    "(preferred_turn=%s)",
+                    path_profile.get("preferred_turn"),
+                )
+                decision = _apply_center_block_override(decision, path_profile, max_turn_deg)
+
+            if decision["action"] == "forward":
+                side_opening_turn = _detect_side_opening_only_turn(
+                    path_profile=path_profile,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    bot_dist_to_wall=bot_dist_to_wall,
+                    uniformity=uniformity,
+                    tb_delta=tb_delta,
+                    color_sample_count=autonav_loop_state.get("color_sample_count", 0),
+                    recent_wall_escape_count=recent_wall_escape_count,
+                )
+                if side_opening_turn:
+                    logger.info(
+                        "Autonav side-opening-only override: Gemini picked forward with only side opening "
+                        "(turn=%s)",
+                        side_opening_turn,
+                    )
+                    decision = _apply_side_opening_only_override(
+                        decision,
+                        path_profile,
+                        bot_dist_to_floor,
+                        bot_dist_to_wall,
+                        uniformity,
+                        tb_delta,
+                        autonav_loop_state.get("color_sample_count", 0),
+                        recent_wall_escape_count,
+                        max_turn_deg,
+                        last_turn_direction,
+                    )
+
+            if decision["action"] == "forward":
+                if clear_forward_lane and (
+                    recent_wall_escape_count >= 2 or persistent_wall_turn
+                ):
+                    logger.info(
+                        "Autonav preserving forward: current frame is clearly drivable, so stale history overrides are skipped"
+                    )
+                elif recent_wall_escape_count >= 2 or persistent_wall_turn:
+                    logger.info(
+                        "Autonav history-forward override check: recent_wall_escape_count=%s persistent_wall_turn=%s",
+                        recent_wall_escape_count,
+                        persistent_wall_turn,
+                    )
+                decision = _apply_history_forward_turn_overrides(
+                    decision=decision,
+                    path_profile=path_profile,
+                    recent_wall_escape_count=recent_wall_escape_count,
+                    persistent_wall_turn=persistent_wall_turn,
+                    max_turn_deg=max_turn_deg,
+                    clear_forward_lane=clear_forward_lane,
+                )
+
+            if decision["action"] == "backward":
+                logger.info(
+                    "Autonav no-backward policy: converting backward into turn recovery "
+                    "(Gemini picked %s)",
+                    decision["action"],
+                )
+                decision = _apply_no_backward_policy(
+                    decision, path_profile, max_turn_deg, last_turn_direction
+                )
+
+            if decision["action"] in ("turn_left", "turn_right"):
+                committed = _apply_turn_commitment_override(
+                    decision=decision,
+                    history=history,
+                    clear_forward_lane=clear_forward_lane,
+                )
+                if committed["action"] != decision["action"]:
+                    logger.info(
+                        "Autonav turn-commitment override: preserving %s instead of bouncing to %s",
+                        committed["action"],
+                        decision["action"],
+                    )
+                decision = committed
+
+            if spin_detected and decision["action"] in ("turn_left", "turn_right"):
+                # Spin override: rover is dancing left/right without progress.
+                logger.info(
+                    "Autonav spin override: %s turns in last %s ticks with no forward — forcing committed turn",
+                    recent_turn_count,
+                    len(recent),
+                )
+                action = _choose_recovery_turn(
+                    path_profile, last_turn_direction, decision["action"]
+                )
+                direction_text = "left" if action == "turn_left" else "right"
+                decision = {
+                    **decision,
+                    "action": action,
+                    "linear_speed": 0.0,
+                    "turn_degrees": round(min(max_turn_deg, 80.0), 1),
+                    "reason": (
+                        f"[spin-override] I commit to a larger {direction_text} turn to break the loop."
+                    )[:240],
+                    "comment_front": (
+                        f"I have been turning without finding a lane, so I commit to a larger {direction_text} turn."
+                    )[:240],
+                    "plan_of_action": (
+                        f"I will turn {direction_text} more decisively, then check the lane again."
+                    )[:240],
+                    "reasoning_steps": [
+                        "Recent decisions show repeated turning without meaningful forward progress.",
+                        "A bigger committed turn is more useful than another small adjustment.",
+                        f"The best recovery direction is {direction_text}.",
+                        f"I will turn {direction_text} now and reassess the forward lane.",
+                    ],
+                }
+
+            decision = _apply_repeat_turn_escalation(
+                decision, max_turn_deg, last_turn_direction, consecutive_turns
+            )
+
+            autonav_loop_state["error_streak"] = 0
+            autonav_loop_state["last_error"] = None
+            autonav_loop_state["last_decision"] = decision
+            autonav_loop_state["last_action_at"] = datetime.utcnow().isoformat() + "Z"
+            autonav_loop_state["status"] = "acting"
+
+            action = decision["action"]
+            logger.info(
+                "Autonav tick %s: %s (reason=%r)",
+                iteration,
+                action,
+                decision.get("reason", "")[:120],
+            )
+
+            # 5. Execute action ------------------------------------------------
+            observed_speed_val: Optional[float] = None
+            try:
+                if action in ("forward", "backward"):
+                    # Rover has a minimum usable linear speed — commands below
+                    # ~0.12 m/s don't overcome motor stiction. The existing
+                    # turn helper (main.py:574) uses the same 0.12 floor.
+                    MIN_EFFECTIVE_SPEED = 0.12
+                    requested_speed = decision["linear_speed"]
+                    speed = min(
+                        max(requested_speed, MIN_EFFECTIVE_SPEED), max_linear
+                    )
+                    if speed > requested_speed + 1e-6:
+                        logger.debug(
+                            "Autonav: raised %s speed %.2f → %.2f (stiction floor)",
+                            action, requested_speed, speed,
+                        )
+                    sign = 1 if action == "forward" else -1
+                    duration = decision["duration_ms"] / 1000.0
+                    cmd = {"linear": sign * speed, "angular": 0, "lamp": 0}
+                    # Rover RTM protocol has a watchdog — commands must be
+                    # refreshed every ~350ms or the rover stops on its own.
+                    # This is why /turn (main.py:742) resends at ~350ms.
+                    # Refresh the drive command throughout the burst AND sample
+                    # speed, taking the max observed speed as ground truth.
+                    REFRESH = 0.25  # keep below rover's ~350ms watchdog
+                    LOOP_DT = 0.1
+                    await browser_service.send_message(cmd)
+                    last_send = asyncio.get_event_loop().time()
+                    end_time = last_send + duration
+                    max_observed = 0.0
+                    sample_count = 0
+                    # Tight loop that both refreshes the drive command and
+                    # samples speed. No warm-up sleep — keep pinging.
+                    while asyncio.get_event_loop().time() < end_time - 0.03:
+                        now = asyncio.get_event_loop().time()
+                        if now - last_send >= REFRESH:
+                            await browser_service.send_message(cmd)
+                            last_send = now
+                        try:
+                            mid_data = await browser_service.data()
+                            raw_speed = mid_data.get("speed")
+                            if raw_speed is not None:
+                                max_observed = max(max_observed, abs(float(raw_speed)))
+                                sample_count += 1
+                        except Exception:
+                            pass
+                        await asyncio.sleep(LOOP_DT)
+                    observed_speed_val = max_observed if sample_count > 0 else None
+                    remaining = end_time - asyncio.get_event_loop().time()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    await _autonav_stop_burst()
+                elif action == "turn_left":
+                    await _perform_turn(-decision["turn_degrees"])
+                elif action == "turn_right":
+                    await _perform_turn(decision["turn_degrees"])
+                else:  # stop
+                    await _autonav_stop_burst()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                autonav_loop_state["last_error"] = f"execute: {exc}"
+                logger.warning("Autonav execute error: %s", exc)
+                await _autonav_stop_burst()
+
+            # Settle wait: let the rover fully stop and the RTC video stream
+            # catch up with the new pose before the next tick grabs a frame.
+            # Without this, the "front frame" fetched at the top of tick N+1
+            # can still be a mid-motion frame from this tick's action.
+            await asyncio.sleep(0.4)
+
+            # 6. Update spin trackers -----------------------------------------
+            post_speed_val = observed_speed_val
+
+            if action in ("turn_left", "turn_right"):
+                if last_turn_direction == action:
+                    consecutive_turns += 1
+                else:
+                    consecutive_turns = 1
+                last_turn_direction = action
+            else:
+                consecutive_turns = 0
+                last_turn_direction = None
+
+            history.append(
+                {
+                    "tick": iteration,
+                    "action": action,
+                    "linear_speed": decision.get("linear_speed"),
+                    "turn_degrees": decision.get("turn_degrees"),
+                    "duration_ms": decision.get("duration_ms"),
+                    "speed_after": post_speed_val,
+                    "reason": decision.get("reason", "")[:160],
+                    "nav_signature": current_nav_signature,
+                }
+            )
+            if len(history) > history_size:
+                del history[: len(history) - history_size]
+
+            _autonav_write_tick(
+                log_dir,
+                iteration,
+                {
+                    "tick": iteration,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "path": decision_source,
+                    "telemetry": {
+                        "battery": battery_val,
+                        "orientation": rover_data.get("orientation"),
+                        "speed": rover_data.get("speed"),
+                    },
+                    "front_uniformity": uniformity,
+                    "front_tb_delta": tb_delta,
+                    "learned_floor_rgb": floor_rgb,
+                    "learned_wall_rgb": wall_rgb,
+                    "current_bot_rgb": color_sample["bot_rgb"] if color_sample else None,
+                    "current_top_rgb": color_sample["top_rgb"] if color_sample else None,
+                    "bot_dist_to_floor": bot_dist_to_floor,
+                    "bot_dist_to_wall": bot_dist_to_wall,
+                    "path_zone_sent": path_zone_b64 is not None,
+                    "path_profile": path_profile,
+                    "color_sample_count": autonav_loop_state.get("color_sample_count", 0),
+                    "rear_fetched": rear_b64 is not None,
+                    "spin_detected": spin_detected,
+                    "recent_turn_count": recent_turn_count,
+                    "recent_wall_escape_count": recent_wall_escape_count,
+                    "persistent_wall_turn": persistent_wall_turn,
+                    "nav_signature": current_nav_signature,
+                    "hint": hint,
+                    "system_prompt_sha": None,  # constant across ticks; see run.json
+                    "user_prompt": gemini_debug.get("user_prompt"),
+                    "model": gemini_debug.get("model"),
+                    "gemini_raw_decision": gemini_raw_decision,
+                    "executed_decision": decision,
+                    "observed_speed_mid_motion": observed_speed_val,
+                },
+                front_b64,
+                rear_b64,
+                path_zone_b64,
+            )
+
+            # 7. Pace to tick_interval
+            autonav_loop_state["status"] = "waiting"
+            elapsed = asyncio.get_event_loop().time() - tick_start
+            sleep_for = tick_interval - elapsed
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+
+    except asyncio.CancelledError:
+        logger.info("Autonav loop cancelled — issuing stop burst")
+        try:
+            await _autonav_stop_burst()
+        except Exception as exc:
+            logger.warning("Autonav stop burst on cancel failed: %s", exc)
+        raise
+    except Exception as exc:
+        logger.error("Autonav loop crashed: %s", exc)
+        autonav_loop_state["status"] = "error"
+        autonav_loop_state["last_error"] = str(exc)
+        try:
+            await _autonav_stop_burst()
+        except Exception:
+            pass
+    finally:
+        autonav_loop_state["running"] = False
+
+
+async def _stop_autonav_loop_task(reason: str) -> bool:
+    global autonav_loop_task
+    task = autonav_loop_task
+    if not task or task.done():
+        autonav_loop_task = None
+        autonav_loop_state["running"] = False
+        return False
+
+    autonav_loop_state["running"] = False
+    autonav_loop_state["status"] = reason
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("Autonav loop stop error: %s", exc)
+
+    autonav_loop_task = None
+    logger.info("Autonav loop stopped (%s)", reason)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Obstacle Alert helpers
 # ---------------------------------------------------------------------------
 
@@ -1981,6 +3865,8 @@ async def shutdown_voice_loop():
         await _stop_checkin_loop_task("shutdown")
     async with rescue_ping_lock:
         await _stop_rescue_ping_task("shutdown")
+    async with autonav_loop_lock:
+        await _stop_autonav_loop_task("shutdown")
     async with track_color_lock:
         if track_color_task and not track_color_task.done():
             track_color_task.cancel()
@@ -2246,6 +4132,135 @@ async def checkin_loop_status():
     """Inspect current check-in loop state."""
     async with checkin_loop_lock:
         return JSONResponse(content=_checkin_loop_snapshot())
+
+
+# ---------------------------------------------------------------------------
+# Autonomous Navigation endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/autonav/start")
+async def start_autonav(request: Request):
+    """Start the autonomous maze-navigation loop (Gemini Flash closed-loop driver).
+
+    Body (all optional):
+      tick_ms, max_linear, max_turn_deg, max_forward_ms,
+      battery_floor, history_size, max_errors, gps_trail_size
+    """
+    global autonav_loop_task
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    body = await _parse_json_body(request)
+
+    def _cfg(key: str, env_key: str, default, cast):
+        raw = body.get(key)
+        if raw is None:
+            raw = os.getenv(env_key, default)
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return cast(default)
+
+    config = {
+        "tick_ms": _cfg("tick_ms", "AUTONAV_TICK_MS", 1500, int),
+        "max_linear": _cfg("max_linear", "AUTONAV_MAX_LINEAR", 0.25, float),
+        "max_turn_deg": _cfg("max_turn_deg", "AUTONAV_MAX_TURN_DEG", 180, float),
+        "max_forward_ms": _cfg("max_forward_ms", "AUTONAV_MAX_FORWARD_MS", 3000, int),
+        "battery_floor": _cfg("battery_floor", "AUTONAV_BATTERY_FLOOR", 15, int),
+        "history_size": _cfg("history_size", "AUTONAV_HISTORY_SIZE", 8, int),
+        "max_errors": _cfg("max_errors", "AUTONAV_MAX_ERRORS", 3, int),
+        "model": (
+            str(body.get("model")).strip()
+            if body.get("model")
+            else os.getenv("AUTONAV_GEMINI_MODEL", "gemini-2.5-flash")
+        ),
+        "tick_logging_enabled": _autonav_tick_logging_enabled(),
+    }
+
+    if not os.getenv("GEMINI_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="GEMINI_API_KEY is not configured — autonav requires Gemini Flash",
+        )
+
+    async with autonav_loop_lock:
+        if _is_autonav_loop_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "already_running", **_autonav_loop_snapshot()},
+            )
+
+        log_dir: Optional[str] = None
+        tick_logging_enabled = bool(config.get("tick_logging_enabled"))
+        if tick_logging_enabled:
+            try:
+                log_dir = _autonav_start_run_dir()
+                with open(os.path.join(log_dir, "run.json"), "w") as fh:
+                    json.dump(
+                        {
+                            "started_at": datetime.utcnow().isoformat() + "Z",
+                            "config": config,
+                        },
+                        fh,
+                        indent=2,
+                    )
+                # SYSTEM_PROMPT is constant across ticks — write it once.
+                try:
+                    from autonav_service import SYSTEM_PROMPT as _SP
+                    with open(os.path.join(log_dir, "system_prompt.txt"), "w") as fh:
+                        fh.write(_SP)
+                except Exception:
+                    pass
+                logger.info("Autonav tick logging enabled: %s", log_dir)
+            except Exception as exc:
+                logger.warning("Autonav log dir setup failed (continuing without logs): %s", exc)
+                log_dir = None
+        else:
+            logger.info(
+                "Autonav tick logging disabled (set AUTONAV_SAVE_TICK_LOGS=true to enable)"
+            )
+
+        autonav_loop_state.update(
+            {
+                "running": True,
+                "status": "starting",
+                "started_at": datetime.utcnow().isoformat() + "Z",
+                "iterations": 0,
+                "config": config,
+                "last_decision": None,
+                "last_action_at": None,
+                "last_error": None,
+                "error_streak": 0,
+                "history": [],
+                "log_dir": log_dir,
+                "floor_rgb": None,
+                "wall_rgb": None,
+                "color_sample_count": 0,
+            }
+        )
+        autonav_loop_task = asyncio.create_task(_run_autonav_loop(config))
+
+    return JSONResponse(content={**_autonav_loop_snapshot(), "status": "started"})
+
+
+@app.post("/autonav/stop")
+async def stop_autonav():
+    """Stop the autonomous navigation loop and hard-stop the rover."""
+    async with autonav_loop_lock:
+        stopped = await _stop_autonav_loop_task("stopped")
+        snapshot = _autonav_loop_snapshot()
+
+    return JSONResponse(
+        content={"status": "stopped" if stopped else "not_running", **snapshot}
+    )
+
+
+@app.get("/autonav/status")
+async def autonav_status():
+    """Inspect current autonav state, including last decision and recent history."""
+    async with autonav_loop_lock:
+        return JSONResponse(content=_autonav_loop_snapshot())
 
 
 # ---------------------------------------------------------------------------
