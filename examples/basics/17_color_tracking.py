@@ -6,7 +6,8 @@ The rover uses both front and rear cameras to locate the card,
 turns to center it, then drives toward it, stopping when the card
 fills ~15% of the front frame.
 
-Supported colors: red, green, blue, yellow, pink, skyblue
+Supported colors: red, orange, yellow, green, cyan, teal, blue, skyblue,
+purple, pink, black, white, gray, brown
 
 Usage:
     python examples/basics/17_color_tracking.py --color skyblue
@@ -37,11 +38,27 @@ COLOR_RANGES: dict[str, list[tuple]] = {
         ((0, 120, 70), (10, 255, 255)),
         ((160, 120, 70), (179, 255, 255)),
     ],
+    "orange": [
+        ((5, 100, 80), (18, 255, 255)),
+    ],
     "green": [
         ((35, 80, 50), (85, 255, 255)),
     ],
+    "cyan": [
+        ((80, 80, 50), (95, 255, 255)),
+    ],
+    "teal": [
+        ((75, 60, 50), (95, 255, 220)),
+    ],
     "blue": [
         ((90, 80, 50), (130, 255, 255)),
+    ],
+    "skyblue": [
+        # Sky blue - very low saturation floor to catch pale/pastel blues
+        ((85, 15, 100), (120, 200, 255)),
+    ],
+    "purple": [
+        ((130, 50, 50), (160, 255, 255)),
     ],
     "yellow": [
         ((18, 100, 80), (35, 255, 255)),
@@ -52,9 +69,17 @@ COLOR_RANGES: dict[str, list[tuple]] = {
         # Hot pink / magenta (hue toward purple-red end)
         ((140, 60, 100), (179, 255, 255)),
     ],
-    "skyblue": [
-        # Sky blue — very low saturation floor to catch pale/pastel blues
-        ((85, 15, 100), (120, 200, 255)),
+    "black": [
+        ((0, 0, 0), (179, 255, 60)),
+    ],
+    "white": [
+        ((0, 0, 200), (179, 60, 255)),
+    ],
+    "gray": [
+        ((0, 0, 60), (179, 60, 200)),
+    ],
+    "brown": [
+        ((5, 50, 20), (25, 255, 180)),
     ],
 }
 

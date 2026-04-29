@@ -28,6 +28,23 @@ def reset_voice_loop_state():
     )
 
 
+def reset_track_color_state():
+    main.track_color_task = None
+    main.track_color_state.update(
+        {
+            "running": False,
+            "status": "idle",
+            "color": None,
+            "duration_seconds": None,
+            "started_at": None,
+            "linear": 0.0,
+            "angular": 0.0,
+            "fill_pct": None,
+            "last_error": None,
+        }
+    )
+
+
 def profiled_result(transcript, timings=None):
     return {
         "transcript": transcript,
@@ -65,6 +82,7 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.original_auth_response_data = main.auth_response_data
         main.auth_response_data = {"CHANNEL_NAME": "test-channel"}
         reset_voice_loop_state()
+        reset_track_color_state()
         self.need_start_mission_patch = patch.object(
             main, "need_start_mission", new=AsyncMock(return_value=None)
         )
@@ -74,6 +92,7 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.need_start_mission_patch.stop()
         main.auth_response_data = self.original_auth_response_data
         reset_voice_loop_state()
+        reset_track_color_state()
 
     def test_voice_listen_accepts_valid_duration(self):
         with patch.object(
@@ -213,6 +232,69 @@ class VoiceEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.json()["attempts"], 1)
         self.assertEqual(response.json()["timings"]["hook_request_ms"], 12.0)
         hook_mock.assert_awaited_once_with("turn left", 2600)
+
+    def test_voice_command_normalizes_follow_common_color_card(self):
+        self.assertEqual(
+            main._infer_normalized_voice_command("can you folow black color card"),
+            "follow black card",
+        )
+        self.assertEqual(
+            main._infer_normalized_voice_command("please track the grey card"),
+            "follow gray card",
+        )
+        self.assertEqual(
+            main._infer_normalized_voice_command("follow sky blue card"),
+            "follow skyblue card",
+        )
+
+    def test_openclaw_hook_message_lists_common_tracking_colors(self):
+        message = main._build_openclaw_hook_message(
+            "can you folow black color card",
+            "follow black card",
+        )
+
+        self.assertIn("Normalized Rover Command: follow black card", message)
+        self.assertIn("Supported tracking colors are", message)
+        self.assertIn("black", message)
+        self.assertIn("POST /track-color", message)
+
+    def test_track_color_endpoint_accepts_common_color_alias(self):
+        fake_task = FakeTask()
+
+        def fake_create_task(coro):
+            coro.close()
+            return fake_task
+
+        with patch.object(main.asyncio, "create_task", side_effect=fake_create_task):
+            response = self.client.post("/track-color", json={"color": "grey"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "started")
+        self.assertEqual(response.json()["color"], "gray")
+
+    def test_color_blob_detection_ignores_tiny_false_hits(self):
+        frame = main.np.full((100, 100, 3), 255, dtype=main.np.uint8)
+        frame[10:15, 10:15] = (0, 0, 0)
+
+        self.assertIsNone(main._detect_color_blob(frame, "black"))
+
+    def test_color_blob_detection_accepts_card_sized_hit(self):
+        frame = main.np.full((100, 100, 3), 255, dtype=main.np.uint8)
+        frame[20:60, 20:60] = (0, 0, 0)
+
+        blob = main._detect_color_blob(frame, "black")
+
+        self.assertIsNotNone(blob)
+        self.assertGreater(blob[1], main._TRACK_COLOR_MIN_DETECT_FILL)
+
+    def test_color_blob_detection_accepts_distant_card_hit(self):
+        frame = main.np.full((480, 640, 3), 255, dtype=main.np.uint8)
+        frame[220:245, 300:325] = (0, 0, 0)
+
+        blob = main._detect_color_blob(frame, "black")
+
+        self.assertIsNotNone(blob)
+        self.assertGreater(blob[1], main._TRACK_COLOR_MIN_DETECT_FILL)
 
     def test_voice_command_retries_until_transcript_detected(self):
         record_mock = AsyncMock(

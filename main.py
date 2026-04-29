@@ -186,11 +186,38 @@ _rescue_gps_stable_since: Optional[float] = None
 # ---------------------------------------------------------------------------
 _TRACK_COLOR_RANGES: Dict[str, List[tuple]] = {
     "red":    [((0, 120, 70), (10, 255, 255)), ((160, 120, 70), (179, 255, 255))],
+    "orange": [((5, 100, 80), (18, 255, 255))],
     "green":  [((35, 80, 50), (85, 255, 255))],
+    "cyan":   [((80, 80, 50), (95, 255, 255))],
+    "teal":   [((75, 60, 50), (95, 255, 220))],
     "blue":   [((90, 80, 50), (130, 255, 255))],
+    "skyblue": [((85, 15, 100), (120, 200, 255))],
+    "purple": [((130, 50, 50), (160, 255, 255))],
     "yellow": [((18, 100, 80), (35, 255, 255))],
     "pink":   [((0, 40, 150), (10, 150, 255)), ((140, 60, 100), (179, 255, 255))],
+    "black":  [((0, 0, 0), (179, 255, 60))],
+    "white":  [((0, 0, 200), (179, 60, 255))],
+    "gray":   [((0, 0, 60), (179, 60, 200))],
+    "brown":  [((5, 50, 20), (25, 255, 180))],
 }
+
+_TRACK_COLOR_ALIASES: Dict[str, str] = {
+    "grey": "gray",
+    "violet": "purple",
+    "magenta": "pink",
+    "hotpink": "pink",
+    "hot pink": "pink",
+    "lightblue": "skyblue",
+    "light blue": "skyblue",
+    "sky blue": "skyblue",
+    "aqua": "cyan",
+    "turquoise": "cyan",
+}
+_TRACK_COLOR_CANONICAL_NAMES = ", ".join(_TRACK_COLOR_RANGES.keys())
+_TRACK_COLOR_ALIAS_NAMES = ", ".join(_TRACK_COLOR_ALIASES.keys())
+
+_TRACK_COLOR_MIN_BLOB_AREA = 500
+_TRACK_COLOR_MIN_DETECT_FILL = 0.001
 
 track_color_task: Optional[asyncio.Task] = None
 track_color_lock = asyncio.Lock()
@@ -1143,13 +1170,21 @@ def _infer_normalized_voice_command(transcript: str) -> Optional[str]:
     if has_right and not has_left and (turn_cue or degree_cue):
         degrees = _extract_turn_degrees(normalized_text)
         return f"turn right {degrees} degrees"
+    if re.search(r"\bstop\b|\bhalt\b", normalized_text):
+        return "stop"
+    follow_cue = re.search(
+        r"\bfollow\b|\bfolow\b|\bfollowing\b|\btrack\b|\btracking\b",
+        normalized_text,
+    ) is not None
+    if follow_cue:
+        color = _extract_track_color_from_text(normalized_text)
+        if color:
+            return f"follow {color} card"
     if re.search(r"\bmove\b|\bgo\b|\bdrive\b", normalized_text):
         if re.search(r"\bforward\b|\bahead\b", normalized_text):
             return "move forward"
         if re.search(r"\bback\b|\bbackward\b|\breverse\b", normalized_text):
             return "move backward"
-    if re.search(r"\bstop\b|\bhalt\b", normalized_text):
-        return "stop"
 
     return None
 
@@ -1240,9 +1275,18 @@ def _build_openclaw_hook_message(
 ) -> str:
     normalized_section = ""
     if normalized_command:
+        tracking_section = ""
+        if normalized_command.startswith("follow ") and normalized_command.endswith(" card"):
+            tracking_section = (
+                "Color Tracking Rule: Supported tracking colors are "
+                f"{_TRACK_COLOR_CANONICAL_NAMES}. Accepted aliases are "
+                f"{_TRACK_COLOR_ALIAS_NAMES}. For a follow-color command, call "
+                "POST /track-color with the normalized color.\n"
+            )
         normalized_section = (
             "EXECUTION RULE: If Normalized Rover Command is present, execute it exactly once.\n"
             f"Normalized Rover Command: {normalized_command}\n"
+            f"{tracking_section}"
         )
 
     return (
@@ -1453,6 +1497,38 @@ def _track_color_snapshot() -> dict:
     return snapshot
 
 
+def _normalize_track_color_name(color_name: str) -> str:
+    name = str(color_name or "").lower()
+    name = re.sub(r"[^a-z0-9\s]", " ", name)
+    name = " ".join(name.split())
+    compact_name = name.replace(" ", "")
+    return (
+        _TRACK_COLOR_ALIASES.get(name)
+        or _TRACK_COLOR_ALIASES.get(compact_name)
+        or (name if name in _TRACK_COLOR_RANGES else compact_name)
+    )
+
+
+def _track_color_choices() -> str:
+    choices = sorted(set(_TRACK_COLOR_RANGES) | set(_TRACK_COLOR_ALIASES))
+    return ", ".join(choices)
+
+
+def _extract_track_color_from_text(normalized_text: str) -> Optional[str]:
+    color_words = sorted(
+        set(_TRACK_COLOR_RANGES) | set(_TRACK_COLOR_ALIASES),
+        key=len,
+        reverse=True,
+    )
+    for color_word in color_words:
+        pattern = r"\b" + re.escape(color_word).replace(r"\ ", r"\s+") + r"\b"
+        if re.search(pattern, normalized_text):
+            color = _normalize_track_color_name(color_word)
+            if color in _TRACK_COLOR_RANGES:
+                return color
+    return None
+
+
 def _detect_color_blob(frame_bgr: np.ndarray, color_name: str) -> Optional[tuple]:
     """Sync: detect the largest blob of color_name in frame_bgr.
     Returns (cx_norm, fill_ratio) where cx_norm is in [-1, 1] relative to
@@ -1469,15 +1545,18 @@ def _detect_color_blob(frame_bgr: np.ndarray, color_name: str) -> Optional[tuple
         return None
     largest = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest)
-    if area < 500:
+    h, w = frame_bgr.shape[:2]
+    frame_area = h * w
+    if area < _TRACK_COLOR_MIN_BLOB_AREA:
+        return None
+    if frame_area > 0 and (area / frame_area) < _TRACK_COLOR_MIN_DETECT_FILL:
         return None
     M = cv2.moments(largest)
     if M["m00"] == 0:
         return None
     cx = int(M["m10"] / M["m00"])
-    h, w = frame_bgr.shape[:2]
     cx_norm = (cx - w / 2) / (w / 2)   # [-1, 1]
-    fill_ratio = area / (h * w)
+    fill_ratio = area / frame_area
     return cx_norm, fill_ratio
 
 
@@ -1494,6 +1573,8 @@ async def _run_track_color_loop(
     track_color_state["status"] = "searching"
     loop = asyncio.get_event_loop()
     deadline = loop.time() + duration_seconds
+    search_direction = 1.0 if search_angular >= 0 else -1.0
+    search_turn = search_direction * abs(search_angular)
 
     try:
         while loop.time() < deadline:
@@ -1520,7 +1601,7 @@ async def _run_track_color_loop(
 
             if blob is None:
                 state = "searching"
-                linear, angular = 0.0, search_angular
+                linear, angular = 0.0, search_turn
                 fill_pct = 0.0
             else:
                 cx_norm, fill_ratio = blob
@@ -1532,7 +1613,8 @@ async def _run_track_color_loop(
                     state = "tracking"
                     # Dead zone: ignore tiny offsets to reduce jitter
                     effective_cx = cx_norm if abs(cx_norm) >= 0.05 else 0.0
-                    angular = max(-1.0, min(1.0, kp_angular * effective_cx))
+                    # Front camera is mirrored, so negate the offset to turn toward the card.
+                    angular = max(-1.0, min(1.0, -kp_angular * effective_cx))
                     # Suppress forward motion when card is off-center so the rover
                     # turns to face the target before driving toward it.
                     center_factor = max(0.0, min(1.0, 1.0 - abs(cx_norm) / 0.4))
@@ -4402,7 +4484,8 @@ async def start_track_color(request: Request):
     """Start a background visual-servo loop that follows a colored object.
 
     Body params (all optional):
-      color           – red | green | blue | yellow | pink  (default: red)
+      color           – common color name, e.g. red | green | blue | yellow | pink | black
+                        (default: red)
       duration_seconds – how long to track before auto-stopping (default: 120)
       speed           – max forward speed 0-1 (default: 0.35)
       kp_angular      – proportional gain for heading correction (default: 0.6)
@@ -4415,11 +4498,12 @@ async def start_track_color(request: Request):
         await auth()
 
     body = await _parse_json_body(request)
-    color = str(body.get("color", "red")).lower()
+    requested_color = str(body.get("color", "red"))
+    color = _normalize_track_color_name(requested_color)
     if color not in _TRACK_COLOR_RANGES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown color '{color}'. Choose from: {', '.join(_TRACK_COLOR_RANGES)}",
+            detail=f"Unknown color '{requested_color}'. Choose from: {_track_color_choices()}",
         )
     duration_seconds = int(body.get("duration_seconds", 120))
     speed = float(body.get("speed", 0.35))
