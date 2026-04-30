@@ -40,6 +40,7 @@ def reset_track_color_state():
             "linear": 0.0,
             "angular": 0.0,
             "fill_pct": None,
+            "camera": None,
             "last_error": None,
         }
     )
@@ -289,7 +290,7 @@ class VoiceEndpointsTestCase(unittest.TestCase):
 
     def test_color_blob_detection_accepts_distant_card_hit(self):
         frame = main.np.full((480, 640, 3), 255, dtype=main.np.uint8)
-        frame[220:245, 300:325] = (0, 0, 0)
+        frame[220:234, 300:314] = (0, 0, 0)
 
         blob = main._detect_color_blob(frame, "black")
 

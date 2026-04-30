@@ -217,8 +217,11 @@ _TRACK_COLOR_ALIASES: Dict[str, str] = {
 _TRACK_COLOR_CANONICAL_NAMES = ", ".join(_TRACK_COLOR_RANGES.keys())
 _TRACK_COLOR_ALIAS_NAMES = ", ".join(_TRACK_COLOR_ALIASES.keys())
 
-_TRACK_COLOR_MIN_BLOB_AREA = 500
-_TRACK_COLOR_MIN_DETECT_FILL = 0.001
+_TRACK_COLOR_MIN_BLOB_AREA = 120
+_TRACK_COLOR_MIN_DETECT_FILL = 0.00025
+_TRACK_COLOR_MASK_KERNEL_SIZE = 3
+_TRACK_COLOR_MIN_EXTENT = 0.45        # area / bbox area — filters thin streaks
+_TRACK_COLOR_MAX_ASPECT_RATIO = 5.0   # bbox max/min — rejects long thin shapes
 
 track_color_task: Optional[asyncio.Task] = None
 track_color_lock = asyncio.Lock()
@@ -231,6 +234,7 @@ track_color_state: Dict[str, Any] = {
     "linear": 0.0,
     "angular": 0.0,
     "fill_pct": None,
+    "camera": None,
     "last_error": None,
 }
 
@@ -1549,27 +1553,50 @@ def _detect_color_blob(frame_bgr: np.ndarray, color_name: str) -> Optional[tuple
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lower, upper in _TRACK_COLOR_RANGES.get(color_name, []):
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, np.array(lower), np.array(upper)))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (_TRACK_COLOR_MASK_KERNEL_SIZE, _TRACK_COLOR_MASK_KERNEL_SIZE),
+    )
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
     h, w = frame_bgr.shape[:2]
     frame_area = h * w
-    if area < _TRACK_COLOR_MIN_BLOB_AREA:
+    # Try the top 5 largest contours, return the first one that looks card-shaped.
+    # Shape gating (extent + aspect ratio) lets us detect distant cards (small fill)
+    # while rejecting thin streaks of color from background noise.
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
+        area = cv2.contourArea(cnt)
+        if area < _TRACK_COLOR_MIN_BLOB_AREA:
+            return None  # all remaining are smaller — give up
+        if frame_area > 0 and (area / frame_area) < _TRACK_COLOR_MIN_DETECT_FILL:
+            return None
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        if bw == 0 or bh == 0:
+            continue
+        extent = area / (bw * bh)
+        aspect = max(bw, bh) / min(bw, bh)
+        if extent < _TRACK_COLOR_MIN_EXTENT or aspect > _TRACK_COLOR_MAX_ASPECT_RATIO:
+            continue
+        M = cv2.moments(cnt)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cx_norm = (cx - w / 2) / (w / 2)   # [-1, 1]
+        fill_ratio = area / frame_area
+        return cx_norm, fill_ratio
+    return None
+
+
+def _decode_frame_b64(frame_b64: str) -> Optional[np.ndarray]:
+    try:
+        image_bytes = base64.b64decode(frame_b64)
+        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+        return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    except Exception:
         return None
-    if frame_area > 0 and (area / frame_area) < _TRACK_COLOR_MIN_DETECT_FILL:
-        return None
-    M = cv2.moments(largest)
-    if M["m00"] == 0:
-        return None
-    cx = int(M["m10"] / M["m00"])
-    cx_norm = (cx - w / 2) / (w / 2)   # [-1, 1]
-    fill_ratio = area / frame_area
-    return cx_norm, fill_ratio
 
 
 async def _run_track_color_loop(
@@ -1587,50 +1614,98 @@ async def _run_track_color_loop(
     deadline = loop.time() + duration_seconds
     search_direction = 1.0 if search_angular >= 0 else -1.0
     search_turn = search_direction * abs(search_angular)
+    last_seen_angular = search_turn
+    last_seen_linear = 0.0
+    lost_ticks = 0
+    use_rear_camera = auth_response_data.get("BOT_TYPE") == "zero"
 
     try:
         while loop.time() < deadline:
-            # Fetch front frame
-            try:
-                frame_b64 = await get_frame_base64("front")
-            except Exception as exc:
-                logger.warning("track_color: frame unavailable: %s", exc)
+            front_task = asyncio.create_task(get_frame_base64("front"))
+            if use_rear_camera:
+                rear_task = asyncio.create_task(get_frame_base64("rear"))
+                front_result, rear_result = await asyncio.gather(
+                    front_task,
+                    rear_task,
+                    return_exceptions=True,
+                )
+            else:
+                try:
+                    front_result = await front_task
+                except Exception as exc:
+                    front_result = exc
+                rear_result = None
+
+            front_frame = (
+                _decode_frame_b64(front_result)
+                if isinstance(front_result, str)
+                else None
+            )
+            rear_frame = (
+                _decode_frame_b64(rear_result)
+                if isinstance(rear_result, str)
+                else None
+            )
+
+            if front_frame is None and rear_frame is None:
+                if isinstance(front_result, Exception):
+                    logger.warning("track_color: front frame unavailable: %s", front_result)
+                if isinstance(rear_result, Exception):
+                    logger.debug("track_color: rear frame unavailable: %s", rear_result)
                 await asyncio.sleep(0.2)
                 continue
 
-            # Decode frame
-            try:
-                image_bytes = base64.b64decode(frame_b64)
-                image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-                frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-            except Exception as exc:
-                logger.warning("track_color: decode error: %s", exc)
-                await asyncio.sleep(0.2)
-                continue
+            front_blob = (
+                await loop.run_in_executor(None, _detect_color_blob, front_frame, color)
+                if front_frame is not None
+                else None
+            )
+            rear_blob = (
+                await loop.run_in_executor(None, _detect_color_blob, rear_frame, color)
+                if rear_frame is not None
+                else None
+            )
 
-            # Detect blob (CPU-bound — run in thread)
-            blob = await loop.run_in_executor(None, _detect_color_blob, frame, color)
+            active_camera = "front"
+            blob = None
+            if front_blob is not None:
+                active_camera = "front"
+                blob = front_blob
+            elif rear_blob is not None:
+                active_camera = "rear"
+                blob = rear_blob
 
             if blob is None:
-                state = "searching"
-                linear, angular = 0.0, search_turn
+                lost_ticks += 1
+                state = "last_seen" if lost_ticks <= 10 else "searching"
+                linear = last_seen_linear * 0.5 if state == "last_seen" else 0.0
+                angular = last_seen_angular if state == "last_seen" else search_turn
                 fill_pct = 0.0
             else:
+                lost_ticks = 0
                 cx_norm, fill_ratio = blob
                 fill_pct = fill_ratio * 100
-                if fill_ratio >= stop_fill:
+                if active_camera == "front" and fill_ratio >= stop_fill:
                     state = "arrived"
                     linear, angular = 0.0, 0.0
                 else:
-                    state = "tracking"
+                    state = "tracking" if active_camera == "front" else "tracking_rear"
                     # Dead zone: ignore tiny offsets to reduce jitter
                     effective_cx = cx_norm if abs(cx_norm) >= 0.05 else 0.0
-                    # Front camera is mirrored, so negate the offset to turn toward the card.
-                    angular = max(-1.0, min(1.0, -kp_angular * effective_cx))
-                    # Suppress forward motion when card is off-center so the rover
-                    # turns to face the target before driving toward it.
-                    center_factor = max(0.0, min(1.0, 1.0 - abs(cx_norm) / 0.4))
-                    linear = max(0.0, min(speed, speed * (1.0 - fill_ratio / stop_fill) * center_factor))
+                    if active_camera == "front":
+                        # Front camera is mirrored, so negate the offset to turn toward the card.
+                        angular = max(-1.0, min(1.0, -kp_angular * effective_cx))
+                        # Suppress forward motion when card is off-center so the rover
+                        # turns to face the target before driving toward it.
+                        center_factor = max(0.0, min(1.0, 1.0 - abs(cx_norm) / 0.7))
+                        linear = max(0.0, min(speed, speed * (1.0 - fill_ratio / stop_fill) * center_factor))
+                    else:
+                        angular = max(-1.0, min(1.0, kp_angular * effective_cx))
+                        linear = 0.0
+
+                    if abs(angular) >= 0.05:
+                        last_seen_angular = angular
+                    last_seen_linear = linear
 
             # Send control command
             try:
@@ -1643,6 +1718,7 @@ async def _run_track_color_loop(
                 "linear": round(linear, 3),
                 "angular": round(angular, 3),
                 "fill_pct": round(fill_pct, 1),
+                "camera": active_camera if blob is not None else None,
                 "last_error": None,
             })
 
@@ -5431,6 +5507,7 @@ async def start_track_color(request: Request):
             "linear": 0.0,
             "angular": 0.0,
             "fill_pct": None,
+            "camera": None,
             "last_error": None,
         })
         track_color_task = asyncio.create_task(

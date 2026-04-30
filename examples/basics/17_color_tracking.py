@@ -89,8 +89,10 @@ COLOR_RANGES: dict[str, list[tuple]] = {
 KP_ANGULAR = 0.8         # proportional gain: angular correction per unit offset
 MAX_FORWARD = 0.45       # max linear speed (rover units, 0–1)
 STOP_FILL = 0.15         # stop when blob occupies this fraction of frame area
-MIN_BLOB_AREA = 500      # px² — hard noise floor
-MIN_DETECT_FILL = 0.015  # blob must be ≥1.5% of frame to count as a real card
+MIN_BLOB_AREA = 200      # px² — absolute minimum (allows detection from far away)
+MIN_DETECT_FILL = 0.002  # blob must be ≥0.2% of frame (catches distant cards)
+MIN_EXTENT = 0.45        # area / bbox area — filters out thin streaks & noise
+MAX_ASPECT_RATIO = 5.0   # bbox max/min side — rejects long thin shapes
 SEARCH_ANGULAR = 0.35    # rotation speed when no target is visible
 LOOP_HZ = 10             # control loop frequency
 
@@ -168,28 +170,42 @@ def build_color_mask(hsv_frame: np.ndarray, color_name: str) -> np.ndarray:
 
 
 def find_largest_blob(mask: np.ndarray, frame_area: int) -> tuple[int, int, float] | None:
-    """Find the largest blob in a binary mask.
+    """Find the largest card-shaped blob in a binary mask.
 
-    Returns (cx, cy, area) in pixels, or None if blob is too small to be a card.
-    Two filters:
-      - MIN_BLOB_AREA px²: hard noise floor
-      - MIN_DETECT_FILL: blob must fill at least 1.5% of the frame
+    Iterates through candidate contours largest-first and returns the first one
+    that passes shape filters: solid (extent ≥ MIN_EXTENT) and not too
+    elongated (aspect ratio ≤ MAX_ASPECT_RATIO). This rejects thin streaks
+    of color from background noise while still allowing distant cards which
+    appear small in the frame.
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
-    if area < MIN_BLOB_AREA:
-        return None
-    if frame_area > 0 and (area / frame_area) < MIN_DETECT_FILL:
-        return None
-    M = cv2.moments(largest)
-    if M["m00"] == 0:
-        return None
-    cx = int(M["m10"] / M["m00"])
-    cy = int(M["m01"] / M["m00"])
-    return cx, cy, area
+    # Sort largest first, take top 5 candidates
+    candidates = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+
+    for cnt in candidates:
+        area = cv2.contourArea(cnt)
+        if area < MIN_BLOB_AREA:
+            return None  # all remaining are smaller — give up
+        if frame_area > 0 and (area / frame_area) < MIN_DETECT_FILL:
+            return None
+        # Shape gate: must be solid & roughly card-shaped
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        if bw == 0 or bh == 0:
+            continue
+        extent = area / (bw * bh)
+        aspect = max(bw, bh) / min(bw, bh)
+        if extent < MIN_EXTENT or aspect > MAX_ASPECT_RATIO:
+            continue  # noise or streak — try next candidate
+        # Passed all filters
+        M = cv2.moments(cnt)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        return cx, cy, area
+    return None
 
 
 def draw_overlay(
