@@ -1,6 +1,7 @@
 import base64
 import binascii
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pyngrok import ngrok as _ngrok
 
@@ -255,7 +256,18 @@ autonav_loop_state: Dict[str, Any] = {
     # can compare current frame colors against a learned floor/wall baseline.
     "floor_rgb": None,       # rolling mean of bottom-half RGB
     "wall_rgb": None,        # rolling mean of top-half RGB
+    "initial_floor_rgb": None,  # first accepted floor baseline; prevents drift
+    "initial_wall_rgb": None,   # first accepted wall baseline; prevents drift
     "color_sample_count": 0,
+    "turn_scan": {
+        "anchor_heading": None,
+        "direction": None,
+        "step_index": 0,
+        "left_checked": False,
+        "right_checked": False,
+        "mode": "idle",
+        "persistent_wall_turn": None,
+    },
 }
 
 
@@ -1924,10 +1936,10 @@ def _frame_path_crop_base64(frame_b64: str) -> Optional[str]:
         w, h = img.size
         crop = img.crop(
             (
-                int(w * 0.18),
-                int(h * 0.48),
-                int(w * 0.82),
-                int(h * 0.95),
+                int(w * 0.30),
+                int(h * 0.62),
+                int(w * 0.70),
+                int(h * 0.98),
             )
         )
         buf = io.BytesIO()
@@ -1965,11 +1977,31 @@ def _frame_path_profile(
             gray = region.mean(axis=2)
             return float(gray.std())
 
+        def _gray_region(y0: float, y1: float, x0: float, x1: float) -> np.ndarray:
+            region = arr[int(h * y0) : int(h * y1), int(w * x0) : int(w * x1)]
+            return region.mean(axis=2)
+
+        def _edge_density(gray: np.ndarray) -> float:
+            if gray.size == 0:
+                return 0.0
+            gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
+            edges = cv2.Canny(gray_u8, 50, 150)
+            return float(np.count_nonzero(edges) / edges.size)
+
         left_rgb = _region_rgb(0.58, 0.92, 0.02, 0.30)
         center_rgb = _region_rgb(0.58, 0.92, 0.35, 0.65)
         right_rgb = _region_rgb(0.58, 0.92, 0.70, 0.98)
         left_tall_std = _gray_std(0.20, 0.95, 0.00, 0.28)
         right_tall_std = _gray_std(0.20, 0.95, 0.72, 0.99)
+        lane_gray = _gray_region(0.62, 0.98, 0.30, 0.70)
+        lane_h = lane_gray.shape[0]
+        lane_std = float(lane_gray.std())
+        lane_tb_delta = (
+            abs(float(lane_gray[: lane_h // 2].mean()) - float(lane_gray[lane_h // 2 :].mean()))
+            if lane_h >= 2
+            else 0.0
+        )
+        lane_edge_density = _edge_density(lane_gray)
 
         left_floor = _rgb_distance(left_rgb, floor_rgb)
         left_wall = _rgb_distance(left_rgb, wall_rgb)
@@ -2031,6 +2063,9 @@ def _frame_path_profile(
             "center_wall_dist": round(center_wall, 1) if center_wall is not None else None,
             "right_floor_dist": round(right_floor, 1) if right_floor is not None else None,
             "right_wall_dist": round(right_wall, 1) if right_wall is not None else None,
+            "lane_std": round(lane_std, 1),
+            "lane_tb_delta": round(lane_tb_delta, 1),
+            "lane_edge_density": round(lane_edge_density, 4),
         }
     except Exception as exc:
         logger.debug("Frame path profile failed: %s", exc)
@@ -2047,7 +2082,162 @@ def _format_path_profile_summary(path_profile: Optional[Dict[str, Any]]) -> Opti
         f"open_side_turn={path_profile.get('open_side_turn')}; "
         f"center(df={path_profile.get('center_floor_dist')}, dw={path_profile.get('center_wall_dist')}); "
         f"left_std={path_profile.get('left_tall_std')}; "
-        f"right_std={path_profile.get('right_tall_std')}"
+        f"right_std={path_profile.get('right_tall_std')}; "
+        f"lane_flat={_is_flat_lane_surface(path_profile)}; "
+        f"textured_obstacle={_is_textured_lane_obstruction(path_profile)}; "
+        f"smooth_close_surface={_is_smooth_close_surface_obstruction(path_profile, None)}"
+    )
+
+
+def _is_flat_lane_surface(path_profile: Optional[Dict[str, Any]]) -> bool:
+    """A repeated flat lane crop usually means a close surface, even if color looks floor-like."""
+    if not path_profile:
+        return False
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    if lane_std is None or lane_tb_delta is None or lane_edge_density is None:
+        return False
+    return (
+        float(lane_std) <= 8.5
+        and float(lane_tb_delta) <= 7.0
+        and float(lane_edge_density) <= 0.003
+    )
+
+
+def _is_smooth_diagonal_lane_obstruction(path_profile: Optional[Dict[str, Any]]) -> bool:
+    """A smooth diagonal crop repeating after forward moves is usually a nearby box/wall face."""
+    if not path_profile or path_profile.get("open_side_turn") not in ("turn_left", "turn_right"):
+        return False
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    if lane_std is None or lane_tb_delta is None or lane_edge_density is None:
+        return False
+    return (
+        float(lane_std) >= 25.0
+        and float(lane_tb_delta) >= 15.0
+        and float(lane_edge_density) <= 0.003
+    )
+
+
+def _is_textured_lane_obstruction(path_profile: Optional[Dict[str, Any]]) -> bool:
+    """Printed boxes/signs can look floor-colored, but repeat as textured close surfaces."""
+    if not path_profile or path_profile.get("open_side_turn") not in ("turn_left", "turn_right"):
+        return False
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    side_std_gap = path_profile.get("side_std_gap")
+    if any(
+        value is None
+        for value in (
+            lane_std,
+            lane_tb_delta,
+            lane_edge_density,
+            center_floor,
+            center_wall,
+            side_std_gap,
+        )
+    ):
+        return False
+    return (
+        float(lane_std) >= 24.0
+        and float(lane_tb_delta) >= 12.0
+        and float(lane_edge_density) >= 0.02
+        and float(center_floor) <= 24.0
+        and float(center_wall) >= 45.0
+        and abs(float(side_std_gap)) >= 8.0
+    )
+
+
+def _is_smooth_close_surface_obstruction(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+) -> bool:
+    """A smooth box/wall face can look empty, but it has no floor texture or perspective."""
+    if not path_profile:
+        return False
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    side_std_gap = path_profile.get("side_std_gap")
+    if any(
+        value is None
+        for value in (
+            lane_std,
+            lane_tb_delta,
+            lane_edge_density,
+            center_floor,
+            center_wall,
+            side_std_gap,
+        )
+    ):
+        return False
+    clear_not_floor_close_surface = (
+        float(lane_std) <= 12.0
+        and float(lane_tb_delta) <= 7.0
+        and float(lane_edge_density) <= 0.004
+        and float(center_floor) >= 25.0
+        and float(center_wall) >= 45.0
+        and (bot_dist_to_floor is None or float(bot_dist_to_floor) >= 25.0)
+        and (
+            path_profile.get("open_side_turn") in ("turn_left", "turn_right")
+            or abs(float(side_std_gap)) >= 8.0
+        )
+    )
+    if clear_not_floor_close_surface:
+        return True
+
+    flat_floor_colored_surface = (
+        _is_flat_lane_surface(path_profile)
+        and float(center_floor) >= 16.0
+        and float(center_wall) >= 55.0
+        and (bot_dist_to_floor is None or float(bot_dist_to_floor) >= 18.0)
+    )
+    return flat_floor_colored_surface
+
+
+def _is_dark_uncertain_lane(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+) -> bool:
+    """Treat dark, low-detail lanes that match neither floor nor wall as unsafe to drive into."""
+    if not path_profile:
+        return False
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    if any(
+        value is None
+        for value in (
+            center_floor,
+            center_wall,
+            bot_dist_to_floor,
+            bot_dist_to_wall,
+            lane_std,
+            lane_tb_delta,
+            lane_edge_density,
+        )
+    ):
+        return False
+    return (
+        float(center_floor) >= 60.0
+        and float(center_wall) >= 80.0
+        and float(bot_dist_to_floor) >= 60.0
+        and float(bot_dist_to_wall) >= 80.0
+        and float(lane_std) <= 14.0
+        and float(lane_tb_delta) <= 10.0
+        and float(lane_edge_density) <= 0.004
+        and (uniformity is None or float(uniformity) <= 25.0)
     )
 
 
@@ -2110,9 +2300,55 @@ def _choose_recovery_turn(
     return "turn_right"
 
 
+def _wrap_heading_360(angle: float) -> float:
+    while angle >= 360.0:
+        angle -= 360.0
+    while angle < 0.0:
+        angle += 360.0
+    return angle
+
+
+def _shortest_heading_diff(target: float, current: float) -> float:
+    delta = target - current
+    while delta >= 180.0:
+        delta -= 360.0
+    while delta < -180.0:
+        delta += 360.0
+    return delta
+
+
+def _new_turn_scan_state() -> Dict[str, Any]:
+    return {
+        "anchor_heading": None,
+        "direction": None,
+        "step_index": 0,
+        "left_checked": False,
+        "right_checked": False,
+        "mode": "idle",
+        "persistent_wall_turn": None,
+    }
+
+
+def _reset_turn_scan_state(scan_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    fresh = _new_turn_scan_state()
+    if scan_state is None:
+        return fresh
+    scan_state.clear()
+    scan_state.update(fresh)
+    return scan_state
+
+
+def _opposite_turn_direction(action: Optional[str]) -> Optional[str]:
+    if action == "turn_left":
+        return "turn_right"
+    if action == "turn_right":
+        return "turn_left"
+    return None
+
+
 def _blocked_turn_step_degrees(step_index: int, max_turn_deg: float) -> float:
-    """Blocked-lane search turns sweep 45 -> 90 -> 135 -> 180 degrees."""
-    staircase = (45.0, 90.0, 135.0, 180.0)
+    """Blocked-lane search turns sweep 45 -> 90 degrees per side."""
+    staircase = (45.0, 90.0)
     bounded_index = max(1, int(step_index))
     target_turn = staircase[min(bounded_index - 1, len(staircase) - 1)]
     return round(min(max_turn_deg, target_turn), 1)
@@ -2124,13 +2360,13 @@ def _apply_repeat_turn_escalation(
     last_turn_direction: Optional[str],
     consecutive_turns: int = 0,
 ) -> Dict[str, Any]:
-    """Apply the blocked-turn staircase: 45, then 90, then 135, then 180."""
+    """Apply the bounded blocked-turn staircase: 45, then 90."""
     action = decision.get("action")
     if action not in ("turn_left", "turn_right"):
         return decision
 
     prior_same_direction_turns = consecutive_turns if last_turn_direction == action else 0
-    turn_step = min(prior_same_direction_turns + 1, 4)
+    turn_step = min(prior_same_direction_turns + 1, 2)
     current_turn = round(float(decision.get("turn_degrees") or 0.0), 1)
     staged_turn = _blocked_turn_step_degrees(turn_step, max_turn_deg)
     if abs(staged_turn - current_turn) <= 1e-6:
@@ -2141,7 +2377,7 @@ def _apply_repeat_turn_escalation(
         **decision,
         "turn_degrees": staged_turn,
         "reason": (
-            f"{decision.get('reason', '')} [turn-search-staircase: step {turn_step}/4, "
+            f"{decision.get('reason', '')} [turn-search-staircase: step {turn_step}/2, "
             f"so I turn {direction_text} {staged_turn:.0f} degrees.]"
         )[:240],
         "comment_front": (
@@ -2151,6 +2387,134 @@ def _apply_repeat_turn_escalation(
             f"I will turn {direction_text} {staged_turn:.0f} degrees, then check whether the center lane has opened."
         )[:240],
     }
+
+
+def _apply_bounded_turn_scan_policy(
+    decision: Dict[str, Any],
+    current_heading: Optional[float],
+    scan_state: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+    path_profile: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Keep blocked-lane search within 45° then 90° per side, anchored to the first heading."""
+    action = decision.get("action")
+    if action not in ("turn_left", "turn_right"):
+        return decision, _reset_turn_scan_state(scan_state)
+
+    state = dict(scan_state or _new_turn_scan_state())
+    if current_heading is None:
+        staged = _apply_repeat_turn_escalation(
+            decision=decision,
+            max_turn_deg=min(max_turn_deg, 90.0),
+            last_turn_direction=state.get("direction"),
+            consecutive_turns=max(int(state.get("step_index") or 0) - 1, 0),
+        )
+        state["direction"] = staged.get("action")
+        state["step_index"] = min(max(int(state.get("step_index") or 0) + 1, 1), 2)
+        state["mode"] = "search"
+        return staged, state
+
+    current_heading = float(current_heading)
+    anchor_heading = state.get("anchor_heading")
+    current_direction = state.get("direction")
+    step_index = int(state.get("step_index") or 0)
+    left_checked = bool(state.get("left_checked"))
+    right_checked = bool(state.get("right_checked"))
+    mode = state.get("mode") or "idle"
+
+    if mode == "stuck_recovery":
+        anchor_heading = current_heading
+        current_direction = action
+        step_index = 1
+        left_checked = False
+        right_checked = False
+        mode = "search"
+    elif anchor_heading is None or current_direction not in ("turn_left", "turn_right") or step_index <= 0:
+        anchor_heading = current_heading
+        current_direction = action
+        step_index = 1
+        left_checked = False
+        right_checked = False
+        mode = "search"
+    elif step_index < 2:
+        current_direction = current_direction
+        step_index += 1
+        mode = "search"
+    else:
+        if current_direction == "turn_left":
+            left_checked = True
+        else:
+            right_checked = True
+
+        opposite_direction = _opposite_turn_direction(current_direction)
+        opposite_checked = (
+            left_checked if opposite_direction == "turn_left" else right_checked
+        )
+
+        if opposite_direction in ("turn_left", "turn_right") and not opposite_checked:
+            current_direction = opposite_direction
+            step_index = 1
+            mode = "search"
+        else:
+            recovery_direction = _choose_recovery_turn(
+                path_profile=path_profile,
+                last_turn_direction=current_direction,
+                preferred_turn=action,
+            )
+            anchor_heading = current_heading
+            current_direction = recovery_direction
+            step_index = 2
+            left_checked = False
+            right_checked = False
+            mode = "stuck_recovery"
+
+    target_offset = _blocked_turn_step_degrees(step_index, min(max_turn_deg, 90.0))
+    signed_offset = target_offset if current_direction == "turn_left" else -target_offset
+    target_heading = _wrap_heading_360(anchor_heading + signed_offset)
+    relative_delta = _shortest_heading_diff(target_heading, current_heading)
+
+    if abs(relative_delta) < 1.0:
+        relative_delta = 1.0 if current_direction == "turn_left" else -1.0
+
+    staged_action = "turn_left" if relative_delta > 0 else "turn_right"
+    staged_turn = round(min(max_turn_deg, abs(relative_delta)), 1)
+    direction_text = "left" if staged_action == "turn_left" else "right"
+    mode_tag = "stuck-recovery" if mode == "stuck_recovery" else "turn-search-scan"
+    target_text = (
+        f"target {target_offset:.0f}° from scan anchor"
+        if mode != "stuck_recovery"
+        else "restart search from a new heading"
+    )
+
+    state.update(
+        {
+            "anchor_heading": round(anchor_heading, 1),
+            "direction": current_direction,
+            "step_index": step_index,
+            "left_checked": left_checked,
+            "right_checked": right_checked,
+            "mode": mode,
+        }
+    )
+
+    return (
+        {
+            **decision,
+            "action": staged_action,
+            "turn_degrees": staged_turn,
+            "reason": (
+                f"{decision.get('reason', '')} [{mode_tag}: step {step_index}/2, "
+                f"{target_text}, so I turn {direction_text} {staged_turn:.0f} degrees.]"
+            )[:240],
+            "comment_front": (
+                f"I am scanning for a usable lane with bounded turns, so I turn {direction_text} {staged_turn:.0f} degrees."
+            )[:240],
+            "plan_of_action": (
+                f"I will turn {direction_text} {staged_turn:.0f} degrees, then re-check whether the center lane has opened."
+            )[:240],
+        },
+        state,
+    )
 
 
 def _apply_turn_commitment_override(
@@ -2318,6 +2682,72 @@ def _build_local_forward_decision(
     }
 
 
+def _build_cautious_forward_probe_decision(
+    max_linear: float,
+    max_forward_ms: int,
+    reason_text: str,
+) -> Dict[str, Any]:
+    """Short low-speed probe when floor is visible but a wall/corner is nearby."""
+    return {
+        "action": "forward",
+        "linear_speed": round(min(max_linear, 0.15), 3),
+        "turn_degrees": 0.0,
+        "duration_ms": min(max_forward_ms, 400),
+        "confidence": 0.8,
+        "reason": reason_text[:240],
+        "comment_front": "I see a small floor runway before the wall, so I probe forward cautiously."[:240],
+        "comment_rear": "",
+        "plan_of_action": "I will move forward only a little, then immediately re-check the lane."[:240],
+        "reasoning_steps": [
+            "The center-bottom lane still shows drivable floor.",
+            "A wall or corner is visible ahead, so a normal forward burst is too aggressive.",
+            "A short low-speed probe can use the remaining space without committing far.",
+            "I will re-check the next image before moving farther.",
+        ],
+    }
+
+
+def _is_cautious_forward_probe_lane(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+) -> bool:
+    """True for a short floor runway before a nearby wall/corner."""
+    if not path_profile or path_profile.get("center_blocked"):
+        return False
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    lane_std = path_profile.get("lane_std")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    if any(
+        value is None
+        for value in (
+            center_floor,
+            center_wall,
+            lane_std,
+            lane_tb_delta,
+            lane_edge_density,
+            bot_dist_to_floor,
+            bot_dist_to_wall,
+        )
+    ):
+        return False
+    return (
+        float(center_floor) <= 8.0
+        and float(center_wall) >= 65.0
+        and float(bot_dist_to_floor) >= 24.0
+        and float(bot_dist_to_wall) >= float(bot_dist_to_floor) + 6.0
+        and float(lane_std) >= 20.0
+        and float(lane_tb_delta) >= 20.0
+        and float(lane_edge_density) >= 0.015
+        and (uniformity is None or float(uniformity) >= 25.0)
+        and (tb_delta is None or float(tb_delta) >= 20.0)
+    )
+
+
 def _has_clear_forward_lane(
     path_profile: Optional[Dict[str, Any]],
     bot_dist_to_floor: Optional[float],
@@ -2331,6 +2761,30 @@ def _has_clear_forward_lane(
 
     center_floor = path_profile.get("center_floor_dist")
     center_wall = path_profile.get("center_wall_dist")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    near_floor_runway = (
+        center_floor is not None
+        and center_floor <= 24.0
+        and center_wall is not None
+        and center_wall >= 60.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor <= 22.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 30.0
+        and lane_tb_delta is not None
+        and float(lane_tb_delta) >= 26.0
+        and lane_edge_density is not None
+        and float(lane_edge_density) >= 0.015
+        and (uniformity is None or uniformity >= 25.0)
+    )
+    if near_floor_runway:
+        return True
+
+    if _is_textured_lane_obstruction(path_profile):
+        return False
+    if _is_smooth_close_surface_obstruction(path_profile, bot_dist_to_floor):
+        return False
 
     obvious_clear = (
         center_floor is not None
@@ -2354,6 +2808,26 @@ def _has_clear_forward_lane(
         and (uniformity is None or uniformity >= 20.0)
     )
     if strong_center_profile:
+        return True
+
+    lane_std = path_profile.get("lane_std")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    textured_floor_lane = (
+        center_floor is not None
+        and center_floor <= 16.0
+        and center_wall is not None
+        and center_wall >= 45.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor <= 20.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 25.0
+        and lane_std is not None
+        and 8.0 <= float(lane_std) <= 24.0
+        and lane_edge_density is not None
+        and float(lane_edge_density) >= 0.008
+        and (uniformity is None or uniformity >= 25.0)
+    )
+    if textured_floor_lane:
         return True
 
     reopened_lane = (
@@ -2419,6 +2893,36 @@ def _apply_visual_forward_override(
     )
 
 
+def _apply_cautious_forward_probe_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+    max_linear: float,
+    max_forward_ms: int,
+) -> Dict[str, Any]:
+    """Prefer a tiny forward probe over turning when a short floor runway remains."""
+    if not _is_cautious_forward_probe_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        return decision
+    if decision.get("action") not in ("forward", "turn_left", "turn_right"):
+        return decision
+    return _build_cautious_forward_probe_decision(
+        max_linear=max_linear,
+        max_forward_ms=max_forward_ms,
+        reason_text=(
+            "The center-bottom still has floor before a nearby wall, so I use a short cautious forward probe."
+        ),
+    )
+
+
 def _is_pressed_against_wall(
     uniformity: Optional[float],
     tb_delta: Optional[float],
@@ -2470,6 +2974,15 @@ def _detect_side_opening_only_turn(
     center_wall = path_profile.get("center_wall_dist")
     side_std_gap = abs(float(path_profile.get("side_std_gap") or 0.0))
 
+    if _is_cautious_forward_probe_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        return None
+
     if (
         center_floor is not None
         and center_floor >= 18.0
@@ -2500,6 +3013,22 @@ def _detect_side_opening_only_turn(
         and (tb_delta is None or tb_delta >= 12.0)
     )
     if early_uncertain_side_opening:
+        return open_side_turn
+
+    floor_mismatch_side_opening = (
+        center_floor is not None
+        and center_floor >= 16.0
+        and center_wall is not None
+        and center_wall >= 55.0
+        and bot_dist_to_floor is not None
+        and bot_dist_to_floor >= 28.0
+        and bot_dist_to_wall is not None
+        and bot_dist_to_wall >= bot_dist_to_floor + 12.0
+        and side_std_gap >= 8.0
+        and (uniformity is None or uniformity >= 20.0)
+        and (tb_delta is None or tb_delta >= 12.0)
+    )
+    if floor_mismatch_side_opening:
         return open_side_turn
 
     return None
@@ -2570,6 +3099,50 @@ def _decide_from_local_controller(
             preferred_turn=persistent_wall_turn,
             last_turn_direction=last_turn_direction,
             default_turn_deg=55.0,
+        )
+
+    if _is_smooth_close_surface_obstruction(path_profile, bot_dist_to_floor):
+        forced_turn = _choose_recovery_turn(
+            path_profile,
+            last_turn_direction,
+            path_profile.get("open_side_turn") if path_profile else None,
+        )
+        direction_text = "left" if forced_turn == "turn_left" else "right"
+        return _build_recovery_turn_decision(
+            path_profile=path_profile,
+            max_turn_deg=max_turn_deg,
+            reason_tag="[local-smooth-close-surface]",
+            reason_text=(
+                f"a smooth nearby surface fills the lane, so I turn {direction_text} to scan for open floor"
+            ),
+            comment_text=(
+                f"My immediate lane is a close smooth surface, not visible floor, so I turn {direction_text}."
+            ),
+            plan_text=f"I will turn {direction_text} 45 degrees, then re-check the center lane.",
+            reasoning_steps=[
+                "The immediate lane lacks floor texture, perspective, or an open ground boundary.",
+                "The center crop looks like a nearby box or wall face rather than drivable floor.",
+                f"The better scan direction is {direction_text}.",
+                f"I will turn {direction_text} first and reassess before moving forward.",
+            ],
+            preferred_turn=forced_turn,
+            last_turn_direction=last_turn_direction,
+            default_turn_deg=45.0,
+        )
+
+    if _is_cautious_forward_probe_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        return _build_cautious_forward_probe_decision(
+            max_linear=max_linear,
+            max_forward_ms=max_forward_ms,
+            reason_text=(
+                "The center-bottom still has floor before a nearby wall, so I use a short cautious forward probe."
+            ),
         )
 
     if _has_clear_forward_lane(
@@ -2713,6 +3286,18 @@ def _build_nav_signature(
         "center_wall_dist": path_profile.get("center_wall_dist") if path_profile else None,
         "left_wall_dist": path_profile.get("left_wall_dist") if path_profile else None,
         "right_wall_dist": path_profile.get("right_wall_dist") if path_profile else None,
+        "lane_std": path_profile.get("lane_std") if path_profile else None,
+        "lane_tb_delta": path_profile.get("lane_tb_delta") if path_profile else None,
+        "lane_edge_density": path_profile.get("lane_edge_density") if path_profile else None,
+        "flat_lane_surface": _is_flat_lane_surface(path_profile),
+        "smooth_diagonal_obstruction": _is_smooth_diagonal_lane_obstruction(path_profile),
+        "textured_lane_obstruction": _is_textured_lane_obstruction(path_profile),
+        "smooth_close_surface_obstruction": _is_smooth_close_surface_obstruction(
+            path_profile, bot_dist_to_floor
+        ),
+        "dark_uncertain_lane": _is_dark_uncertain_lane(
+            path_profile, bot_dist_to_floor, bot_dist_to_wall, uniformity
+        ),
     }
 
 
@@ -2731,16 +3316,85 @@ def _signatures_match_for_wall_loop(
 ) -> bool:
     if not current_sig or not previous_sig:
         return False
-    if not current_sig.get("open_side_turn"):
-        return False
-    if current_sig.get("open_side_turn") != previous_sig.get("open_side_turn"):
-        return False
 
     heading_delta = _heading_delta(
         current_sig.get("orientation"), previous_sig.get("orientation")
     )
     if heading_delta is not None and heading_delta > 12.0:
         return False
+
+    if current_sig.get("flat_lane_surface") and previous_sig.get("flat_lane_surface"):
+        flat_checks = (
+            ("front_uniformity", 4.0),
+            ("front_tb_delta", 4.0),
+            ("lane_std", 2.0),
+            ("lane_tb_delta", 2.0),
+            ("lane_edge_density", 0.004),
+        )
+        compared = 0
+        matched = 0
+        for key, threshold in flat_checks:
+            cur = current_sig.get(key)
+            prev = previous_sig.get(key)
+            if cur is None or prev is None:
+                continue
+            compared += 1
+            if abs(float(cur) - float(prev)) <= threshold:
+                matched += 1
+        return compared >= 4 and matched >= 4
+
+    if not current_sig.get("open_side_turn"):
+        return False
+    if current_sig.get("open_side_turn") != previous_sig.get("open_side_turn"):
+        return False
+
+    if (
+        current_sig.get("smooth_diagonal_obstruction")
+        and previous_sig.get("smooth_diagonal_obstruction")
+    ):
+        diagonal_checks = (
+            ("front_uniformity", 6.0),
+            ("front_tb_delta", 6.0),
+            ("lane_std", 4.0),
+            ("lane_tb_delta", 4.0),
+            ("lane_edge_density", 0.004),
+        )
+        compared = 0
+        matched = 0
+        for key, threshold in diagonal_checks:
+            cur = current_sig.get(key)
+            prev = previous_sig.get(key)
+            if cur is None or prev is None:
+                continue
+            compared += 1
+            if abs(float(cur) - float(prev)) <= threshold:
+                matched += 1
+        return compared >= 4 and matched >= 4
+
+    if (
+        current_sig.get("textured_lane_obstruction")
+        and previous_sig.get("textured_lane_obstruction")
+    ):
+        textured_checks = (
+            ("front_uniformity", 8.0),
+            ("front_tb_delta", 8.0),
+            ("lane_std", 5.0),
+            ("lane_tb_delta", 5.0),
+            ("lane_edge_density", 0.04),
+            ("center_floor_dist", 18.0),
+            ("center_wall_dist", 24.0),
+        )
+        compared = 0
+        matched = 0
+        for key, threshold in textured_checks:
+            cur = current_sig.get(key)
+            prev = previous_sig.get(key)
+            if cur is None or prev is None:
+                continue
+            compared += 1
+            if abs(float(cur) - float(prev)) <= threshold:
+                matched += 1
+        return compared >= 5 and matched >= 5
 
     checks = (
         ("front_uniformity", 2.5),
@@ -2768,7 +3422,7 @@ def _detect_persistent_wall_ahead_turn(
     current_sig: Dict[str, Any],
 ) -> Optional[str]:
     """If repeated forward ticks look visually unchanged, stop treating them as progress."""
-    if not current_sig.get("open_side_turn"):
+    if not current_sig.get("open_side_turn") and not current_sig.get("flat_lane_surface"):
         return None
 
     forward_streak: List[Dict[str, Any]] = []
@@ -2789,7 +3443,7 @@ def _detect_persistent_wall_ahead_turn(
             matched += 1
 
     if matched >= 2:
-        return current_sig.get("open_side_turn")
+        return current_sig.get("open_side_turn") or "turn_right"
     return None
 
 
@@ -2906,6 +3560,93 @@ def _apply_side_opening_only_override(
     )
 
 
+def _apply_dark_uncertain_lane_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    max_turn_deg: float,
+    last_turn_direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Prevent forward when the lane is visually unknown, dark, and not floor-like."""
+    if decision.get("action") != "forward":
+        return decision
+    if not _is_dark_uncertain_lane(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+    ):
+        return decision
+
+    forced_turn = _choose_recovery_turn(path_profile, last_turn_direction)
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return _build_recovery_turn_decision(
+        path_profile=path_profile,
+        max_turn_deg=max_turn_deg,
+        reason_tag="[dark-uncertain-lane-override]",
+        reason_text=(
+            f"the lane is dark and does not match known floor or wall, so I turn {direction_text} to recheck"
+        ),
+        comment_text=(
+            f"The area ahead is too dark and uncertain to trust as floor, so I turn {direction_text}."
+        ),
+        plan_text=f"I will turn {direction_text}, then use the next image to find a valid lane.",
+        reasoning_steps=[
+            "The immediate lane is dark and low-detail.",
+            "It does not match the learned floor or wall colors well enough to trust.",
+            "Driving forward into an unknown dark surface is unsafe.",
+            f"I will turn {direction_text} and re-check before moving forward.",
+        ],
+        preferred_turn=forced_turn,
+        last_turn_direction=last_turn_direction,
+        default_turn_deg=45.0,
+    )
+
+
+def _apply_smooth_close_surface_override(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    max_turn_deg: float,
+    last_turn_direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Prevent forward into a smooth nearby box/wall face that lacks floor cues."""
+    if decision.get("action") != "forward":
+        return decision
+    if not _is_smooth_close_surface_obstruction(path_profile, bot_dist_to_floor):
+        return decision
+
+    forced_turn = _choose_recovery_turn(
+        path_profile,
+        last_turn_direction,
+        path_profile.get("open_side_turn") if path_profile else None,
+    )
+    direction_text = "left" if forced_turn == "turn_left" else "right"
+    return _build_recovery_turn_decision(
+        path_profile=path_profile,
+        max_turn_deg=max_turn_deg,
+        reason_tag="[smooth-close-surface-override]",
+        reason_text=(
+            f"a smooth close surface fills the center lane, so I turn {direction_text} instead of driving into it"
+        ),
+        comment_text=(
+            f"The center lane is a nearby smooth surface, not open floor, so I turn {direction_text}."
+        ),
+        plan_text=f"I will turn {direction_text} 45 degrees, then check for a real floor lane.",
+        reasoning_steps=[
+            "The immediate crop has no convincing floor texture or perspective.",
+            "A smooth box or wall face fills the center lane.",
+            f"The best scan direction is {direction_text}.",
+            f"I will turn {direction_text} before trying any forward move.",
+        ],
+        preferred_turn=forced_turn,
+        last_turn_direction=last_turn_direction,
+        default_turn_deg=45.0,
+    )
+
+
 def _rgb_distance(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
     """Euclidean distance between two RGB triples on the 0-255 scale. None if
     either is missing."""
@@ -2913,6 +3654,30 @@ def _rgb_distance(a: Optional[List[float]], b: Optional[List[float]]) -> Optiona
         return None
     import math
     return math.sqrt(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)))
+
+
+def _min_rgb_distance(
+    sample: Optional[List[float]],
+    *baselines: Optional[List[float]],
+) -> Optional[float]:
+    distances = [
+        distance
+        for distance in (_rgb_distance(sample, baseline) for baseline in baselines)
+        if distance is not None
+    ]
+    return min(distances) if distances else None
+
+
+def _max_rgb_distance(
+    sample: Optional[List[float]],
+    *baselines: Optional[List[float]],
+) -> Optional[float]:
+    distances = [
+        distance
+        for distance in (_rgb_distance(sample, baseline) for baseline in baselines)
+        if distance is not None
+    ]
+    return max(distances) if distances else None
 
 
 async def _run_autonav_loop(config: Dict[str, Any]):
@@ -2929,6 +3694,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
     last_turn_direction: Optional[str] = None
     consecutive_turns = 0
     log_dir: Optional[str] = autonav_loop_state.get("log_dir")
+    turn_scan_state = autonav_loop_state.setdefault("turn_scan", _new_turn_scan_state())
 
     logger.info(
         "Autonav loop started (tick=%.2fs, max_linear=%.2f, max_turn_deg=%.1f)",
@@ -3006,16 +3772,50 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             uniformity = _frame_uniformity(front_b64)
             tb_delta = _frame_top_bottom_delta(front_b64)
             color_sample = _frame_color_samples(front_b64)
+            pre_calibration_path_profile = _frame_path_profile(
+                front_b64,
+                autonav_loop_state.get("floor_rgb"),
+                autonav_loop_state.get("wall_rgb"),
+            )
 
             # Color calibration: on frames with a clear horizon (tb_delta >= 12),
             # blend the current sample into the running floor/wall baseline.
             # Cap at MAX_COLOR_SAMPLES so early readings dominate (the first few
             # normal ticks define "what floor/wall look like in this run").
             MAX_COLOR_SAMPLES = 6
+            initial_floor_for_update = autonav_loop_state.get("initial_floor_rgb")
+            dist_to_initial_floor_for_update = _rgb_distance(
+                color_sample["bot_rgb"] if color_sample else None,
+                initial_floor_for_update,
+            )
+            floor_still_matches_initial = (
+                initial_floor_for_update is None
+                or (
+                    dist_to_initial_floor_for_update is not None
+                    and dist_to_initial_floor_for_update <= 35.0
+                )
+            )
+            calibration_safe = not (
+                pre_calibration_path_profile
+                and (
+                    pre_calibration_path_profile.get("center_blocked")
+                    or _is_flat_lane_surface(pre_calibration_path_profile)
+                    or _is_textured_lane_obstruction(pre_calibration_path_profile)
+                    or _is_smooth_close_surface_obstruction(
+                        pre_calibration_path_profile,
+                        _rgb_distance(
+                            color_sample["bot_rgb"] if color_sample else None,
+                            autonav_loop_state.get("floor_rgb"),
+                        ),
+                    )
+                )
+            )
             if (
                 color_sample
                 and tb_delta is not None
                 and tb_delta >= 12.0
+                and floor_still_matches_initial
+                and calibration_safe
                 and autonav_loop_state.get("color_sample_count", 0) < MAX_COLOR_SAMPLES
             ):
                 n = autonav_loop_state.get("color_sample_count", 0)
@@ -3024,6 +3824,8 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                 if prev_floor is None:
                     autonav_loop_state["floor_rgb"] = list(color_sample["bot_rgb"])
                     autonav_loop_state["wall_rgb"] = list(color_sample["top_rgb"])
+                    autonav_loop_state["initial_floor_rgb"] = list(color_sample["bot_rgb"])
+                    autonav_loop_state["initial_wall_rgb"] = list(color_sample["top_rgb"])
                 else:
                     autonav_loop_state["floor_rgb"] = [
                         round((prev_floor[i] * n + color_sample["bot_rgb"][i]) / (n + 1), 1)
@@ -3044,14 +3846,20 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             # Per-tick comparison against the learned baseline.
             floor_rgb = autonav_loop_state.get("floor_rgb")
             wall_rgb = autonav_loop_state.get("wall_rgb")
-            bot_dist_to_floor = _rgb_distance(
-                color_sample["bot_rgb"] if color_sample else None, floor_rgb
+            initial_floor_rgb = autonav_loop_state.get("initial_floor_rgb")
+            initial_wall_rgb = autonav_loop_state.get("initial_wall_rgb")
+            current_bot_rgb = color_sample["bot_rgb"] if color_sample else None
+            current_top_rgb = color_sample["top_rgb"] if color_sample else None
+            bot_dist_to_floor = _min_rgb_distance(
+                current_bot_rgb, floor_rgb, initial_floor_rgb
             )
-            top_dist_to_wall = _rgb_distance(
-                color_sample["top_rgb"] if color_sample else None, wall_rgb
+            bot_dist_to_initial_floor = _rgb_distance(current_bot_rgb, initial_floor_rgb)
+            bot_dist_to_rolling_floor = _rgb_distance(current_bot_rgb, floor_rgb)
+            top_dist_to_wall = _min_rgb_distance(
+                current_top_rgb, wall_rgb, initial_wall_rgb
             )
-            bot_dist_to_wall = _rgb_distance(
-                color_sample["bot_rgb"] if color_sample else None, wall_rgb
+            bot_dist_to_wall = _min_rgb_distance(
+                current_bot_rgb, wall_rgb, initial_wall_rgb
             )
             # Multi-signal detection for "nose-pressed against a surface":
             #   (a) truly flat frame: stddev < 8 — e.g. pure white wall.
@@ -3074,7 +3882,9 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     bot_dist_to_wall < bot_dist_to_floor - 15
                     and bot_dist_to_floor > 25
                 )
-            path_zone_b64 = _frame_path_crop_base64(front_b64)
+            # Temporarily disable IMAGE 2/path-zone for Gemini. Keep local
+            # path_profile from the full frame so guardrails still work.
+            path_zone_b64 = None
             path_profile = _frame_path_profile(front_b64, floor_rgb, wall_rgb)
             pressed_against_wall = _is_pressed_against_wall(
                 uniformity=uniformity,
@@ -3103,6 +3913,21 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                 uniformity=uniformity,
                 tb_delta=tb_delta,
             )
+            if persistent_wall_turn and current_nav_signature.get("flat_lane_surface"):
+                clear_forward_lane = False
+            if persistent_wall_turn and current_nav_signature.get("smooth_diagonal_obstruction"):
+                clear_forward_lane = False
+            if persistent_wall_turn and current_nav_signature.get("textured_lane_obstruction"):
+                clear_forward_lane = False
+            if clear_forward_lane:
+                _reset_turn_scan_state(turn_scan_state)
+            elif (
+                persistent_wall_turn
+                and turn_scan_state.get("persistent_wall_turn") != persistent_wall_turn
+            ):
+                _reset_turn_scan_state(turn_scan_state)
+            turn_scan_state["persistent_wall_turn"] = persistent_wall_turn
+            autonav_loop_state["turn_scan"] = turn_scan_state
 
             want_rear = pressed_against_wall
             if history and not want_rear:
@@ -3132,12 +3957,12 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                 hint_parts.append(
                     f"You have turned {recent_turn_count} of the last {len(recent)} ticks with no "
                     "forward progress. This tick, do not reverse. Pick ONE direction and use the "
-                    "blocked-lane turn staircase: 45°, then 90°, then 135°, then 180° if needed."
+                    "blocked-lane bounded scan: first 45°, then 90° on one side. If the lane is still blocked, switch sides instead of turning farther."
                 )
             elif consecutive_turns >= 3 and last_turn_direction:
                 hint_parts.append(
                     f"You have chosen {last_turn_direction} {consecutive_turns} times in a row. "
-                    "Break the spin with the next blocked-lane turn step: 45°, then 90°, then 135°, then 180°."
+                    "Do not keep increasing that side past 90°. Finish the 45° then 90° scan, then switch sides if needed."
                 )
             if path_profile and path_profile.get("center_blocked"):
                 preferred_turn = path_profile.get("preferred_turn")
@@ -3199,6 +4024,8 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                         ),
                         "learned_floor_rgb": floor_rgb,
                         "learned_wall_rgb": wall_rgb,
+                        "initial_floor_rgb": initial_floor_rgb,
+                        "initial_wall_rgb": initial_wall_rgb,
                         "current_bot_rgb": color_sample["bot_rgb"] if color_sample else None,
                         "current_top_rgb": color_sample["top_rgb"] if color_sample else None,
                         "bot_dist_to_floor": (
@@ -3206,6 +4033,16 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                         ),
                         "bot_dist_to_wall": (
                             round(bot_dist_to_wall, 1) if bot_dist_to_wall is not None else None
+                        ),
+                        "bot_dist_to_initial_floor": (
+                            round(bot_dist_to_initial_floor, 1)
+                            if bot_dist_to_initial_floor is not None
+                            else None
+                        ),
+                        "bot_dist_to_rolling_floor": (
+                            round(bot_dist_to_rolling_floor, 1)
+                            if bot_dist_to_rolling_floor is not None
+                            else None
                         ),
                         "path_profile_summary": path_profile_summary,
                     },
@@ -3290,6 +4127,23 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     max_forward_ms=max_forward_ms,
                 )
 
+            cautious_probe_decision = _apply_cautious_forward_probe_override(
+                decision=decision,
+                path_profile=path_profile,
+                bot_dist_to_floor=bot_dist_to_floor,
+                bot_dist_to_wall=bot_dist_to_wall,
+                uniformity=uniformity,
+                tb_delta=tb_delta,
+                max_linear=max_linear,
+                max_forward_ms=max_forward_ms,
+            )
+            if cautious_probe_decision != decision:
+                logger.info(
+                    "Autonav cautious-forward probe override: using short forward probe instead of %s",
+                    decision["action"],
+                )
+                decision = cautious_probe_decision
+
             if path_profile and path_profile.get("center_blocked") and decision["action"] == "forward":
                 logger.info(
                     "Autonav center-block override: Gemini picked forward with blocked lane "
@@ -3326,6 +4180,26 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                         max_turn_deg,
                         last_turn_direction,
                     )
+
+            if decision["action"] == "forward":
+                decision = _apply_smooth_close_surface_override(
+                    decision=decision,
+                    path_profile=path_profile,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    max_turn_deg=max_turn_deg,
+                    last_turn_direction=last_turn_direction,
+                )
+
+            if decision["action"] == "forward":
+                decision = _apply_dark_uncertain_lane_override(
+                    decision=decision,
+                    path_profile=path_profile,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    bot_dist_to_wall=bot_dist_to_wall,
+                    uniformity=uniformity,
+                    max_turn_deg=max_turn_deg,
+                    last_turn_direction=last_turn_direction,
+                )
 
             if decision["action"] == "forward":
                 if clear_forward_lane and (
@@ -3406,9 +4280,18 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     ],
                 }
 
-            decision = _apply_repeat_turn_escalation(
-                decision, max_turn_deg, last_turn_direction, consecutive_turns
-            )
+            if decision["action"] in ("turn_left", "turn_right") and not clear_forward_lane:
+                decision, turn_scan_state = _apply_bounded_turn_scan_policy(
+                    decision=decision,
+                    current_heading=rover_data.get("orientation"),
+                    scan_state=turn_scan_state,
+                    max_turn_deg=max_turn_deg,
+                    path_profile=path_profile,
+                )
+            else:
+                _reset_turn_scan_state(turn_scan_state)
+                turn_scan_state["persistent_wall_turn"] = persistent_wall_turn
+            autonav_loop_state["turn_scan"] = turn_scan_state
 
             autonav_loop_state["error_streak"] = 0
             autonav_loop_state["last_error"] = None
@@ -3508,6 +4391,9 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             else:
                 consecutive_turns = 0
                 last_turn_direction = None
+                _reset_turn_scan_state(turn_scan_state)
+                turn_scan_state["persistent_wall_turn"] = persistent_wall_turn
+            autonav_loop_state["turn_scan"] = turn_scan_state
 
             history.append(
                 {
@@ -3540,10 +4426,14 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     "front_tb_delta": tb_delta,
                     "learned_floor_rgb": floor_rgb,
                     "learned_wall_rgb": wall_rgb,
+                    "initial_floor_rgb": initial_floor_rgb,
+                    "initial_wall_rgb": initial_wall_rgb,
                     "current_bot_rgb": color_sample["bot_rgb"] if color_sample else None,
                     "current_top_rgb": color_sample["top_rgb"] if color_sample else None,
                     "bot_dist_to_floor": bot_dist_to_floor,
                     "bot_dist_to_wall": bot_dist_to_wall,
+                    "bot_dist_to_initial_floor": bot_dist_to_initial_floor,
+                    "bot_dist_to_rolling_floor": bot_dist_to_rolling_floor,
                     "path_zone_sent": path_zone_b64 is not None,
                     "path_profile": path_profile,
                     "color_sample_count": autonav_loop_state.get("color_sample_count", 0),
@@ -3553,8 +4443,10 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     "recent_wall_escape_count": recent_wall_escape_count,
                     "persistent_wall_turn": persistent_wall_turn,
                     "nav_signature": current_nav_signature,
+                    "turn_scan_state": dict(turn_scan_state),
                     "hint": hint,
-                    "system_prompt_sha": None,  # constant across ticks; see run.json
+                    "system_prompt_sha": gemini_debug.get("system_prompt_sha"),
+                    "prompt_version": gemini_debug.get("prompt_version"),
                     "user_prompt": gemini_debug.get("user_prompt"),
                     "model": gemini_debug.get("model"),
                     "gemini_raw_decision": gemini_raw_decision,
@@ -4278,18 +5170,28 @@ async def start_autonav(request: Request):
         if tick_logging_enabled:
             try:
                 log_dir = _autonav_start_run_dir()
+                prompt_sha = None
+                prompt_version = None
+                try:
+                    from autonav_service import PROMPT_VERSION as _PV
+                    from autonav_service import SYSTEM_PROMPT as _SP
+                    prompt_sha = hashlib.sha256(_SP.encode("utf-8")).hexdigest()[:12]
+                    prompt_version = _PV
+                except Exception:
+                    pass
                 with open(os.path.join(log_dir, "run.json"), "w") as fh:
                     json.dump(
                         {
                             "started_at": datetime.utcnow().isoformat() + "Z",
                             "config": config,
+                            "system_prompt_sha": prompt_sha,
+                            "prompt_version": prompt_version,
                         },
                         fh,
                         indent=2,
                     )
                 # SYSTEM_PROMPT is constant across ticks — write it once.
                 try:
-                    from autonav_service import SYSTEM_PROMPT as _SP
                     with open(os.path.join(log_dir, "system_prompt.txt"), "w") as fh:
                         fh.write(_SP)
                 except Exception:
@@ -4318,7 +5220,10 @@ async def start_autonav(request: Request):
                 "log_dir": log_dir,
                 "floor_rgb": None,
                 "wall_rgb": None,
+                "initial_floor_rgb": None,
+                "initial_wall_rgb": None,
                 "color_sample_count": 0,
+                "turn_scan": _new_turn_scan_state(),
             }
         )
         autonav_loop_task = asyncio.create_task(_run_autonav_loop(config))

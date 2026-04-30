@@ -554,8 +554,8 @@ class AutonavGuardrailsTestCase(unittest.TestCase):
 
         self.assertEqual(first_turn["turn_degrees"], 45.0)
         self.assertEqual(second_turn["turn_degrees"], 90.0)
-        self.assertEqual(third_turn["turn_degrees"], 135.0)
-        self.assertEqual(fourth_turn["turn_degrees"], 180.0)
+        self.assertEqual(third_turn["turn_degrees"], 90.0)
+        self.assertEqual(fourth_turn["turn_degrees"], 90.0)
         self.assertIn("turn-search-staircase", fourth_turn["reason"])
 
     def test_repeat_turn_escalation_respects_turn_cap(self):
@@ -579,7 +579,111 @@ class AutonavGuardrailsTestCase(unittest.TestCase):
             consecutive_turns=3,
         )
 
-        self.assertEqual(overridden["turn_degrees"], 120.0)
+        self.assertEqual(overridden["turn_degrees"], 90.0)
+
+    def test_bounded_turn_scan_progresses_45_then_90_on_same_side(self):
+        decision = {
+            "action": "turn_right",
+            "linear_speed": 0.0,
+            "turn_degrees": 180.0,
+            "duration_ms": 800,
+            "confidence": 1.0,
+            "reason": "Need a right search turn.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        first_turn, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=180.0,
+            scan_state=main._new_turn_scan_state(),
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+        second_turn, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=135.0,
+            scan_state=scan_state,
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+
+        self.assertEqual(first_turn["action"], "turn_right")
+        self.assertEqual(first_turn["turn_degrees"], 45.0)
+        self.assertEqual(second_turn["action"], "turn_right")
+        self.assertEqual(second_turn["turn_degrees"], 45.0)
+        self.assertEqual(scan_state["direction"], "turn_right")
+        self.assertEqual(scan_state["step_index"], 2)
+
+    def test_bounded_turn_scan_switches_sides_after_90(self):
+        decision = {
+            "action": "turn_right",
+            "linear_speed": 0.0,
+            "turn_degrees": 180.0,
+            "duration_ms": 800,
+            "confidence": 1.0,
+            "reason": "Need another search turn.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        _, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=180.0,
+            scan_state=main._new_turn_scan_state(),
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+        _, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=135.0,
+            scan_state=scan_state,
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+        switched_turn, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=90.0,
+            scan_state=scan_state,
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+
+        self.assertEqual(switched_turn["action"], "turn_left")
+        self.assertEqual(switched_turn["turn_degrees"], 135.0)
+        self.assertEqual(scan_state["direction"], "turn_left")
+        self.assertEqual(scan_state["step_index"], 1)
+        self.assertTrue(scan_state["right_checked"])
+
+    def test_bounded_turn_scan_clamps_large_turn_request_to_first_step(self):
+        decision = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 180.0,
+            "duration_ms": 800,
+            "confidence": 1.0,
+            "reason": "Try a very large left turn.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        overridden, scan_state = main._apply_bounded_turn_scan_policy(
+            decision=decision,
+            current_heading=200.0,
+            scan_state=main._new_turn_scan_state(),
+            max_turn_deg=180.0,
+            path_profile=None,
+        )
+
+        self.assertEqual(overridden["action"], "turn_left")
+        self.assertEqual(overridden["turn_degrees"], 45.0)
+        self.assertEqual(scan_state["step_index"], 1)
 
     def test_history_overrides_do_not_block_clear_forward_lane(self):
         tick, _ = self._load_tick("20260427_110920", 4)
@@ -629,6 +733,626 @@ class AutonavGuardrailsTestCase(unittest.TestCase):
             persistent_wall_turn=tick["persistent_wall_turn"],
             max_turn_deg=180.0,
             clear_forward_lane=False,
+        )
+
+        self.assertEqual(overridden["action"], "turn_right")
+
+    def test_repeated_flat_lane_surface_turns_instead_of_forward(self):
+        history = []
+        for tick_no in (10, 11, 12):
+            tick, frame_b64 = self._load_tick("20260429_092039", tick_no)
+            profile = main._frame_path_profile(
+                frame_b64,
+                tick["learned_floor_rgb"],
+                tick["learned_wall_rgb"],
+            )
+            signature = main._build_nav_signature(
+                tick["telemetry"]["orientation"],
+                tick["front_uniformity"],
+                tick["front_tb_delta"],
+                tick["bot_dist_to_floor"],
+                tick["bot_dist_to_wall"],
+                profile,
+            )
+            history.append({"action": "forward", "nav_signature": signature})
+
+        tick, frame_b64 = self._load_tick("20260429_092039", 13)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+        current_signature = main._build_nav_signature(
+            tick["telemetry"]["orientation"],
+            tick["front_uniformity"],
+            tick["front_tb_delta"],
+            tick["bot_dist_to_floor"],
+            tick["bot_dist_to_wall"],
+            profile,
+        )
+
+        self.assertTrue(current_signature["flat_lane_surface"])
+        self.assertEqual(
+            main._detect_persistent_wall_ahead_turn(history, current_signature),
+            "turn_right",
+        )
+
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "Try forward.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_history_forward_turn_overrides(
+            decision=decision,
+            path_profile=profile,
+            recent_wall_escape_count=0,
+            persistent_wall_turn="turn_right",
+            max_turn_deg=180.0,
+            clear_forward_lane=False,
+        )
+
+        self.assertEqual(overridden["action"], "turn_right")
+
+    def test_repeated_flat_lane_surface_without_side_bias_turns_instead_of_forward(self):
+        history = []
+        for tick_no in (24, 25, 26):
+            tick, frame_b64 = self._load_tick("20260429_093515", tick_no)
+            profile = main._frame_path_profile(
+                frame_b64,
+                tick["learned_floor_rgb"],
+                tick["learned_wall_rgb"],
+            )
+            signature = main._build_nav_signature(
+                tick["telemetry"]["orientation"],
+                tick["front_uniformity"],
+                tick["front_tb_delta"],
+                tick["bot_dist_to_floor"],
+                tick["bot_dist_to_wall"],
+                profile,
+            )
+            history.append({"action": "forward", "nav_signature": signature})
+
+        tick, frame_b64 = self._load_tick("20260429_093515", 27)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+        current_signature = main._build_nav_signature(
+            tick["telemetry"]["orientation"],
+            tick["front_uniformity"],
+            tick["front_tb_delta"],
+            tick["bot_dist_to_floor"],
+            tick["bot_dist_to_wall"],
+            profile,
+        )
+
+        self.assertTrue(current_signature["flat_lane_surface"])
+        self.assertIsNone(current_signature["open_side_turn"])
+        self.assertEqual(
+            main._detect_persistent_wall_ahead_turn(history, current_signature),
+            "turn_right",
+        )
+
+    def test_repeated_smooth_diagonal_obstruction_turns_instead_of_forward(self):
+        history = []
+        for tick_no in (10, 11, 12):
+            tick, frame_b64 = self._load_tick("20260429_095453", tick_no)
+            profile = main._frame_path_profile(
+                frame_b64,
+                tick["learned_floor_rgb"],
+                tick["learned_wall_rgb"],
+            )
+            signature = main._build_nav_signature(
+                tick["telemetry"]["orientation"],
+                tick["front_uniformity"],
+                tick["front_tb_delta"],
+                tick["bot_dist_to_floor"],
+                tick["bot_dist_to_wall"],
+                profile,
+            )
+            history.append({"action": "forward", "nav_signature": signature})
+
+        tick, frame_b64 = self._load_tick("20260429_095453", 13)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+        current_signature = main._build_nav_signature(
+            tick["telemetry"]["orientation"],
+            tick["front_uniformity"],
+            tick["front_tb_delta"],
+            tick["bot_dist_to_floor"],
+            tick["bot_dist_to_wall"],
+            profile,
+        )
+
+        self.assertTrue(current_signature["smooth_diagonal_obstruction"])
+        self.assertEqual(
+            main._detect_persistent_wall_ahead_turn(history, current_signature),
+            "turn_left",
+        )
+
+    def test_repeated_textured_obstruction_turns_instead_of_forward(self):
+        history = []
+        for tick_no in (3, 4, 5, 6):
+            tick, frame_b64 = self._load_tick("20260429_101634", tick_no)
+            profile = main._frame_path_profile(
+                frame_b64,
+                tick["learned_floor_rgb"],
+                tick["learned_wall_rgb"],
+            )
+            signature = main._build_nav_signature(
+                tick["telemetry"]["orientation"],
+                tick["front_uniformity"],
+                tick["front_tb_delta"],
+                tick["bot_dist_to_floor"],
+                tick["bot_dist_to_wall"],
+                profile,
+            )
+            history.append({"action": "forward", "nav_signature": signature})
+
+        tick, frame_b64 = self._load_tick("20260429_101634", 7)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+        current_signature = main._build_nav_signature(
+            tick["telemetry"]["orientation"],
+            tick["front_uniformity"],
+            tick["front_tb_delta"],
+            tick["bot_dist_to_floor"],
+            tick["bot_dist_to_wall"],
+            profile,
+        )
+
+        self.assertTrue(current_signature["textured_lane_obstruction"])
+        self.assertEqual(
+            main._detect_persistent_wall_ahead_turn(history, current_signature),
+            "turn_right",
+        )
+
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "Looks like floor.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_history_forward_turn_overrides(
+            decision=decision,
+            path_profile=profile,
+            recent_wall_escape_count=0,
+            persistent_wall_turn="turn_right",
+            max_turn_deg=180.0,
+            clear_forward_lane=False,
+        )
+
+        self.assertEqual(overridden["action"], "turn_right")
+
+    def test_textured_obstruction_is_not_clear_forward_lane(self):
+        tick, frame_b64 = self._load_tick("20260429_103041", 10)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertTrue(main._is_textured_lane_obstruction(profile))
+        self.assertFalse(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        gemini_turn = {
+            "action": "turn_right",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 1.0,
+            "reason": "Box blocks the path.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        preserved = main._apply_visual_forward_override(
+            decision=gemini_turn,
+            clear_forward_lane=False,
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(preserved["action"], "turn_right")
+
+    def test_smooth_close_surface_turns_instead_of_forward(self):
+        tick, frame_b64 = self._load_tick("20260429_103935", 14)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertTrue(
+            main._is_smooth_close_surface_obstruction(
+                profile,
+                tick["bot_dist_to_floor"],
+            )
+        )
+        self.assertFalse(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "Looks open.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_smooth_close_surface_override(
+            decision=decision,
+            path_profile=profile,
+            bot_dist_to_floor=tick["bot_dist_to_floor"],
+            max_turn_deg=180.0,
+            last_turn_direction=None,
+        )
+
+        self.assertEqual(overridden["action"], "turn_right")
+        self.assertEqual(overridden["turn_degrees"], 45.0)
+
+    def test_flat_floor_colored_box_face_turns_instead_of_forward(self):
+        tick, frame_b64 = self._load_tick("20260429_111242", 4)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertTrue(profile["center_blocked"] is False)
+        self.assertTrue(profile["lane_std"] <= 8.5)
+        self.assertTrue(main._is_flat_lane_surface(profile))
+        self.assertTrue(
+            main._is_smooth_close_surface_obstruction(
+                profile,
+                tick["bot_dist_to_floor"],
+            )
+        )
+        self.assertFalse(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "Looks like a low object.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_smooth_close_surface_override(
+            decision=decision,
+            path_profile=profile,
+            bot_dist_to_floor=tick["bot_dist_to_floor"],
+            max_turn_deg=180.0,
+            last_turn_direction=None,
+        )
+
+        self.assertEqual(overridden["action"], "turn_right")
+        self.assertEqual(overridden["turn_degrees"], 45.0)
+
+    def test_dark_center_floor_between_side_obstacles_stays_forward(self):
+        tick, frame_b64 = self._load_tick("20260429_113821", 3)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertFalse(profile["center_blocked"])
+        self.assertTrue(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        gemini_turn = {
+            "action": "turn_right",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.0,
+            "reason": "Mistaken side obstacle.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_visual_forward_override(
+            decision=gemini_turn,
+            clear_forward_lane=True,
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(overridden["action"], "forward")
+
+    def test_floor_runway_before_far_wall_stays_forward(self):
+        tick, frame_b64 = self._load_tick("20260429_121630", 2)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertFalse(profile["center_blocked"])
+        self.assertTrue(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        gemini_turn = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.0,
+            "reason": "Mistaken far wall.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_visual_forward_override(
+            decision=gemini_turn,
+            clear_forward_lane=True,
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(overridden["action"], "forward")
+
+    def test_initial_floor_baseline_prevents_wall_drift_forward(self):
+        run_id = "20260429_122311"
+        state = {
+            "floor_rgb": None,
+            "wall_rgb": None,
+            "initial_floor_rgb": None,
+            "initial_wall_rgb": None,
+            "color_sample_count": 0,
+        }
+        target = None
+
+        for tick_no in range(1, 8):
+            tick, frame_b64 = self._load_tick(run_id, tick_no)
+            sample = main._frame_color_samples(frame_b64)
+            tb_delta = main._frame_top_bottom_delta(frame_b64)
+            profile = main._frame_path_profile(
+                frame_b64,
+                state["floor_rgb"],
+                state["wall_rgb"],
+            )
+            dist_to_initial = main._rgb_distance(
+                sample["bot_rgb"] if sample else None,
+                state["initial_floor_rgb"],
+            )
+            floor_matches_initial = state["initial_floor_rgb"] is None or (
+                dist_to_initial is not None and dist_to_initial <= 35.0
+            )
+            pre_bdf = main._rgb_distance(
+                sample["bot_rgb"] if sample else None,
+                state["floor_rgb"],
+            )
+            calibration_safe = not (
+                profile
+                and (
+                    profile.get("center_blocked")
+                    or main._is_flat_lane_surface(profile)
+                    or main._is_textured_lane_obstruction(profile)
+                    or main._is_smooth_close_surface_obstruction(profile, pre_bdf)
+                )
+            )
+            should_update = (
+                sample
+                and tb_delta is not None
+                and tb_delta >= 12.0
+                and floor_matches_initial
+                and calibration_safe
+                and state["color_sample_count"] < 6
+            )
+            if should_update:
+                count = state["color_sample_count"]
+                if state["floor_rgb"] is None:
+                    state["floor_rgb"] = list(sample["bot_rgb"])
+                    state["wall_rgb"] = list(sample["top_rgb"])
+                    state["initial_floor_rgb"] = list(sample["bot_rgb"])
+                    state["initial_wall_rgb"] = list(sample["top_rgb"])
+                else:
+                    state["floor_rgb"] = [
+                        round((state["floor_rgb"][i] * count + sample["bot_rgb"][i]) / (count + 1), 1)
+                        for i in range(3)
+                    ]
+                    state["wall_rgb"] = [
+                        round((state["wall_rgb"][i] * count + sample["top_rgb"][i]) / (count + 1), 1)
+                        for i in range(3)
+                    ]
+                state["color_sample_count"] = count + 1
+
+            if tick_no == 7:
+                target = (tick, frame_b64, sample, tb_delta)
+
+        self.assertIsNotNone(target)
+        tick, frame_b64, sample, tb_delta = target
+        profile = main._frame_path_profile(
+            frame_b64,
+            state["floor_rgb"],
+            state["wall_rgb"],
+        )
+        bot_dist_to_floor = main._min_rgb_distance(
+            sample["bot_rgb"],
+            state["floor_rgb"],
+            state["initial_floor_rgb"],
+        )
+        bot_dist_to_wall = main._min_rgb_distance(
+            sample["bot_rgb"],
+            state["wall_rgb"],
+            state["initial_wall_rgb"],
+        )
+
+        self.assertEqual(state["color_sample_count"], 2)
+        self.assertFalse(
+            main._has_clear_forward_lane(
+                path_profile=profile,
+                bot_dist_to_floor=bot_dist_to_floor,
+                bot_dist_to_wall=bot_dist_to_wall,
+                uniformity=tick["front_uniformity"],
+                tb_delta=tb_delta,
+            )
+        )
+        self.assertEqual(
+            main._detect_side_opening_only_turn(
+                path_profile=profile,
+                bot_dist_to_floor=bot_dist_to_floor,
+                bot_dist_to_wall=bot_dist_to_wall,
+                uniformity=tick["front_uniformity"],
+                tb_delta=tb_delta,
+                color_sample_count=state["color_sample_count"],
+                recent_wall_escape_count=0,
+            ),
+            "turn_right",
+        )
+
+    def test_near_wall_floor_runway_uses_cautious_forward_probe(self):
+        tick, frame_b64 = self._load_tick("20260429_130510", 3)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertTrue(
+            main._is_cautious_forward_probe_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+                tb_delta=tick["front_tb_delta"],
+            )
+        )
+
+        gemini_turn = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.0,
+            "reason": "Corner ahead.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_cautious_forward_probe_override(
+            decision=gemini_turn,
+            path_profile=profile,
+            bot_dist_to_floor=tick["bot_dist_to_floor"],
+            bot_dist_to_wall=tick["bot_dist_to_wall"],
+            uniformity=tick["front_uniformity"],
+            tb_delta=tick["front_tb_delta"],
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(overridden["action"], "forward")
+        self.assertEqual(overridden["linear_speed"], 0.15)
+        self.assertEqual(overridden["duration_ms"], 400)
+
+    def test_dark_uncertain_lane_turns_instead_of_forward(self):
+        tick, frame_b64 = self._load_tick("20260429_100823", 20)
+        profile = main._frame_path_profile(
+            frame_b64,
+            tick["learned_floor_rgb"],
+            tick["learned_wall_rgb"],
+        )
+
+        self.assertTrue(
+            main._is_dark_uncertain_lane(
+                path_profile=profile,
+                bot_dist_to_floor=tick["bot_dist_to_floor"],
+                bot_dist_to_wall=tick["bot_dist_to_wall"],
+                uniformity=tick["front_uniformity"],
+            )
+        )
+
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "Try forward.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+        overridden = main._apply_dark_uncertain_lane_override(
+            decision=decision,
+            path_profile=profile,
+            bot_dist_to_floor=tick["bot_dist_to_floor"],
+            bot_dist_to_wall=tick["bot_dist_to_wall"],
+            uniformity=tick["front_uniformity"],
+            max_turn_deg=180.0,
+            last_turn_direction=None,
         )
 
         self.assertEqual(overridden["action"], "turn_right")
