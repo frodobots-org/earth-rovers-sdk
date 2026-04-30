@@ -116,11 +116,32 @@ auth_response_data = {}
 checkpoints_list_data = {}
 last_rover_action: str = ""  # human-readable description of the last executed rover command
 personality_mode: str = "friendly"  # one of: friendly | sarcastic | formal
+_status_report_cache: Dict[str, Any] = {
+    "telemetry": {},
+    "telemetry_at": 0.0,
+    "reply": None,
+    "reply_at": 0.0,
+}
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 browser_service = BrowserService()
 voice_browser_service = BrowserService(page_path="/voice-sdk", require_rtm=False)
+
+
+def _spawn_background_task(coro: "Coroutine[Any, Any, Any]", *, name: str) -> None:
+    """Run async work without blocking the request/response cycle."""
+    task = asyncio.create_task(coro, name=name)
+
+    def _log_result(t: asyncio.Task) -> None:
+        try:
+            t.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("Background task %s failed: %s", name, exc)
+
+    task.add_done_callback(_log_result)
 
 
 voice_loop_task: Optional[asyncio.Task] = None
@@ -898,17 +919,31 @@ async def status_report(request: Request):
 
     reply = await _generate_status_reply()
 
+    # Don't block the API response on TTS playback or RTM send.
     if channel in ("speak", "both"):
-        try:
-            await _speak_text(reply)
-        except Exception as e:
-            logger.error("Status report TTS failed: %s", e)
+        tts_timeout_s = float(os.getenv("STATUS_REPORT_TTS_TIMEOUT_S", "10") or 10)
+
+        async def _speak_with_timeout():
+            try:
+                await asyncio.wait_for(_speak_text(reply), timeout=tts_timeout_s)
+            except asyncio.TimeoutError:
+                logger.warning("Status report TTS timed out after %ss", tts_timeout_s)
+            except Exception as e:
+                logger.error("Status report TTS failed: %s", e)
+
+        _spawn_background_task(_speak_with_timeout(), name="status-report-tts")
 
     if channel in ("text", "both") and auth_response_data:
-        try:
-            RtmClient(auth_response_data).send_message({"text": reply})
-        except Exception as e:
-            logger.warning("Status report RTM reply failed: %s", e)
+        async def _send_rtm():
+            try:
+                await asyncio.to_thread(
+                    RtmClient(auth_response_data).send_message,
+                    {"text": reply},
+                )
+            except Exception as e:
+                logger.warning("Status report RTM reply failed: %s", e)
+
+        _spawn_background_task(_send_rtm(), name="status-report-rtm")
 
     return {"reply": reply, "channel": channel}
 
@@ -1233,11 +1268,21 @@ async def _speak_text(text: str) -> None:
 
 async def _generate_status_reply() -> str:
     """Fetch live telemetry and compose a status message in the current personality mode."""
-    data = {}
+    # Best-effort telemetry: never let status-report hang on browser initialization/network.
+    telemetry_timeout_s = float(os.getenv("STATUS_REPORT_TELEMETRY_TIMEOUT_S", "1.5") or 1.5)
+    data: dict = {}
     try:
-        data = await browser_service.data() or {}
+        data = await asyncio.wait_for(browser_service.data(), timeout=telemetry_timeout_s) or {}
+        _status_report_cache["telemetry"] = data
+        _status_report_cache["telemetry_at"] = time.time()
+    except asyncio.TimeoutError:
+        cached = _status_report_cache.get("telemetry") or {}
+        if isinstance(cached, dict):
+            data = cached
     except Exception:
-        pass
+        cached = _status_report_cache.get("telemetry") or {}
+        if isinstance(cached, dict):
+            data = cached
 
     battery = data.get("battery")
     lat = data.get("latitude")
@@ -1255,10 +1300,13 @@ async def _generate_status_reply() -> str:
             if lat is not None and lon is not None
             else "GPS is a mystery. Classic."
         )
-        return (
+        reply = (
             f"Oh great, a status check. {battery_str} {location_str} "
             f"Last exciting achievement: {action}. Don't all cheer at once."
         )
+        _status_report_cache["reply"] = reply
+        _status_report_cache["reply_at"] = time.time()
+        return reply
 
     if personality_mode == "formal":
         battery_str = (
@@ -1271,7 +1319,10 @@ async def _generate_status_reply() -> str:
             if lat is not None and lon is not None
             else "Position: unavailable."
         )
-        return f"Status report. {battery_str} {location_str} Last action: {action}."
+        reply = f"Status report. {battery_str} {location_str} Last action: {action}."
+        _status_report_cache["reply"] = reply
+        _status_report_cache["reply_at"] = time.time()
+        return reply
 
     # Default: friendly
     battery_str = f"Battery is at {battery}%." if battery is not None else "Battery level unknown."
@@ -1280,10 +1331,13 @@ async def _generate_status_reply() -> str:
         if lat is not None and lon is not None
         else "GPS location isn't available right now."
     )
-    return (
+    reply = (
         f"Hey! I'm doing well. {battery_str} {location_str} "
         f"Last thing I did was {action}."
     )
+    _status_report_cache["reply"] = reply
+    _status_report_cache["reply_at"] = time.time()
+    return reply
 
 
 def _build_openclaw_hook_message(
