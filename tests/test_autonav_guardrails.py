@@ -1452,6 +1452,207 @@ class AutonavGuardrailsTestCase(unittest.TestCase):
 
         self.assertEqual(overridden["action"], "forward")
 
+    def test_visual_forward_override_allows_mostly_side_obstacle(self):
+        decision = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.9,
+            "reason": "The path appears blocked by a large cardboard box mostly on the right side.",
+            "comment_front": "The box is mostly on my right, with clear floor still ahead.",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        overridden = main._apply_visual_forward_override(
+            decision=decision,
+            clear_forward_lane=True,
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(overridden["action"], "forward")
+
+    def test_visual_forward_override_still_trusts_center_obstacle(self):
+        decision = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.9,
+            "reason": "A box is directly in the center lane.",
+            "comment_front": "The box blocks my forward path.",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        overridden = main._apply_visual_forward_override(
+            decision=decision,
+            clear_forward_lane=True,
+            max_linear=0.25,
+            max_forward_ms=3000,
+        )
+
+        self.assertEqual(overridden["action"], "turn_left")
+
+    def test_side_opening_override_preserves_confident_clear_center_forward(self):
+        path_profile = {
+            "center_blocked": False,
+            "preferred_turn": None,
+            "open_side_turn": "turn_left",
+            "left_floor_dist": 5.7,
+            "left_wall_dist": 101.5,
+            "center_floor_dist": 22.9,
+            "center_wall_dist": 73.3,
+            "right_floor_dist": 102.1,
+            "right_wall_dist": 8.4,
+            "lane_std": 24.5,
+            "lane_tb_delta": 18.7,
+            "lane_edge_density": 0.0439,
+            "side_std_gap": -9.1,
+        }
+        decision = {
+            "action": "forward",
+            "linear_speed": 0.25,
+            "turn_degrees": 0.0,
+            "duration_ms": 700,
+            "confidence": 1.0,
+            "reason": "The path directly in front of me appears clear and open.",
+            "comment_front": "The driving lane ahead is clear, with boxes off to my left and a wall on my right.",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": [
+                "I am comparing the current frame to the references.",
+                "The current image shows an open path directly in front of me, with clear floor visible.",
+                "The boxes are off to the left side rather than in the center lane.",
+                "Therefore, moving forward is the appropriate action.",
+            ],
+        }
+
+        overridden = main._apply_side_opening_only_override(
+            decision=decision,
+            path_profile=path_profile,
+            bot_dist_to_floor=38.3,
+            bot_dist_to_wall=56.4,
+            uniformity=35.3,
+            tb_delta=26.0,
+            color_sample_count=6,
+            recent_wall_escape_count=0,
+            max_turn_deg=180.0,
+            last_turn_direction="turn_right",
+        )
+
+        self.assertEqual(overridden["action"], "forward")
+
+    def test_side_opening_override_preserves_low_confidence_forward_probe(self):
+        path_profile = {
+            "center_blocked": False,
+            "preferred_turn": None,
+            "open_side_turn": "turn_right",
+            "left_floor_dist": 45.9,
+            "left_wall_dist": 89.8,
+            "center_floor_dist": 54.0,
+            "center_wall_dist": 113.6,
+            "right_floor_dist": 29.3,
+            "right_wall_dist": 92.4,
+            "lane_std": 14.8,
+            "lane_tb_delta": 9.6,
+            "lane_edge_density": 0.1079,
+            "side_std_gap": 11.8,
+        }
+        turn_decision = {
+            "action": "turn_left",
+            "linear_speed": 0.0,
+            "turn_degrees": 45.0,
+            "duration_ms": 800,
+            "confidence": 0.0,
+            "reason": "A box blocks the path.",
+            "comment_front": "",
+            "comment_rear": "",
+            "plan_of_action": "",
+            "reasoning_steps": ["a", "b", "c", "d"],
+        }
+
+        probe = main._apply_low_confidence_floor_probe_override(
+            decision=turn_decision,
+            bot_dist_to_floor=28.4,
+            tb_delta=36.0,
+            path_profile=path_profile,
+            max_linear=0.25,
+            uniformity=34.4,
+            learned_floor_rgb=[92.7, 92.7, 93.9],
+            learned_wall_rgb=[142.8, 143.0, 143.7],
+            color_sample_count=6,
+            recent_turn_count=3,
+        )
+        overridden = main._apply_side_opening_only_override(
+            decision=probe,
+            path_profile=path_profile,
+            bot_dist_to_floor=28.4,
+            bot_dist_to_wall=80.3,
+            uniformity=34.4,
+            tb_delta=36.0,
+            color_sample_count=6,
+            recent_wall_escape_count=0,
+            max_turn_deg=180.0,
+            last_turn_direction="turn_right",
+        )
+
+        self.assertEqual(probe["action"], "forward")
+        self.assertIn("low-confidence floor-probe", probe["reason"])
+        self.assertEqual(overridden["action"], "forward")
+
+    def test_obstacle_keyword_detection_handles_punctuation(self):
+        decision = {
+            "reason": "There is a box, directly in my lane.",
+            "comment_front": "",
+            "reasoning_steps": [],
+        }
+
+        self.assertTrue(main._gemini_cites_specific_obstacle(decision))
+
+    def test_narrow_gap_detector_ignores_negated_narrow_gap(self):
+        decision = {
+            "action": "forward",
+            "reason": "The immediate path is clear.",
+            "comment_front": "Objects are on my left and right sides.",
+            "reasoning_steps": [
+                "The center-bottom shows clear floor.",
+                "There is a box on the left and a person on the right.",
+                "The image does not resemble too-narrow gap because the center lane is clear.",
+                "The bottom-center driving lane is clear.",
+            ],
+        }
+
+        self.assertFalse(main._gemini_warns_narrow_gap(decision))
+
+    def test_narrow_gap_detector_allows_safe_narrow_corridor(self):
+        decision = {
+            "action": "forward",
+            "reason": (
+                "The immediate path in front of me is clear and shows open floor. "
+                "There are walls on both sides, forming a narrow corridor, but "
+                "they do not block my immediate path forward."
+            ),
+            "comment_front": (
+                "The immediate area directly in front of me is clear, with a "
+                "visible floor extending forward. Walls are present on both sides, "
+                "typical of a corridor."
+            ),
+            "reasoning_steps": [
+                "The bottom-center of the image clearly shows open floor.",
+                "Walls are visible on both sides, but they do not encroach upon my immediate driving lane.",
+                "The overall perspective indicates a narrow corridor that is safe to proceed through.",
+                "Telemetry suggests the center is not blocked.",
+            ],
+        }
+
+        self.assertFalse(main._gemini_cites_specific_obstacle(decision))
+        self.assertFalse(main._gemini_warns_narrow_gap(decision))
+
 
 if __name__ == "__main__":
     unittest.main()

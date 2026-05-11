@@ -293,6 +293,13 @@ autonav_loop_state: Dict[str, Any] = {
         "mode": "idle",
         "persistent_wall_turn": None,
     },
+    # Visual memory bank — labeled reference frames captured from "ground
+    # truth" events earlier in this run. Each entry: {label, b64, tick, note}.
+    # Sent alongside the current frame to every Gemini call so the model can
+    # compare against actual examples from THIS environment.
+    "visual_memory": [],
+    # Counter that drives the clear_corridor reference capture.
+    "consecutive_forwards": 0,
 }
 
 
@@ -2476,9 +2483,26 @@ def _opposite_turn_direction(action: Optional[str]) -> Optional[str]:
     return None
 
 
-def _blocked_turn_step_degrees(step_index: int, max_turn_deg: float) -> float:
-    """Blocked-lane search turns sweep 45 -> 90 degrees per side."""
-    staircase = (45.0, 90.0)
+def _blocked_turn_step_degrees(
+    step_index: int,
+    max_turn_deg: float,
+    opposite_side: bool = False,
+) -> float:
+    """Blocked-lane search anchored at the heading where the rover first
+    became blocked. Two steps per side.
+
+    First side staircase: 45° -> 90° (cumulative offset from anchor).
+    Opposite side staircase: 55° -> 100° (cumulative offset on opposite side
+    of anchor) — wider sweep because the path on the first side was already
+    eliminated, so we want to scan further on the second side.
+
+    Per-tick emitted turn = shortest_path(target_heading − current_heading),
+    so the side-switch tick emits 145° (from −90° to +55°) instead of 135°.
+    """
+    if opposite_side:
+        staircase = (55.0, 100.0)
+    else:
+        staircase = (45.0, 90.0)
     bounded_index = max(1, int(step_index))
     target_turn = staircase[min(bounded_index - 1, len(staircase) - 1)]
     return round(min(max_turn_deg, target_turn), 1)
@@ -2567,10 +2591,14 @@ def _apply_bounded_turn_scan_policy(
         right_checked = False
         mode = "search"
     elif step_index < 2:
-        current_direction = current_direction
+        # Same direction, second step (45° -> 90° from anchor).
         step_index += 1
         mode = "search"
     else:
+        # 2 steps done on this side — switch to the opposite side for the
+        # other 2 steps. This requires the rover to swing through the anchor
+        # to the opposite side; tick 3 emits the largest single rotation
+        # (135° if the rover went the full 90° on the first side).
         if current_direction == "turn_left":
             left_checked = True
         else:
@@ -2598,7 +2626,15 @@ def _apply_bounded_turn_scan_policy(
             right_checked = False
             mode = "stuck_recovery"
 
-    target_offset = _blocked_turn_step_degrees(step_index, min(max_turn_deg, 90.0))
+    # Opposite-side flag: true when one side has already been completed and
+    # this tick scans the other side. Drives the wider opposite-side
+    # staircase (55° -> 100°) instead of the first-side (45° -> 90°).
+    opposite_side = bool(left_checked) ^ bool(right_checked)
+    target_offset = _blocked_turn_step_degrees(
+        step_index,
+        min(max_turn_deg, 180.0),  # cap raised to allow 100° opposite-side step
+        opposite_side=opposite_side,
+    )
     signed_offset = target_offset if current_direction == "turn_left" else -target_offset
     target_heading = _wrap_heading_360(anchor_heading + signed_offset)
     relative_delta = _shortest_heading_diff(target_heading, current_heading)
@@ -2610,8 +2646,9 @@ def _apply_bounded_turn_scan_policy(
     staged_turn = round(min(max_turn_deg, abs(relative_delta)), 1)
     direction_text = "left" if staged_action == "turn_left" else "right"
     mode_tag = "stuck-recovery" if mode == "stuck_recovery" else "turn-search-scan"
+    side_tag = " (opposite-side)" if opposite_side and mode != "stuck_recovery" else ""
     target_text = (
-        f"target {target_offset:.0f}° from scan anchor"
+        f"target {target_offset:.0f}° from scan anchor{side_tag}"
         if mode != "stuck_recovery"
         else "restart search from a new heading"
     )
@@ -3004,15 +3041,948 @@ def _has_clear_forward_lane(
     return corridor_reopened
 
 
+_OBSTACLE_KEYWORDS = frozenset(
+    (
+        "box", "boxes", "carton", "package", "packaging",
+        "monitor", "screen", "tv", "television",
+        "printed", "text", "label", "sticker", "sign",
+        "bottle", "bottles", "cup", "cups", "cans", "cable", "cord", "wire",
+        "chair", "leg", "stool", "table",
+        "barrier", "obstacle", "object", "block", "blocked", "blocking",
+        "person", "people", "foot", "shoe",
+        "bag", "backpack", "luggage",
+        "trash", "bin",
+    )
+)
+
+
+def _decision_text_blob(decision: Dict[str, Any]) -> str:
+    """Join Gemini's free-text fields with sentence-ending periods so regex
+    patterns that use [^.] as a logical-step boundary (e.g. obstacle-side
+    detection) don't accidentally match across separate reasoning steps."""
+    parts: List[str] = []
+    for raw in (decision.get("reason"), decision.get("comment_front")):
+        if raw:
+            parts.append(str(raw).rstrip())
+    for step in (decision.get("reasoning_steps") or []):
+        if step:
+            parts.append(str(step).rstrip())
+    # Append a period to each non-empty fragment if it doesn't already end
+    # with sentence punctuation, then join with a space.
+    bounded: List[str] = []
+    for p in parts:
+        if p and p[-1] not in ".!?":
+            p = p + "."
+        bounded.append(p)
+    return " ".join(bounded).lower()
+
+
+def _gemini_cites_specific_obstacle(decision: Dict[str, Any]) -> bool:
+    """Return True when Gemini's text describes a concrete visible obstacle
+    (named object, printed surface, etc.) — these are real obstacles the
+    color-statistics path profile cannot detect because a cardboard box on
+    the floor looks floor-colored. In that case we should trust Gemini's
+    turn decision rather than override it."""
+    blob = _decision_text_blob(decision)
+    obstacle_tokens = set(re.findall(r"[a-z0-9]+", blob)).intersection(
+        _OBSTACLE_KEYWORDS
+    )
+    if not obstacle_tokens:
+        return False
+    if obstacle_tokens.issubset({"block", "blocked", "blocking"}) and re.search(
+        r"(do not|don't|not|does not|doesn't)[^.]{0,40}\b(block|blocked|blocking)\b",
+        blob,
+    ):
+        return False
+    return True
+
+
+_OBSTACLE_TO_SIDE_PATTERN = re.compile(
+    # OBSTACLE_NOUN ... POSITION_PHRASE ... left/right
+    r"\b(?:box|boxes|carton|package|packaging|monitor|screen|tv|television|"
+    r"wall|obstacle|obstruction|object|barrier|bag|bags|backpack|luggage|"
+    r"chair|stool|table|leg|legs|bottle|bottles|can|cans|cup|cups|"
+    r"cable|cables|cord|cords|wire|wires|trash|bin|crate|crates|sign|signs|"
+    r"sticker|label|printed)\b"
+    r"[^.\n]{0,60}?"
+    r"\b(?:on|to|at|near|along|towards?|past|side of|side is|side of me)\b"
+    r"[^.\n]{0,15}?"
+    r"\b(?:the\s+)?(?:my\s+)?(?:right|left)\b",
+    re.IGNORECASE,
+)
+_SIDE_OPENING_PATTERN = re.compile(
+    # Phrasing about an OPENING / PATH / FLOOR being on a side — also useful
+    # signal that Gemini sees space to the side
+    r"\b(?:opening|opening is|gap|path|floor|space|corridor|room|clear)\b"
+    r"[^.\n]{0,40}?"
+    r"\b(?:on|to|towards?|along)\b"
+    r"[^.\n]{0,15}?"
+    r"\b(?:the\s+)?(?:my\s+)?(?:right|left)\b",
+    re.IGNORECASE,
+)
+
+
+def _gemini_places_obstacle_mostly_to_side(decision: Dict[str, Any]) -> bool:
+    """Gemini mentions a concrete obstacle but locates it mainly on one side.
+    In these cases a clear local center-lane signal can still justify a short
+    forward move.
+
+    Uses a regex that requires the side direction (left/right) to follow an
+    obstacle noun within ~75 chars — this prevents false positives from
+    action phrases like 'I'll turn to my right' (which describes movement
+    direction, not obstacle position).
+    """
+    if not _gemini_cites_specific_obstacle(decision):
+        return False
+    blob = _decision_text_blob(decision)
+    if _OBSTACLE_TO_SIDE_PATTERN.search(blob):
+        return True
+    if _SIDE_OPENING_PATTERN.search(blob):
+        return True
+    return False
+
+
+_FILLS_VIEW_PHRASES = (
+    "completely filling",
+    "fills the entire",
+    "filling the entire",
+    "filling my entire",
+    "occupying the entire",
+    "occupies the entire",
+    "fills my view",
+    "fills the frame",
+    "fills the entire frame",
+    "fully blocked",
+    "completely blocked",
+    "completely obscured",
+    "completely obstructed",
+    "directly in front of me",
+    "blocking entire",
+    "blocking my entire",
+    "blocks the entire",
+    "no visible floor",
+    "no visible path",
+    "no visible corridor",
+    "blocking any forward",
+    "blocking all forward",
+    "occupies the entire frame",
+)
+
+
+def _gemini_says_obstacle_fills_view(decision: Dict[str, Any]) -> bool:
+    """Gemini's text uses 'completely filling' / 'directly in front' /
+    'blocking entire view' phrasing — a high-conviction obstacle citation
+    that should be respected over color-stats floor signals which can be
+    fooled by floor-toned cardboard fully filling the frame."""
+    blob = _decision_text_blob(decision)
+    return any(p in blob for p in _FILLS_VIEW_PHRASES)
+
+
+_VISUAL_MEMORY_LABELS = (
+    "clear_corridor",
+    "wall_close",
+    "cardboard_face",
+    "narrow_obstacle",
+    "named_obstacle",
+)
+
+
+def _downsample_frame_for_memory(frame_b64: str) -> Optional[str]:
+    """Downsample a front-camera frame to 320x240 JPEG so it can be carried
+    in the visual memory without ballooning prompt tokens. Returns base64
+    JPEG, or None on failure."""
+    try:
+        from PIL import Image
+        import io
+        raw = base64.b64decode(frame_b64)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((320, 240))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=78)
+        return base64.b64encode(out.getvalue()).decode()
+    except Exception as exc:
+        logger.debug("Visual memory downsample failed: %s", exc)
+        return None
+
+
+def _capture_visual_memory(
+    label: str,
+    front_b64: str,
+    tick: int,
+    note: str,
+    log_dir: Optional[str],
+) -> None:
+    """Add a labeled reference frame to the visual memory bank if that label
+    is not already present. First-write wins per label so the references
+    represent the *first* clean example of each scenario in this run.
+    Also writes a copy to log_dir for audit."""
+    if label not in _VISUAL_MEMORY_LABELS:
+        return
+    bank: List[Dict[str, Any]] = autonav_loop_state.setdefault("visual_memory", [])
+    if any(entry.get("label") == label for entry in bank):
+        return  # one entry per label — keep the first clean example
+    small_b64 = _downsample_frame_for_memory(front_b64)
+    if not small_b64:
+        return
+    entry = {
+        "label": label,
+        "b64": small_b64,
+        "tick": tick,
+        "note": note,
+    }
+    bank.append(entry)
+    logger.info("Autonav visual memory captured: %s (tick %s) — %s", label, tick, note)
+    # Persist a copy under the run's log dir for offline review.
+    if log_dir:
+        try:
+            with open(os.path.join(log_dir, f"reference_{label}.jpg"), "wb") as fh:
+                fh.write(base64.b64decode(small_b64))
+            with open(os.path.join(log_dir, f"reference_{label}.json"), "w") as fh:
+                json.dump({"label": label, "tick": tick, "note": note}, fh, indent=2)
+        except Exception as exc:
+            logger.debug("Visual memory save to log_dir failed: %s", exc)
+
+
+def _looks_like_smooth_surface_at_lens(
+    path_profile: Optional[Dict[str, Any]],
+    decision: Dict[str, Any],
+    uniformity: Optional[float] = None,
+    bot_dist_to_floor: Optional[float] = None,
+) -> bool:
+    """Detect 'cardboard / smooth object face pressed close to the camera while
+    Gemini is guessing'. Failure mode: a tan cardboard box face fools the
+    color profile (beige looks floor-like) and Gemini hallucinates a clear
+    corridor at low confidence.
+
+    Required evidence (ALL must hold):
+      • action == "forward" (Gemini's pick we're guarding against)
+      • lane_edge_density very low (smooth surface, no corridor texture)
+      • Gemini's confidence < 0.3 (it's guessing)
+      • uniformity < 30 (frame is flat — pressed-against signature; a real
+        corridor with smooth wood floor has uniformity 30+ from the wider
+        scene, not just the lane)
+      • bot_dist_to_floor > 28 OR not provided (the bottom isn't matching
+        learned floor closely; if it does match, the smooth lane is more
+        likely real wood than cardboard)
+    """
+    if decision.get("action") != "forward":
+        return False
+    if not isinstance(path_profile, dict):
+        return False
+    edge_density = path_profile.get("lane_edge_density")
+    if not isinstance(edge_density, (int, float)) or edge_density > 0.005:
+        return False
+    confidence = decision.get("confidence")
+    try:
+        conf_val = float(confidence) if confidence is not None else 0.0
+    except (TypeError, ValueError):
+        conf_val = 0.0
+    if conf_val >= 0.3:
+        return False
+    # New guards — distinguish smooth wood floor from pressed-against cardboard
+    if isinstance(uniformity, (int, float)) and uniformity >= 30.0:
+        return False  # varied scene = real corridor, not pressed-against
+    if isinstance(bot_dist_to_floor, (int, float)) and bot_dist_to_floor < 28.0:
+        return False  # bottom matches floor = real floor visible, not cardboard
+    return True
+
+
+def _apply_smooth_close_surface_downgrade(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+    uniformity: Optional[float] = None,
+    bot_dist_to_floor: Optional[float] = None,
+) -> Dict[str, Any]:
+    """When the lane has zero edge content AND Gemini's confidence is very
+    low AND the scene looks pressed-against (low uniformity, bottom strip
+    not matching floor), treat as 'smooth object pressed against the lens'
+    and turn to look for a real corridor. Picks the side with more visible
+    floor.
+
+    Smooth wood floor at the right angle has the same low edge density,
+    but a real corridor scene also has uniformity > 30 and bot_dist_to_floor
+    in the floor-match range — those guards let real corridors pass through.
+    """
+    if not _looks_like_smooth_surface_at_lens(
+        path_profile, decision,
+        uniformity=uniformity,
+        bot_dist_to_floor=bot_dist_to_floor,
+    ):
+        return decision
+
+    side = "turn_right"
+    side_reason = "default-right (no path_profile)"
+    if isinstance(path_profile, dict):
+        lf = path_profile.get("left_floor_dist")
+        rf = path_profile.get("right_floor_dist")
+        if isinstance(lf, (int, float)) and isinstance(rf, (int, float)):
+            side = "turn_left" if lf < rf else "turn_right"
+            side_reason = f"left_floor_dist={lf}, right_floor_dist={rf}"
+
+    logger.info(
+        "Autonav smooth-close-surface downgrade: lane_edge_density=%s, "
+        "confidence=%s — Gemini may be guessing through a cardboard/wall face. "
+        "Downgrading forward to %s (%s)",
+        path_profile.get("lane_edge_density") if isinstance(path_profile, dict) else None,
+        decision.get("confidence"),
+        side,
+        side_reason,
+    )
+    new_decision = dict(decision)
+    new_decision["action"] = side
+    new_decision["linear_speed"] = 0.0
+    new_decision["turn_degrees"] = min(60.0, max_turn_deg)
+    new_decision["duration_ms"] = 800
+    new_decision["reason"] = (
+        (decision.get("reason", "") + " [smooth-close-surface downgrade]").strip()
+    )
+    return new_decision
+
+
+def _apply_distant_obstacle_probe_override(
+    decision: Dict[str, Any],
+    bot_dist_to_floor: Optional[float],
+    tb_delta: Optional[float],
+    uniformity: Optional[float],
+    path_profile: Optional[Dict[str, Any]],
+    learned_floor_rgb: Optional[List[float]],
+    learned_wall_rgb: Optional[List[float]],
+    color_sample_count: Optional[int],
+    max_linear: float,
+) -> Dict[str, Any]:
+    """High-confidence-Gemini override: when Gemini confidently picks turn
+    while seeing 'boxes blocking' but the GEOMETRY signals say the obstacle
+    is at distance with floor still visible between rover and obstacle.
+
+    Common failure mode: Gemini correctly identifies a stack of boxes ahead
+    but interprets them as immediately blocking. In reality the rover is
+    several rover-lengths away from them with drivable floor in between.
+    The right action is to advance briefly so the next decision sees the
+    obstacle from closer and Gemini either confirms blocked (and turns) or
+    finds a side path it couldn't see from far away.
+
+    Triggers ONLY when ALL of:
+      • Gemini picked turn
+      • Calibration is NOT suspect (good baseline; signals trustworthy)
+      • path_profile.center_blocked != True
+      • tb_delta > 35 — real horizon visible (not pressed against anything)
+      • uniformity > 30 — frame has structure (not a flat surface)
+      • bot_dist_to_floor < 25 — bottom strip loosely matches floor
+      • At least one lane slice (left/center/right) floor_dist < 20 — floor
+        clearly visible somewhere in the immediate lane
+
+    Result: tiny 200ms / ~3cm probe. Smallest of all probes because we are
+    overriding a confident decision.
+    """
+    if decision.get("action") not in ("turn_left", "turn_right"):
+        return decision
+    if not isinstance(path_profile, dict):
+        return decision
+    if path_profile.get("center_blocked") is True:
+        return decision
+    if _calibration_is_suspect(learned_floor_rgb, learned_wall_rgb, color_sample_count):
+        return decision  # bad calibration handled by another tier
+    if not isinstance(tb_delta, (int, float)) or tb_delta <= 35.0:
+        return decision
+    if not isinstance(uniformity, (int, float)) or uniformity <= 30.0:
+        return decision
+    if not isinstance(bot_dist_to_floor, (int, float)) or bot_dist_to_floor >= 25.0:
+        return decision
+
+    slice_floor_dists = []
+    for key in ("left_floor_dist", "center_floor_dist", "right_floor_dist"):
+        v = path_profile.get(key)
+        if isinstance(v, (int, float)):
+            slice_floor_dists.append(v)
+    min_slice = min(slice_floor_dists) if slice_floor_dists else None
+    if min_slice is None or min_slice >= 20.0:
+        return decision
+
+    logger.info(
+        "Autonav distant-obstacle probe override: confidence=%s but tb_delta=%s, "
+        "uniformity=%s, bot_dist_to_floor=%s, min_slice_floor_dist=%s — "
+        "boxes at distance, floor visible. Tiny probe instead of %s",
+        decision.get("confidence"),
+        tb_delta,
+        uniformity,
+        bot_dist_to_floor,
+        min_slice,
+        decision["action"],
+    )
+    new_decision = dict(decision)
+    new_decision["action"] = "forward"
+    new_decision["linear_speed"] = min(max(0.15, 0.15), max_linear)
+    new_decision["turn_degrees"] = 0.0
+    new_decision["duration_ms"] = 200  # ~3 cm — smallest probe; high-confidence override
+    new_decision["reason"] = (
+        (decision.get("reason", "") + " [distant-obstacle probe]").strip()
+    )
+    return new_decision
+
+
+def _apply_strong_floor_signal_override(
+    decision: Dict[str, Any],
+    bot_dist_to_floor: Optional[float],
+    tb_delta: Optional[float],
+    path_profile: Optional[Dict[str, Any]],
+    max_linear: float,
+) -> Dict[str, Any]:
+    """Override Gemini's turn (even at high confidence) when THREE independent
+    signals all confirm clear floor in the center-bottom:
+      • bot_dist_to_floor very small (frame bottom is near-identical to learned floor)
+      • center_floor_dist very small (center matches learned floor)
+      • lane_edge_density nonzero (real floor texture detected)
+      • front_tb_delta strong (real horizon, not a wall up close)
+      • path_profile.center_blocked is not True
+
+    Failure mode this catches: Gemini hallucinates 'box directly in front'
+    while looking at a box that is actually off to one side, citing the
+    cardboard_face reference image even though the box is at distance, not
+    pressed against the lens. Color/texture/horizon all agree the floor is
+    right there. We pick a 10cm cautious forward probe.
+    """
+    if decision.get("action") not in ("turn_left", "turn_right"):
+        return decision
+    if not isinstance(path_profile, dict):
+        return decision
+    if path_profile.get("center_blocked") is True:
+        return decision
+
+    if not isinstance(bot_dist_to_floor, (int, float)) or bot_dist_to_floor >= 8.0:
+        return decision
+    if not isinstance(tb_delta, (int, float)) or tb_delta <= 50.0:
+        return decision
+
+    center_floor = path_profile.get("center_floor_dist")
+    if not isinstance(center_floor, (int, float)) or center_floor >= 15.0:
+        return decision
+    edge_density = path_profile.get("lane_edge_density")
+    if not isinstance(edge_density, (int, float)) or edge_density < 0.02:
+        return decision
+
+    logger.info(
+        "Autonav strong-floor-signal override: bot_dist_to_floor=%s, "
+        "center_floor_dist=%s, tb_delta=%s, edge_density=%s, confidence=%s — "
+        "three-way floor agreement outranks Gemini turn",
+        bot_dist_to_floor,
+        center_floor,
+        tb_delta,
+        edge_density,
+        decision.get("confidence"),
+    )
+    new_decision = dict(decision)
+    new_decision["action"] = "forward"
+    new_decision["linear_speed"] = min(max(0.18, 0.15), max_linear)
+    new_decision["turn_degrees"] = 0.0
+    new_decision["duration_ms"] = 600  # ~11cm probe
+    new_decision["reason"] = (
+        (decision.get("reason", "") + " [strong-floor-signal override]").strip()
+    )
+    return new_decision
+
+
+def _calibration_is_suspect(
+    learned_floor_rgb: Optional[List[float]],
+    learned_wall_rgb: Optional[List[float]],
+    color_sample_count: Optional[int],
+) -> bool:
+    """Return True when the per-run color calibration cannot be trusted.
+
+    Failure modes the value-based checks catch:
+      • learned_wall is too dark (max channel < 100) → the 'wall' sample was
+        not actually a wall; walls are usually brighter than floors.
+      • learned_floor and learned_wall are too similar (RGB distance < 60)
+        → both samples covered the same surface, no real horizon learned.
+      • learned_floor max channel >= learned_wall max channel → values are
+        likely swapped (floor sampled as wall and vice versa).
+
+    Sample count alone is NOT a reason to flag suspect: a single sample with
+    reasonable floor-vs-wall values is more useful than no calibration. The
+    earlier `count < 3` rule blocked legitimate first-tick decisions even
+    when the calibration was obviously good (dark floor, bright wall, well
+    separated).
+    """
+    if not learned_floor_rgb or not learned_wall_rgb:
+        return True
+    if len(learned_wall_rgb) != 3 or len(learned_floor_rgb) != 3:
+        return True
+    if max(learned_wall_rgb) < 100.0:
+        return True  # wall sample is too dark to be a real wall
+    if max(learned_floor_rgb) >= max(learned_wall_rgb):
+        return True  # floor brighter than wall — likely swapped
+    dist = _rgb_distance(list(learned_floor_rgb), list(learned_wall_rgb))
+    if dist is not None and dist < 60.0:
+        return True
+    return False
+
+
+def _apply_low_confidence_floor_probe_override(
+    decision: Dict[str, Any],
+    bot_dist_to_floor: Optional[float],
+    tb_delta: Optional[float],
+    path_profile: Optional[Dict[str, Any]],
+    max_linear: float,
+    uniformity: Optional[float] = None,
+    learned_floor_rgb: Optional[List[float]] = None,
+    learned_wall_rgb: Optional[List[float]] = None,
+    color_sample_count: Optional[int] = None,
+    recent_turn_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Convert a low-confidence turn into a small forward probe when there
+    is some floor visible at the bottom of the frame. Multiple evidence
+    levels:
+
+      Strong  (bot_dist_to_floor < 18): bottom matches learned floor closely.
+              Probe = 400 ms / ~6 cm.
+
+      Moderate (18 <= bot_dist_to_floor < 28) AND lane_edge_density >= 0.012:
+              bottom is loosely floor-colored AND the lane shows real
+              texture (rules out a smooth cardboard face that happens to be
+              floor-toned). Smaller probe = 300 ms / ~4-5 cm.
+
+    Common failure this catches: the rover sees a thin strip of floor below
+    a box pile / monitor stack but Gemini classifies the whole frame as
+    'blocked' and picks a 45° turn. A small probe advances toward the
+    obstacles and the next tick has a much clearer view, without committing
+    to a full forward burst.
+    """
+    if decision.get("action") not in ("turn_left", "turn_right"):
+        return decision
+
+    try:
+        confidence = float(decision.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence >= 0.3:
+        return decision  # Gemini was sure — leave the turn alone
+
+    # High-conviction obstacle citation: Gemini described the obstacle as
+    # filling the view / directly in front / completely blocking. This is
+    # stronger than the `confidence` field (which Gemini often leaves at 0).
+    # The signal beats color stats which can be fooled by a floor-toned
+    # cardboard face filling the frame. Only honor when the obstacle is NOT
+    # placed off to one side (in which case probe overrides are still useful).
+    if (
+        _gemini_cites_specific_obstacle(decision)
+        and _gemini_says_obstacle_fills_view(decision)
+        and not _gemini_places_obstacle_mostly_to_side(decision)
+    ):
+        logger.info(
+            "Autonav floor-probe override SKIPPED: Gemini cited a specific obstacle "
+            "filling the view (e.g. 'completely filling' / 'directly in front') — trusting %s",
+            decision["action"],
+        )
+        return decision
+
+    if not isinstance(tb_delta, (int, float)):
+        return decision
+
+    cal_suspect = _calibration_is_suspect(
+        learned_floor_rgb, learned_wall_rgb, color_sample_count
+    )
+
+    spin_fatigue = (
+        isinstance(recent_turn_count, int) and recent_turn_count >= 3
+    )
+
+    # When calibration is OK, trust path_profile.center_blocked. Two
+    # exceptions: (a) calibration is suspect, (b) the rover has been
+    # turning a lot — in both cases we want a small probe to break the
+    # loop even if center_blocked is set (a chair / partial obstacle in
+    # the center can lift center_blocked even when there's drivable space
+    # around it).
+    if (
+        isinstance(path_profile, dict)
+        and path_profile.get("center_blocked")
+        and not cal_suspect
+        and not spin_fatigue
+    ):
+        return decision
+
+    edge_density = (
+        path_profile.get("lane_edge_density")
+        if isinstance(path_profile, dict)
+        else None
+    )
+
+    # Lane-slice fallback: bot_dist_to_floor is averaged across the whole
+    # bottom strip, so a box at the edge can pull the average up even when
+    # there is real floor visible elsewhere in the lane. Use the per-slice
+    # path_profile distances as a sensitive backup.
+    slice_floor_dists = []
+    if isinstance(path_profile, dict):
+        for key in ("left_floor_dist", "center_floor_dist", "right_floor_dist"):
+            v = path_profile.get(key)
+            if isinstance(v, (int, float)):
+                slice_floor_dists.append(v)
+    min_slice = min(slice_floor_dists) if slice_floor_dists else None
+
+    has_real_texture = (
+        isinstance(edge_density, (int, float)) and edge_density >= 0.012
+    )
+
+    # Per-tier gates. tb_delta and center_floor_dist requirements relax for
+    # lane-slice because a box pile in front of a real corridor naturally
+    # reduces the global horizon signal AND skews the center color.
+    center_floor = (
+        path_profile.get("center_floor_dist")
+        if isinstance(path_profile, dict)
+        else None
+    )
+
+    # Suspect-calibration tier: color signals unreliable, lean on horizon +
+    # uniformity + lane texture. Wall-proximity escape upstream already
+    # catches uniformity < 8 / tb_delta < 6, so anything reaching here has
+    # SOME scene structure — we just can't trust the slice color distances.
+    # uniformity is the strongest "not pressed against" signal; require it
+    # firmly. tb_delta can be moderate (15+) when the calibrated 'wall' was
+    # actually a shadowed surface, suppressing the global horizon contrast.
+    if cal_suspect:
+        if (
+            isinstance(uniformity, (int, float))
+            and uniformity > 30.0
+            and tb_delta > 15.0
+            and has_real_texture
+        ):
+            evidence_level = "suspect-calibration"
+            probe_ms = 350  # ~5 cm — most cautious; calibration unreliable
+        else:
+            return decision
+    elif not isinstance(bot_dist_to_floor, (int, float)):
+        return decision
+    elif (
+        # Very-strong-slice evidence: at least one slice is almost identical
+        # to learned floor (< 10). Highest priority probe — most confident.
+        min_slice is not None
+        and min_slice < 10.0
+        and has_real_texture
+        and tb_delta > 18.0
+    ):
+        evidence_level = "very-strong-slice"
+        probe_ms = 700  # ~10-11 cm — meaningful forward when floor is unmistakable
+    elif bot_dist_to_floor < 18.0 and tb_delta > 45.0:
+        evidence_level = "strong"
+        probe_ms = 600  # ~9 cm
+    elif (
+        bot_dist_to_floor < 28.0
+        and tb_delta > 45.0
+        and has_real_texture
+        and (not isinstance(center_floor, (int, float)) or center_floor <= 50.0)
+    ):
+        evidence_level = "moderate"
+        probe_ms = 500  # ~7-8 cm
+    elif (
+        # Moderate-low-horizon: bottom strip looks like floor and the lane
+        # has texture, but the global tb_delta is low because the scene has
+        # dark stuff at both top (monitor screens, ceiling fixtures) and
+        # bottom (wood floor). Compensate by requiring high uniformity to
+        # confirm the scene is varied (not a wall up close).
+        bot_dist_to_floor < 28.0
+        and tb_delta > 15.0
+        and isinstance(uniformity, (int, float))
+        and uniformity > 30.0
+        and has_real_texture
+        and (not isinstance(center_floor, (int, float)) or center_floor <= 50.0)
+    ):
+        evidence_level = "moderate-low-horizon"
+        probe_ms = 350  # ~5 cm — smaller than moderate; weaker horizon signal
+    elif (
+        # Lane-slice evidence: at least one slice (left/center/right) is
+        # solidly floor-colored even if the averaged bottom is contaminated
+        # by box edges. Box pile in front lowers tb_delta naturally, so the
+        # horizon gate is relaxed. Real texture required to rule out smooth
+        # cardboard.
+        min_slice is not None
+        and min_slice < 28.0
+        and has_real_texture
+        and tb_delta > 18.0
+    ):
+        evidence_level = "lane-slice"
+        probe_ms = 400  # ~6 cm
+    elif (
+        # Spin-fatigue tier: rover has been turning >=3 of last 5 ticks.
+        # Even with center_blocked=True we want a tiny probe to break the
+        # loop, IF there's some loose floor evidence on a slice and the
+        # surface shows texture (not a smooth cardboard face).
+        spin_fatigue
+        and min_slice is not None
+        and min_slice < 32.0
+        and has_real_texture
+        and tb_delta > 8.0
+    ):
+        evidence_level = "spin-fatigue"
+        probe_ms = 250  # ~3-4 cm — tiny; we are overriding center_blocked
+    elif (
+        # Cornered tier: rover has turned >=4 of last 5 ticks (heavily stuck).
+        # Geometry signals confirm the rover is NOT pressed against anything
+        # (real horizon, varied scene). All slice floor distances may be
+        # moderate (no slice unambiguously floor) but a tiny probe is the
+        # only way to break out of the spin loop.
+        isinstance(recent_turn_count, int)
+        and recent_turn_count >= 4
+        and min_slice is not None
+        and min_slice < 45.0
+        and has_real_texture
+        and tb_delta > 15.0
+        and isinstance(uniformity, (int, float))
+        and uniformity > 30.0
+    ):
+        evidence_level = "cornered"
+        probe_ms = 200  # ~3 cm — smallest probe; loosest evidence
+    else:
+        return decision  # not enough floor evidence to override the turn
+
+    logger.info(
+        "Autonav low-confidence floor-probe override (%s): confidence=%s, "
+        "bot_dist_to_floor=%s, tb_delta=%s, edge_density=%s — converting %s to %sms forward probe",
+        evidence_level,
+        confidence,
+        bot_dist_to_floor,
+        tb_delta,
+        edge_density,
+        decision["action"],
+        probe_ms,
+    )
+    new_decision = dict(decision)
+    new_decision["action"] = "forward"
+    new_decision["linear_speed"] = min(max(0.15, 0.15), max_linear)
+    new_decision["turn_degrees"] = 0.0
+    new_decision["duration_ms"] = probe_ms
+    new_decision["reason"] = (
+        (decision.get("reason", "")
+         + f" [low-confidence floor-probe ({evidence_level})]").strip()
+    )
+    return new_decision
+
+
+_NARROW_GAP_KEYWORDS = (
+    # Specific gap-too-tight phrases. Removed standalone "narrow" and " tight "
+    # because they false-matched on environment descriptions like "tight
+    # tabletop maze" (from the system prompt) or "narrow corridor" being
+    # used to describe the maze in general rather than the specific gap.
+    "tight gap", "tight squeeze", "squeeze through",
+    "barely fit", "barely fits", "barely enough",
+    "very close together", "too close together", "close together",
+    "tiny gap", "tiny opening", " slim ",
+    "thin gap", "small gap", "small opening",
+    "just enough room", "just fits", "may not fit", "might not fit",
+    "narrow gap", "narrow opening", "narrow passage",
+    "narrow corridor", "narrow path",
+    "too narrow", "too tight",
+    "cannot fit", "can't fit", "won't fit",
+)
+
+
+def _gemini_warns_narrow_gap(decision: Dict[str, Any]) -> bool:
+    """Gemini's text indicates a too-tight gap flanked by physical objects.
+    Visual line-of-sight ≠ rover-fit; we must NOT drive into a gap that
+    Gemini itself describes as 'narrow', 'tight', or 'squeeze'."""
+    blob = " " + " ".join(
+        [
+            str(decision.get("reason") or ""),
+            str(decision.get("comment_front") or ""),
+            " ".join(decision.get("reasoning_steps") or []),
+        ]
+    ).lower() + " "
+    negated_narrow_gap = (
+        re.search(
+            r"(does not|doesn't|is not|isn't|not|no)\s+"
+            r"(?:resemble|look like|match|show|a|an|the)?\s*"
+            r"(?:too[- ]?)?(?:narrow|tight|small)\s+gap",
+            blob,
+        )
+        is not None
+        or re.search(
+            r"(?:narrow|tight|small)\s+gap[^.]{0,80}"
+            r"(?:is not|isn't|not|does not|doesn't)\s+"
+            r"(?:present|visible|shown|there|directly ahead)",
+            blob,
+        )
+        is not None
+    )
+    if negated_narrow_gap:
+        return False
+    narrow_corridor_is_safe = (
+        "narrow corridor" in blob
+        and any(
+            phrase in blob
+            for phrase in (
+                "safe to proceed",
+                "safe to proceed through",
+                "do not block",
+                "does not block",
+                "do not encroach",
+                "does not encroach",
+                "do not encroach upon",
+                "typical of a corridor",
+                "clear path",
+                "clear and shows open floor",
+            )
+        )
+    )
+    if narrow_corridor_is_safe:
+        return False
+
+    has_narrow = any(kw in blob for kw in _NARROW_GAP_KEYWORDS)
+    has_obstacle = _gemini_cites_specific_obstacle(decision)
+    return has_narrow and has_obstacle
+
+
+_POSITIVE_CLEARANCE_PHRASES = (
+    "drivable corridor",
+    "drivable narrow corridor",
+    "narrow drivable",
+    "can safely move forward",
+    "can safely pass",
+    "safe to pass",
+    "safe to move",
+    "safely navigate",
+    "wide enough",
+    "enough clearance",
+    "enough room",
+    "fits through",
+    "rover fits",
+    "i can fit",
+    "passable",
+    "do not occupy",
+    "does not occupy",
+    "do not block",
+    "does not block",
+)
+
+
+def _gemini_asserts_clearance(decision: Dict[str, Any]) -> bool:
+    """Gemini's text affirmatively says the gap IS drivable / fits / passable
+    even while describing it as 'narrow'. Distinguishes 'narrow but driveable'
+    (Gemini's informed forward choice) from 'narrow can't fit' (real warning)."""
+    blob = _decision_text_blob(decision)
+    return any(p in blob for p in _POSITIVE_CLEARANCE_PHRASES)
+
+
+def _apply_narrow_gap_downgrade(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    max_turn_deg: float,
+) -> Dict[str, Any]:
+    """If Gemini picked forward but described the gap as narrow/tight while
+    naming physical objects (box, wall, etc.), convert the action to a turn
+    toward whichever side has more visible floor. Avoids driving into slots
+    that visually look passable but the rover cannot physically fit.
+
+    Skips when:
+      - Gemini was confident (>= 0.6) — it knows what 'narrow' means and
+        chose forward anyway.
+      - Gemini's text affirmatively asserts the gap is drivable / passable /
+        fits — distinguishes "narrow corridor I can drive through" from
+        "narrow gap I can't fit through".
+    """
+    if decision.get("action") != "forward":
+        return decision
+    if not _gemini_warns_narrow_gap(decision):
+        return decision
+
+    try:
+        confidence = float(decision.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence >= 0.6:
+        logger.info(
+            "Autonav narrow-gap downgrade SKIPPED: Gemini was confident (%s) about going "
+            "through narrow corridor — trusting forward",
+            decision.get("confidence"),
+        )
+        return decision
+    if _gemini_asserts_clearance(decision):
+        logger.info(
+            "Autonav narrow-gap downgrade SKIPPED: Gemini affirmatively asserted clearance "
+            "(drivable/passable/fits) — trusting forward"
+        )
+        return decision
+
+    side = "turn_right"
+    side_reason = "default-right (no path_profile)"
+    if isinstance(path_profile, dict):
+        lf = path_profile.get("left_floor_dist")
+        rf = path_profile.get("right_floor_dist")
+        if isinstance(lf, (int, float)) and isinstance(rf, (int, float)):
+            side = "turn_left" if lf < rf else "turn_right"
+            side_reason = f"left_floor_dist={lf}, right_floor_dist={rf}"
+
+    logger.info(
+        "Autonav narrow-gap downgrade: Gemini said forward through a tight gap; "
+        "downgrading to %s (%s)",
+        side,
+        side_reason,
+    )
+    new_decision = dict(decision)
+    new_decision["action"] = side
+    new_decision["linear_speed"] = 0.0
+    new_decision["turn_degrees"] = min(45.0, max_turn_deg)
+    new_decision["duration_ms"] = 800
+    new_decision["reason"] = (
+        (decision.get("reason", "") + " [narrow-gap downgrade]").strip()
+    )
+    return new_decision
+
+
 def _apply_visual_forward_override(
     decision: Dict[str, Any],
     clear_forward_lane: bool,
     max_linear: float,
     max_forward_ms: int,
 ) -> Dict[str, Any]:
-    """If the current frame is clearly drivable, don't let a turn override that."""
+    """If the current frame is clearly drivable, don't let a turn override that.
+
+    BUT — defer to Gemini when Gemini's own reasoning cites a specific
+    visible obstacle (named object, printed surface, text, etc.). The color
+    profile this override depends on cannot detect a cardboard box on the
+    floor, since a box on a floor is roughly floor-colored. Vision can.
+
+    Two skip paths (either is sufficient):
+      • High Gemini confidence (>= 0.6) AND obstacle cited AND not on side.
+      • High-conviction obstacle phrasing in the reasoning ("completely
+        filling", "directly in front", "entire frame", etc.) — the
+        confidence field is often 0 even when Gemini's reasoning is sure.
+    """
     if decision.get("action") not in ("turn_left", "turn_right") or not clear_forward_lane:
         return decision
+
+    cites_obstacle = _gemini_cites_specific_obstacle(decision)
+    on_side = _gemini_places_obstacle_mostly_to_side(decision)
+    high_conviction_text = _gemini_says_obstacle_fills_view(decision)
+    try:
+        confidence = float(decision.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    if cites_obstacle:
+        # When Gemini's text says the obstacle FILLS THE VIEW (e.g. "directly
+        # in front of me", "completely blocked", "occupying the entire frame"),
+        # respect the turn unconditionally. A side-gap mention in that case
+        # describes the ESCAPE DIRECTION Gemini wants to turn toward, not
+        # justification for driving forward through the center obstacle.
+        if high_conviction_text:
+            logger.info(
+                "Autonav visual-forward override SKIPPED: Gemini says obstacle fills view "
+                "(confidence=%s) — trusting %s",
+                decision.get("confidence"),
+                decision["action"],
+            )
+            return decision
+        # When the obstacle is described as off to a side (with center clear)
+        # AND Gemini was confident, also respect the turn. (The override is
+        # designed for the case where Gemini misreads side-of-frame objects;
+        # respecting it when Gemini is sure avoids fighting Gemini's
+        # legitimate turns.)
+        if confidence >= 0.6 and not on_side:
+            logger.info(
+                "Autonav visual-forward override SKIPPED: Gemini cited a specific obstacle "
+                "at high confidence (confidence=%s) — trusting %s",
+                decision.get("confidence"),
+                decision["action"],
+            )
+            return decision
 
     return _build_local_forward_decision(
         max_linear=max_linear,
@@ -3162,6 +4132,123 @@ def _detect_side_opening_only_turn(
         return open_side_turn
 
     return None
+
+
+def _gemini_confirms_center_forward_lane(decision: Dict[str, Any]) -> bool:
+    """True when Gemini explicitly says the immediate center/ahead lane is open."""
+    if decision.get("action") != "forward":
+        return False
+    try:
+        confidence = float(decision.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.8 or _gemini_warns_narrow_gap(decision):
+        return False
+
+    blob = _decision_text_blob(decision)
+    center_is_clear = (
+        re.search(
+            r"(center|center-bottom|directly ahead|directly in front|in front|"
+            r"ahead|driving lane|center lane|path)[^.]{0,90}"
+            r"(clear|open|safe|visible floor|floor visible)",
+            blob,
+        )
+        is not None
+        or re.search(
+            r"(clear|open|safe|visible floor|floor visible)[^.]{0,90}"
+            r"(center|center-bottom|directly ahead|directly in front|in front|"
+            r"ahead|driving lane|center lane|path)",
+            blob,
+        )
+        is not None
+    )
+    if not center_is_clear:
+        return False
+
+    # If Gemini names an obstacle, only trust this forward call when it also
+    # places the obstacle off to a side. Otherwise the existing obstacle
+    # guardrails should keep priority.
+    if _gemini_cites_specific_obstacle(decision):
+        side_only_language = any(
+            phrase in blob
+            for phrase in (
+                "off to my left",
+                "off to the left",
+                "to my left",
+                "on my left",
+                "left side",
+                "left half",
+                "off to my right",
+                "off to the right",
+                "to my right",
+                "on my right",
+                "right side",
+                "right half",
+            )
+        )
+        if not side_only_language:
+            return False
+
+    return True
+
+
+def _has_textured_center_runway_for_gemini(
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+) -> bool:
+    """A less conservative lane test used only to preserve confident Gemini
+    forward decisions. It allows side objects/walls while requiring a textured,
+    non-blocked center runway."""
+    if not path_profile or path_profile.get("center_blocked"):
+        return False
+
+    center_floor = path_profile.get("center_floor_dist")
+    center_wall = path_profile.get("center_wall_dist")
+    lane_tb_delta = path_profile.get("lane_tb_delta")
+    lane_edge_density = path_profile.get("lane_edge_density")
+    required = (
+        center_floor,
+        center_wall,
+        lane_tb_delta,
+        lane_edge_density,
+        bot_dist_to_floor,
+        bot_dist_to_wall,
+    )
+    if any(value is None for value in required):
+        return False
+
+    return (
+        float(center_floor) <= 26.0
+        and float(center_wall) >= 55.0
+        and float(lane_tb_delta) >= 12.0
+        and float(lane_edge_density) >= 0.025
+        and float(bot_dist_to_floor) <= 45.0
+        and float(bot_dist_to_wall) >= float(bot_dist_to_floor) + 12.0
+        and (uniformity is None or float(uniformity) >= 25.0)
+        and (tb_delta is None or float(tb_delta) >= 18.0)
+    )
+
+
+def _should_preserve_confident_gemini_forward(
+    decision: Dict[str, Any],
+    path_profile: Optional[Dict[str, Any]],
+    bot_dist_to_floor: Optional[float],
+    bot_dist_to_wall: Optional[float],
+    uniformity: Optional[float],
+    tb_delta: Optional[float],
+) -> bool:
+    return _gemini_confirms_center_forward_lane(
+        decision
+    ) and _has_textured_center_runway_for_gemini(
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    )
 
 
 def _decide_from_local_controller(
@@ -3653,6 +4740,35 @@ def _apply_side_opening_only_override(
     """If only a side opening is viable, prevent forward motion into the obstruction."""
     if decision.get("action") != "forward":
         return decision
+    reason_blob = (decision.get("reason") or "").lower()
+    if any(
+        tag in reason_blob
+        for tag in (
+            "floor-probe",
+            "distant-obstacle probe",
+            "strong-floor-signal override",
+            "cautious forward probe",
+            "center-bottom still has floor before a nearby wall",
+        )
+    ):
+        logger.info(
+            "Autonav side-opening-only override SKIPPED: preserving explicit forward probe (%s)",
+            decision.get("reason", "")[:120],
+        )
+        return decision
+    if _should_preserve_confident_gemini_forward(
+        decision=decision,
+        path_profile=path_profile,
+        bot_dist_to_floor=bot_dist_to_floor,
+        bot_dist_to_wall=bot_dist_to_wall,
+        uniformity=uniformity,
+        tb_delta=tb_delta,
+    ):
+        logger.info(
+            "Autonav side-opening-only override SKIPPED: Gemini confidently sees "
+            "a clear center lane and geometry shows a textured center runway"
+        )
+        return decision
 
     forced_turn = _detect_side_opening_only_turn(
         path_profile=path_profile,
@@ -3810,6 +4926,17 @@ def _max_rgb_distance(
     return max(distances) if distances else None
 
 
+def _autonav_visual_memory_for_prompt() -> List[Dict[str, Any]]:
+    """Only send obstacle references after a clear-corridor reference exists.
+    A negative-only reference panel makes Gemini over-match side boxes as
+    center blockers in early ticks."""
+    bank = list(autonav_loop_state.get("visual_memory") or [])
+    labels = {entry.get("label") for entry in bank}
+    if "clear_corridor" not in labels:
+        return [entry for entry in bank if entry.get("label") == "clear_corridor"]
+    return bank
+
+
 async def _run_autonav_loop(config: Dict[str, Any]):
     tick_interval = max(0.3, float(config["tick_ms"]) / 1000.0)
     max_linear = float(config["max_linear"])
@@ -3819,6 +4946,12 @@ async def _run_autonav_loop(config: Dict[str, Any]):
     history_size = int(config["history_size"])
     max_errors = int(config["max_errors"])
     model = config.get("model") or None
+    provider = (config.get("provider") or "gemini").strip().lower()
+    if provider not in ("gemini", "openai"):
+        provider = "gemini"
+    postprocess_mode = str(config.get("postprocess_mode") or "guardrails").strip().lower()
+    if postprocess_mode not in ("guardrails", "gemini_raw"):
+        postprocess_mode = "guardrails"
 
     autonav_loop_state["status"] = "waiting"
     last_turn_direction: Optional[str] = None
@@ -3827,10 +4960,12 @@ async def _run_autonav_loop(config: Dict[str, Any]):
     turn_scan_state = autonav_loop_state.setdefault("turn_scan", _new_turn_scan_state())
 
     logger.info(
-        "Autonav loop started (tick=%.2fs, max_linear=%.2f, max_turn_deg=%.1f)",
+        "Autonav loop started (tick=%.2fs, max_linear=%.2f, max_turn_deg=%.1f, provider=%s, model=%s)",
         tick_interval,
         max_linear,
         max_turn_deg,
+        provider,
+        model,
     )
 
     try:
@@ -4137,6 +5272,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             # 4. Ask Gemini ----------------------------------------------------
             gemini_debug: Dict[str, Any] = {}
             decision_source = "gemini"
+            visual_memory_for_prompt = _autonav_visual_memory_for_prompt()
             try:
                 decision = await autonav_decide(
                     front_b64=front_b64,
@@ -4182,7 +5318,9 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     max_forward_ms=max_forward_ms,
                     hint=hint,
                     model=model,
+                    provider=provider,
                     debug_out=gemini_debug,
+                    visual_memory=visual_memory_for_prompt,
                 )
                 gemini_raw_decision = dict(decision)
             except Exception as exc:
@@ -4196,6 +5334,10 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                 await asyncio.sleep(tick_interval)
                 continue
 
+            skip_postprocess = postprocess_mode == "gemini_raw"
+            if skip_postprocess:
+                logger.info("Autonav postprocess disabled: using raw Gemini decision")
+
             # Speed-based stuck override removed: on rovers with unreliable
             # speed telemetry (e.g. GPS-derived when GPS is down), this
             # triggered constant false positives and fought with Gemini.
@@ -4205,7 +5347,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             # Observed failure mode: Gemini says "IMAGE 2 is clear" and still picks
             # turn_left because it's anticipating a future corridor bend. Anticipatory
             # turning is wrong; each forward burst should be followed by re-evaluation.
-            if decision["action"] in ("turn_left", "turn_right"):
+            if not skip_postprocess and decision["action"] in ("turn_left", "turn_right"):
                 text_blob = " ".join(
                     [
                         str(decision.get("reason", "")),
@@ -4245,7 +5387,11 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                         (decision.get("reason", "") + " [contradiction-override: forward]").strip()
                     )
 
-            if decision["action"] in ("turn_left", "turn_right") and clear_forward_lane:
+            if (
+                not skip_postprocess
+                and decision["action"] in ("turn_left", "turn_right")
+                and clear_forward_lane
+            ):
                 logger.info(
                     "Autonav visual-forward override: current frame is clearly drivable, so overriding %s to forward",
                     decision["action"],
@@ -4257,24 +5403,102 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     max_forward_ms=max_forward_ms,
                 )
 
-            cautious_probe_decision = _apply_cautious_forward_probe_override(
-                decision=decision,
-                path_profile=path_profile,
-                bot_dist_to_floor=bot_dist_to_floor,
-                bot_dist_to_wall=bot_dist_to_wall,
-                uniformity=uniformity,
-                tb_delta=tb_delta,
-                max_linear=max_linear,
-                max_forward_ms=max_forward_ms,
-            )
-            if cautious_probe_decision != decision:
-                logger.info(
-                    "Autonav cautious-forward probe override: using short forward probe instead of %s",
-                    decision["action"],
+            if not skip_postprocess:
+                cautious_probe_decision = _apply_cautious_forward_probe_override(
+                    decision=decision,
+                    path_profile=path_profile,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    bot_dist_to_wall=bot_dist_to_wall,
+                    uniformity=uniformity,
+                    tb_delta=tb_delta,
+                    max_linear=max_linear,
+                    max_forward_ms=max_forward_ms,
                 )
-                decision = cautious_probe_decision
+                if cautious_probe_decision != decision:
+                    logger.info(
+                        "Autonav cautious-forward probe override: using short forward probe instead of %s",
+                        decision["action"],
+                    )
+                    decision = cautious_probe_decision
 
-            if path_profile and path_profile.get("center_blocked") and decision["action"] == "forward":
+            # Narrow-gap downgrade — Gemini called the gap "narrow/tight" while
+            # naming flanking objects (boxes, walls). Visual line-of-sight is
+            # not the same as rover-fit; demote the action to a turn.
+            if not skip_postprocess:
+                decision = _apply_narrow_gap_downgrade(
+                    decision=decision,
+                    path_profile=path_profile,
+                    max_turn_deg=max_turn_deg,
+                )
+
+            # Smooth-close-surface downgrade — lane has zero edge content AND
+            # Gemini reported low confidence. Likely a cardboard/wall face
+            # pressed close to the lens that fooled the color profile.
+            # Skips when uniformity / bot_dist_to_floor indicate real corridor
+            # with smooth wood floor (legitimate low edge density).
+            if not skip_postprocess:
+                decision = _apply_smooth_close_surface_downgrade(
+                    decision=decision,
+                    path_profile=path_profile,
+                    max_turn_deg=max_turn_deg,
+                    uniformity=uniformity,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                )
+
+            # Low-confidence floor-probe override — Gemini picked turn at very
+            # low confidence but the bottom-of-frame strongly matches floor and
+            # the horizon is clear. A box near (but not in) the center may have
+            # spooked Gemini; do a 6cm probe instead of a 45° turn.
+            if not skip_postprocess:
+                decision = _apply_low_confidence_floor_probe_override(
+                    decision=decision,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    tb_delta=tb_delta,
+                    path_profile=path_profile,
+                    max_linear=max_linear,
+                    uniformity=uniformity,
+                    learned_floor_rgb=floor_rgb,
+                    learned_wall_rgb=wall_rgb,
+                    color_sample_count=autonav_loop_state.get("color_sample_count"),
+                    recent_turn_count=recent_turn_count,
+                )
+
+            # Distant-obstacle probe — Gemini high-confidence turn while
+            # geometry says the obstacle is at distance with floor visible
+            # between rover and obstacle. Tiny 3cm probe instead of 45° turn.
+            if not skip_postprocess:
+                decision = _apply_distant_obstacle_probe_override(
+                    decision=decision,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    tb_delta=tb_delta,
+                    uniformity=uniformity,
+                    path_profile=path_profile,
+                    learned_floor_rgb=floor_rgb,
+                    learned_wall_rgb=wall_rgb,
+                    color_sample_count=autonav_loop_state.get("color_sample_count"),
+                    max_linear=max_linear,
+                )
+
+            # Strong-floor-signal override — even at HIGH Gemini confidence,
+            # if color (bot+center match learned floor), edge density (real
+            # floor texture), and horizon all agree, the floor IS there.
+            # Catches the failure where Gemini hallucinates a box "directly
+            # in front" while looking at a side-of-frame box.
+            if not skip_postprocess:
+                decision = _apply_strong_floor_signal_override(
+                    decision=decision,
+                    bot_dist_to_floor=bot_dist_to_floor,
+                    tb_delta=tb_delta,
+                    path_profile=path_profile,
+                    max_linear=max_linear,
+                )
+
+            if (
+                not skip_postprocess
+                and path_profile
+                and path_profile.get("center_blocked")
+                and decision["action"] == "forward"
+            ):
                 logger.info(
                     "Autonav center-block override: Gemini picked forward with blocked lane "
                     "(preferred_turn=%s)",
@@ -4282,7 +5506,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                 )
                 decision = _apply_center_block_override(decision, path_profile, max_turn_deg)
 
-            if decision["action"] == "forward":
+            if not skip_postprocess and decision["action"] == "forward":
                 side_opening_turn = _detect_side_opening_only_turn(
                     path_profile=path_profile,
                     bot_dist_to_floor=bot_dist_to_floor,
@@ -4311,7 +5535,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                         last_turn_direction,
                     )
 
-            if decision["action"] == "forward":
+            if not skip_postprocess and decision["action"] == "forward":
                 decision = _apply_smooth_close_surface_override(
                     decision=decision,
                     path_profile=path_profile,
@@ -4320,7 +5544,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     last_turn_direction=last_turn_direction,
                 )
 
-            if decision["action"] == "forward":
+            if not skip_postprocess and decision["action"] == "forward":
                 decision = _apply_dark_uncertain_lane_override(
                     decision=decision,
                     path_profile=path_profile,
@@ -4331,7 +5555,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     last_turn_direction=last_turn_direction,
                 )
 
-            if decision["action"] == "forward":
+            if not skip_postprocess and decision["action"] == "forward":
                 if clear_forward_lane and (
                     recent_wall_escape_count >= 2 or persistent_wall_turn
                 ):
@@ -4353,7 +5577,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     clear_forward_lane=clear_forward_lane,
                 )
 
-            if decision["action"] == "backward":
+            if not skip_postprocess and decision["action"] == "backward":
                 logger.info(
                     "Autonav no-backward policy: converting backward into turn recovery "
                     "(Gemini picked %s)",
@@ -4363,7 +5587,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     decision, path_profile, max_turn_deg, last_turn_direction
                 )
 
-            if decision["action"] in ("turn_left", "turn_right"):
+            if not skip_postprocess and decision["action"] in ("turn_left", "turn_right"):
                 committed = _apply_turn_commitment_override(
                     decision=decision,
                     history=history,
@@ -4377,7 +5601,11 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     )
                 decision = committed
 
-            if spin_detected and decision["action"] in ("turn_left", "turn_right"):
+            if (
+                not skip_postprocess
+                and spin_detected
+                and decision["action"] in ("turn_left", "turn_right")
+            ):
                 # Spin override: rover is dancing left/right without progress.
                 logger.info(
                     "Autonav spin override: %s turns in last %s ticks with no forward — forcing committed turn",
@@ -4410,7 +5638,18 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     ],
                 }
 
-            if decision["action"] in ("turn_left", "turn_right") and not clear_forward_lane:
+            if (
+                not skip_postprocess
+                and decision["action"] in ("turn_left", "turn_right")
+                and not clear_forward_lane
+            ):
+                logger.info(
+                    "Autonav scan-policy ENTER: action=%s anchor=%s step=%s mode=%s",
+                    decision["action"],
+                    turn_scan_state.get("anchor_heading"),
+                    turn_scan_state.get("step_index"),
+                    turn_scan_state.get("mode"),
+                )
                 decision, turn_scan_state = _apply_bounded_turn_scan_policy(
                     decision=decision,
                     current_heading=rover_data.get("orientation"),
@@ -4418,7 +5657,21 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     max_turn_deg=max_turn_deg,
                     path_profile=path_profile,
                 )
+                logger.info(
+                    "Autonav scan-policy EXIT:  action=%s deg=%s anchor=%s step=%s mode=%s",
+                    decision["action"],
+                    decision.get("turn_degrees"),
+                    turn_scan_state.get("anchor_heading"),
+                    turn_scan_state.get("step_index"),
+                    turn_scan_state.get("mode"),
+                )
             else:
+                logger.info(
+                    "Autonav scan-policy SKIPPED: skip_postprocess=%s action=%s clear_forward_lane=%s",
+                    skip_postprocess,
+                    decision["action"],
+                    clear_forward_lane,
+                )
                 _reset_turn_scan_state(turn_scan_state)
                 turn_scan_state["persistent_wall_turn"] = persistent_wall_turn
             autonav_loop_state["turn_scan"] = turn_scan_state
@@ -4540,6 +5793,64 @@ async def _run_autonav_loop(config: Dict[str, Any]):
             if len(history) > history_size:
                 del history[: len(history) - history_size]
 
+            # ----- Visual memory capture -----
+            # The reasons strings are populated by overrides in this same tick,
+            # so we can read them here to know what scenario was just witnessed.
+            executed_reason = (decision.get("reason") or "").lower()
+            if action == "forward" and "[" not in executed_reason:
+                # Real Gemini forward (not an override). Count consecutive successes.
+                autonav_loop_state["consecutive_forwards"] = (
+                    autonav_loop_state.get("consecutive_forwards", 0) + 1
+                )
+                if autonav_loop_state["consecutive_forwards"] == 3:
+                    _capture_visual_memory(
+                        "clear_corridor",
+                        front_b64,
+                        iteration,
+                        "Frame from a streak of 3 successful forward moves — known drivable corridor.",
+                        log_dir,
+                    )
+            else:
+                autonav_loop_state["consecutive_forwards"] = 0
+
+            if "[wall-proximity escape]" in executed_reason:
+                _capture_visual_memory(
+                    "wall_close",
+                    front_b64,
+                    iteration,
+                    "Frame that triggered wall-proximity escape — nose pressed against a surface.",
+                    log_dir,
+                )
+            if "[smooth-close-surface downgrade]" in executed_reason:
+                _capture_visual_memory(
+                    "cardboard_face",
+                    front_b64,
+                    iteration,
+                    "Smooth/uniform object face close to lens; Gemini was guessing.",
+                    log_dir,
+                )
+            if "[narrow-gap downgrade]" in executed_reason:
+                _capture_visual_memory(
+                    "narrow_obstacle",
+                    front_b64,
+                    iteration,
+                    "Gap too tight for the rover, flanked by named objects.",
+                    log_dir,
+                )
+            if (
+                action in ("turn_left", "turn_right")
+                and float(decision.get("confidence") or 0) >= 0.7
+                and _gemini_cites_specific_obstacle(decision)
+                and "override" not in executed_reason
+            ):
+                _capture_visual_memory(
+                    "named_obstacle",
+                    front_b64,
+                    iteration,
+                    "Gemini turned away from a specifically-named object at high confidence.",
+                    log_dir,
+                )
+
             _autonav_write_tick(
                 log_dir,
                 iteration,
@@ -4567,6 +5878,10 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     "path_zone_sent": path_zone_b64 is not None,
                     "path_profile": path_profile,
                     "color_sample_count": autonav_loop_state.get("color_sample_count", 0),
+                    "visual_memory_labels": [
+                        e.get("label")
+                        for e in (autonav_loop_state.get("visual_memory") or [])
+                    ],
                     "rear_fetched": rear_b64 is not None,
                     "spin_detected": spin_detected,
                     "recent_turn_count": recent_turn_count,
@@ -4579,6 +5894,7 @@ async def _run_autonav_loop(config: Dict[str, Any]):
                     "prompt_version": gemini_debug.get("prompt_version"),
                     "user_prompt": gemini_debug.get("user_prompt"),
                     "model": gemini_debug.get("model"),
+                    "provider": gemini_debug.get("provider") or provider,
                     "gemini_raw_decision": gemini_raw_decision,
                     "executed_decision": decision,
                     "observed_speed_mid_motion": observed_speed_val,
@@ -5277,16 +6593,49 @@ async def start_autonav(request: Request):
         "model": (
             str(body.get("model")).strip()
             if body.get("model")
-            else os.getenv("AUTONAV_GEMINI_MODEL", "gemini-2.5-flash")
+            else None  # filled below after provider is resolved
+        ),
+        "provider": (
+            str(body.get("provider")).strip().lower()
+            if body.get("provider")
+            else None  # filled below by _resolve_provider
+        ),
+        "postprocess_mode": (
+            str(body.get("postprocess_mode")).strip().lower()
+            if body.get("postprocess_mode")
+            else os.getenv("AUTONAV_POSTPROCESS_MODE", "guardrails").strip().lower()
         ),
         "tick_logging_enabled": _autonav_tick_logging_enabled(),
     }
+    if config["postprocess_mode"] not in ("guardrails", "gemini_raw"):
+        config["postprocess_mode"] = "guardrails"
 
-    if not os.getenv("GEMINI_API_KEY"):
-        raise HTTPException(
-            status_code=400,
-            detail="GEMINI_API_KEY is not configured — autonav requires Gemini Flash",
+    # Resolve provider with the same precedence the dispatcher uses, so the
+    # endpoint can validate the matching API key and store the model that
+    # actually ends up being called.
+    from autonav_service import _resolve_provider, DEFAULT_MODEL, DEFAULT_OPENAI_MODEL
+    config["provider"] = _resolve_provider(config.get("model"), explicit=config.get("provider"))
+    if config["provider"] not in ("gemini", "openai"):
+        config["provider"] = "gemini"
+    if not config["model"]:
+        config["model"] = (
+            os.getenv("AUTONAV_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+            if config["provider"] == "openai"
+            else os.getenv("AUTONAV_GEMINI_MODEL", DEFAULT_MODEL)
         )
+
+    if config["provider"] == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            raise HTTPException(
+                status_code=400,
+                detail="OPENAI_API_KEY is not configured — autonav with provider=openai requires it",
+            )
+    else:
+        if not os.getenv("GEMINI_API_KEY"):
+            raise HTTPException(
+                status_code=400,
+                detail="GEMINI_API_KEY is not configured — autonav with provider=gemini requires it",
+            )
 
     async with autonav_loop_lock:
         if _is_autonav_loop_running():
@@ -5354,6 +6703,8 @@ async def start_autonav(request: Request):
                 "initial_wall_rgb": None,
                 "color_sample_count": 0,
                 "turn_scan": _new_turn_scan_state(),
+                "visual_memory": [],
+                "consecutive_forwards": 0,
             }
         )
         autonav_loop_task = asyncio.create_task(_run_autonav_loop(config))
