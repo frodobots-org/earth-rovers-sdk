@@ -33,34 +33,29 @@ More details about the bot sensors and actuators can be found [here](https://col
 
 ## Getting Started
 
-1. Write once your .env variables provided by Frodobots team your SDK API key and the name of the bot you've got.
+1. Create a file called `.env` in the root of this project (next to `main.py`). This file holds your configuration as environment variables — the SDK reads it automatically on startup. Only `SDK_API_TOKEN` and `BOT_SLUG` are required; everything else is optional and will use sensible defaults if omitted.
 
 ```bash
-SDK_API_TOKEN=
-BOT_SLUG=
-CHROME_EXECUTABLE_PATH=
-# Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
-MAP_ZOOM_LEVEL=
-MISSION_SLUG=
-# Image quality between 0.1 and 1.0 (default: 0.8)
-# Recommended: 0.8 for better performance
-IMAGE_QUALITY=0.8
-# Image format: jpeg, png or webp (default: png)
-# Recommended: jpeg for better performance and lower bandwidth usage
-IMAGE_FORMAT=jpeg
-# TTS Provider: "edge" (free, default) or "gemini"
-TTS_PROVIDER=edge
-# API key (required for gemini only)
-TTS_API_KEY=
-# Voice name (default: en-US-GuyNeural for edge, Kore for gemini)
-TTS_VOICE=en-US-GuyNeural
-# Vision / STT Provider (Gemini)
+# ── Required ──────────────────────────────────────────────
+SDK_API_TOKEN=           # Your SDK API key from https://my.frodobots.com/owner/settings
+BOT_SLUG=                # The slug/name of your bot
+
+# ── Optional (all have sensible defaults) ─────────────────
+CHROME_EXECUTABLE_PATH=  # Path to Chrome binary (auto-detected if omitted)
+MAP_ZOOM_LEVEL=          # Default: 18  https://wiki.openstreetmap.org/wiki/Zoom_levels
+MISSION_SLUG=            # Set only if you want to run a mission
+IMAGE_QUALITY=0.8        # 0.1–1.0 (default: 0.8)
+IMAGE_FORMAT=jpeg        # jpeg, png, or webp (default: png)
+
+# ── Optional: Text-to-Speech ─────────────────────────────
+TTS_PROVIDER=edge        # "edge" (free, default) or "gemini"
+TTS_API_KEY=             # Required for gemini only
+TTS_VOICE=               # Default: en-US-GuyNeural (edge) / Kore (gemini)
+
+# ── Optional: Vision / Speech-to-Text (Gemini) ───────────
 VISION_PROVIDER=gemini
-# API key required for on-demand camera captioning and voice transcription
-GEMINI_API_KEY=
-# Vision model name
+GEMINI_API_KEY=          # Required for /prompt and /voice-command
 GEMINI_VISION_MODEL=gemini-2.5-flash
-# Speech-to-text model (used by /voice-command)
 GEMINI_STT_MODEL=gemini-2.5-flash
 ```
 
@@ -542,6 +537,12 @@ Example Response:
     ]
 }
 ```
+
+## Openclaw Integration
+
+Want to control your rover with natural language from Telegram or any messaging platform? [Openclaw](https://openclaw.ai) lets you connect an AI agent that can drive, take photos, speak through the rover's speaker, and monitor telemetry — all through chat.
+
+See the full setup guide in [`examples/openclaw/README.md`](examples/openclaw/README.md).
 
 # Latest updates
 

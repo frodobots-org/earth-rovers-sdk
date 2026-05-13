@@ -17,7 +17,9 @@ Control your Earth Rover with natural language through any messaging platform us
 
 ## Integration
 
-### 1. Point Openclaw to the SDK workspace
+### 1. Set up the Openclaw workspace
+
+**Option A — Point Openclaw to this directory** (recommended):
 
 In your `~/.openclaw/openclaw.json`, set the agent's workspace to this SDK directory:
 
@@ -31,15 +33,13 @@ In your `~/.openclaw/openclaw.json`, set the agent's workspace to this SDK direc
 }
 ```
 
-Alternatively, copy the files from this folder into your existing workspace:
+**Option B — Copy files into your existing workspace:**
 
 ```bash
 cp examples/openclaw/*.md ~/.openclaw/workspace/
 ```
 
-### 2. Add the workspace files
-
-Copy these files into your workspace directory:
+Either way, these are the workspace files the agent uses:
 
 | File | Purpose |
 |------|---------|
@@ -50,14 +50,14 @@ Copy these files into your workspace directory:
 | `TOOLS.md` | Environment-specific notes (device names, preferences). |
 | `HEARTBEAT.md` | Periodic tasks the agent runs automatically. |
 
-### 3. Start the SDK server
+### 2. Start the SDK server
 
 ```bash
 pip install -r requirements.txt
 hypercorn main:app --reload
 ```
 
-### 4. Chat with your rover
+### 3. Chat with your rover
 
 Message your agent through your connected channel. It knows the full rover API and will use `curl` to control it.
 
