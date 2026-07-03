@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v5.1
+# Earth Rovers SDK v5.2
 
 ## Requirements
 
@@ -530,6 +530,12 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.5.2:
+
+  - Added `/missions` endpoint to list the available missions for the connected bot
+  - No active mission is required; the returned `slug` can be used as `MISSION_SLUG` to start a mission
+  - Missions are only listed for remote bots (personal bots return an empty list)
 
 - v.5.1:
 
