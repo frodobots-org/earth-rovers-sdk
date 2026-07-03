@@ -603,7 +603,16 @@ async def missions():
                 detail="Failed to retrieve missions",
             )
 
-        return JSONResponse(content=response.json())
+        missions_list = [
+            {
+                "slug": mission.get("slug"),
+                "distance_in_m": mission.get("distance_in_m"),
+                "checkpoints_count": mission.get("checkpoints_count"),
+            }
+            for mission in response.json().get("missions", [])
+        ]
+
+        return JSONResponse(content={"missions": missions_list})
     except requests.RequestException as e:
         raise HTTPException(
             status_code=500, detail=f"Error fetching missions: {str(e)}"

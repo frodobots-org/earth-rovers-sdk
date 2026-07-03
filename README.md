@@ -311,9 +311,6 @@ Example Response:
     "missions": [
         {
             "slug": "mission-1",
-            "name": "Mission 1",
-            "description": "Drive to the checkpoints in order",
-            "type": "checkpoints",
             "distance_in_m": 120.5,
             "checkpoints_count": 3
         }
