@@ -570,6 +570,55 @@ async def missions_history():
         )
 
 
+@app.get("/missions")
+async def missions():
+    auth_header = os.getenv("SDK_API_TOKEN")
+    bot_slug = os.getenv("BOT_SLUG")
+
+    if not auth_header:
+        raise HTTPException(
+            status_code=500, detail="Authorization header not configured"
+        )
+    if not bot_slug:
+        raise HTTPException(status_code=500, detail="Bot name not configured")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_header}",
+    }
+
+    payload = {"bot_slug": bot_slug}
+
+    try:
+        response = requests.get(
+            FRODOBOTS_API_URL + "/sdk/missions",
+            headers=headers,
+            params=payload,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Failed to retrieve missions",
+            )
+
+        missions_list = [
+            {
+                "slug": mission.get("slug"),
+                "distance_in_m": mission.get("distance_in_m"),
+                "checkpoints_count": mission.get("checkpoints_count"),
+            }
+            for mission in response.json().get("missions", [])
+        ]
+
+        return JSONResponse(content={"missions": missions_list})
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching missions: {str(e)}"
+        )
+
+
 @app.get("/v2/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()

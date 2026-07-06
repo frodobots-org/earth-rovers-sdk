@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v5.1
+# Earth Rovers SDK v5.2
 
 ## Requirements
 
@@ -294,6 +294,30 @@ If you just want to experiment with the bot without starting a mission you need 
 
 `Note: Bots that are controlled by other players are not available for missions.`
 
+### GET /missions
+
+Lists the available missions for the bot you are connected to (the one set in `BOT_SLUG`). You don't need to start a mission to call this endpoint. Use the returned `slug` as the `MISSION_SLUG` environment variable to start a mission.
+
+`Note: Missions are only listed for remote bots (the deployed Earth Rovers you drive remotely). Personal bots do not have missions, so this endpoint will return an empty list for them.`
+
+```bash
+curl --location 'http://localhost:8000/missions'
+```
+
+Example Response:
+
+```JSON
+{
+    "missions": [
+        {
+            "slug": "mission-1",
+            "distance_in_m": 120.5,
+            "checkpoints_count": 3
+        }
+    ]
+}
+```
+
 ### POST /start-mission
 
 ```bash
@@ -503,6 +527,12 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.5.2:
+
+  - Added `/missions` endpoint to list the available missions for the connected bot
+  - No active mission is required; the returned `slug` can be used as `MISSION_SLUG` to start a mission
+  - Missions are only listed for remote bots (personal bots return an empty list)
 
 - v.5.1:
 
