@@ -38,6 +38,8 @@ class BrowserService:
                         "--no-sandbox",
                         "--autoplay-policy=no-user-gesture-required",
                         "--use-fake-ui-for-media-stream",
+                        "--disable-application-cache",
+                        "--disk-cache-size=0",
                         f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
                     ],
                 )

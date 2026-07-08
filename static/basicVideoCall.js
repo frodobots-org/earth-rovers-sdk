@@ -470,11 +470,32 @@ async function playAudioToRover(audioUrl) {
   const response = await fetch(audioUrl);
   const arrayBuffer = await response.arrayBuffer();
   const audioContext = new AudioContext({ sampleRate: 48000 });
+
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+  // Pad silence before and after the speech so the Agora stream has time to
+  // establish before real audio arrives, and the pipeline fully drains before
+  // we unpublish. More reliable than fixed setTimeout delays.
+  const sampleRate = audioContext.sampleRate;
+  const leadSamples = Math.floor(sampleRate * 1.0);  // 1s: rover needs time to subscribe after publish
+  const tailSamples = Math.floor(sampleRate * 1.0);  // 1s: drain Agora pipeline before unpublish
+  const channels = audioBuffer.numberOfChannels;
+  const paddedBuffer = audioContext.createBuffer(
+    channels,
+    leadSamples + audioBuffer.length + tailSamples,
+    sampleRate
+  );
+  for (let c = 0; c < channels; c++) {
+    paddedBuffer.getChannelData(c).set(audioBuffer.getChannelData(c), leadSamples);
+  }
 
   const destination = audioContext.createMediaStreamDestination();
   const source = audioContext.createBufferSource();
-  source.buffer = audioBuffer;
+  source.buffer = paddedBuffer;
   source.connect(destination);
 
   const audioTrack = AgoraRTC.createCustomAudioTrack({
@@ -484,12 +505,16 @@ async function playAudioToRover(audioUrl) {
   await client.publish(audioTrack);
   source.start(0);
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     source.onended = async () => {
-      await client.unpublish(audioTrack);
-      audioTrack.close();
-      await audioContext.close();
-      resolve("done");
+      try {
+        await client.unpublish(audioTrack);
+        audioTrack.close();
+        await audioContext.close();
+        resolve("done");
+      } catch (err) {
+        reject(err);
+      }
     };
   });
 }
