@@ -19,3 +19,18 @@ node_modules/
 screenshots/*.png
 static/*.mp3
 static/*.wav
+/venv314
+.pycache/
+/venv39
+/autonav_logs
+
+# --- autonav-urban -------------------------------------------------------
+autonav-urban/third_party/sam2_ckpt/*.pt
+autonav-urban/third_party/sam2_ckpt/*.pth
+autonav-urban/autonav_logs/*
+!autonav-urban/autonav_logs/.gitkeep
+autonav-urban/**/__pycache__/
+autonav-urban/scripts/diagnose_out/
+
+# Session worktrees created by isolated agent runs
+.worktrees/

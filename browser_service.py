@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from pyppeteer import launch
@@ -22,9 +23,24 @@ class BrowserService:
         self.browser = None
         self.page = None
         self.default_viewport = {"width": 3840, "height": 2160}
+        # Serialize concurrent init calls. Without this, when 3+ async loops
+        # (telemetry / perception / control) all call initialize_browser at
+        # the same time, we spawn 3+ Chrome instances, only one gets stored,
+        # and the orphans emit page-context-destroyed errors forever.
+        # Lazy-init the lock on first acquire so it binds to whichever
+        # asyncio loop is actually running (hypercorn's), not the loop that
+        # happens to be current at module-import time. Python 3.9's
+        # asyncio.Lock captures the current loop at construction and
+        # raises "Future attached to a different loop" if that loop
+        # doesn't match. Same pattern is used for _send_lock below.
+        self._init_lock = None
 
     async def initialize_browser(self):
-        if not self.browser:
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self.browser is not None:
+                return
             try:
                 executable_path = os.getenv(
                     "CHROME_EXECUTABLE_PATH",
@@ -44,6 +60,25 @@ class BrowserService:
                     ],
                 )
                 self.page = await self.browser.newPage()
+                # Bubble browser console messages up to the Python log so we
+                # can see when RTM actually sends / fails. Filters to relevant
+                # messages only to avoid log spam from unrelated warnings.
+                def _on_console(msg):
+                    try:
+                        text = msg.text or ""
+                        low = text.lower()
+                        if any(k in low for k in [
+                            "sending message to bot",
+                            "message sent successfully",
+                            "error sending message",
+                            "rtminvalidstatus",
+                            "rtm channel join",
+                            "agorartm",
+                        ]):
+                            print(f"[browser {msg.type}] {text[:200]}")
+                    except Exception:
+                        pass
+                self.page.on("console", _on_console)
                 await self.page.setViewport(self.default_viewport)
                 await self.page.setExtraHTTPHeaders(
                     {"Accept-Language": "en-US,en;q=0.9"}
@@ -51,20 +86,66 @@ class BrowserService:
                 await self.page.goto(
                     "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
                 )
-                await self.page.click("#join")
-                await self.page.waitForSelector("video")
-                await self.page.waitForSelector("#map")
+
+                # 1. Wait for #join button to be in the DOM before clicking it.
+                #    Previously we called click() immediately, which raced with
+                #    JS-based rendering and failed with "No node found".
+                try:
+                    await self.page.waitForSelector("#join", {"timeout": 10000})
+                    await self.page.click("#join")
+                except Exception as click_exc:
+                    # If #join is missing or click fails, log and continue.
+                    # RTM auto-joins on page load, so control commands still
+                    # work even without the RTC video subscription.
+                    print(f"Warning: #join click failed ({click_exc}); "
+                          f"continuing without video RTC — commands via RTM only")
+
+                # 2. Wait for video element (soft — may not appear if #join failed).
+                try:
+                    await self.page.waitForSelector("video", {"timeout": 8000})
+                except Exception:
+                    print("Warning: no video element attached (perception will fail)")
+                try:
+                    await self.page.waitForSelector("#map", {"timeout": 5000})
+                except Exception:
+                    pass
                 await self.page.setViewport(self.default_viewport)
 
                 await self.page.waitFor(2000)
 
+                # 3. Wait for RTM to be actually usable (window.sendMessage +
+                #    the ensureRtmReady helper the new JS ships with).
+                try:
+                    await self.page.waitForFunction(
+                        "typeof window.sendMessage === 'function'",
+                        timeout=15000,
+                    )
+                except Exception as ready_exc:
+                    print(f"Warning: window.sendMessage not defined after 15s: {ready_exc}")
+
+                # 4. initializeImageParams sets window.imageParams which
+                #    captureFrameAsBase64 needs. Skipping this makes every
+                #    frame capture throw. If the function doesn't exist yet,
+                #    swallow the error — perception will just skip frames.
                 call = f"""() => {{
-                    window.initializeImageParams({{
-                        imageFormat: "{FORMAT}",
-                        imageQuality: {QUALITY}
-                    }});
+                    if (typeof window.initializeImageParams === 'function') {{
+                        window.initializeImageParams({{
+                            imageFormat: "{FORMAT}",
+                            imageQuality: {QUALITY}
+                        }});
+                    }} else {{
+                        // Fallback: set imageParams directly so captureFrameAsBase64
+                        // doesn't crash on reading .imageFormat.
+                        window.imageParams = {{
+                            imageFormat: "{FORMAT}",
+                            imageQuality: {QUALITY}
+                        }};
+                    }}
                 }}"""
-                await self.page.evaluate(call)
+                try:
+                    await self.page.evaluate(call)
+                except Exception as init_exc:
+                    print(f"Warning: initializeImageParams evaluate failed: {init_exc}")
             except Exception as e:
                 print(f"Error initializing browser: {e}")
                 self.browser = None
@@ -147,15 +228,46 @@ class BrowserService:
 
         return rear_frame
 
-    async def send_message(self, message: dict):
+    _send_lock = None
+
+    async def send_message(self, message: dict, retries: int = 3):
+        """Send a control command over RTM.
+
+        Ported from feature/openClaw: awaits the JS promise from
+        window.sendMessage (which now checks RTM readiness + retries on
+        disconnect), serializes concurrent sends behind a lock, and retries
+        the whole path up to `retries` times.
+
+        Fire-and-forget sends (as the previous version did) do NOT survive
+        RTM channel disconnects — the send appears to succeed on the
+        Python side but never actually leaves the browser.
+        """
         await self.initialize_browser()
 
-        await self.page.evaluate(
-            """(message) => {
-                window.sendMessage(message);
-            }""",
-            message,
-        )
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+
+        async with self._send_lock:
+            last_error: Exception | None = None
+            for attempt in range(max(1, int(retries))):
+                try:
+                    # The awaited JS sendMessage triggers ensureRtmReady()
+                    # inside the browser (auto-reconnects on ABORTED /
+                    # DISCONNECTED), then awaits sendMessageToPeer's promise
+                    # so we know when the RTM actually accepted the message.
+                    result = await self.page.evaluate(
+                        """async (message) => {
+                            return await window.sendMessage(message);
+                        }""",
+                        message,
+                    )
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < retries - 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    raise last_error
 
     async def speak(self, audio_url: str):
         await self.initialize_browser()

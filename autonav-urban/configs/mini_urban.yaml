@@ -1,0 +1,100 @@
+# Mini+ Urban planner config for GENIE-SAMTP.
+#
+# Tuned for the Earth Rover Mini+: 195x250x190 mm, ~1.4 kg, 4WD turn-in-place,
+# max 4 km/h, front camera 1024x576, RTK GPS ~50 cm.
+#
+# Coordinate convention (GENIE):
+#   goal_x_m = lateral, +right in meters
+#   goal_y_m = forward, +front in meters
+#   BEV visualizes forward at the top; rover at bottom-center.
+#   traversability: 1.0 easy, 0.0 impassable, -1.0 unknown.
+
+samtp:
+  # Paths are resolved relative to autonav-urban/third_party/ at runtime.
+  config_path: sam2/configs/sam2.1_inference_tiny/sam2.1_custom2.yaml
+  checkpoint_path: sam2_ckpt/checkpoint_2.pt
+  score_thresh: 0.0
+  multimask: false
+  score_transform: sigmoid
+
+camera:
+  # Placeholder — replaced with real Mini+ intrinsics from calibration/ in Phase 2.
+  # These are Stretch's 640x480 defaults; DO NOT ship these to the rover.
+  intrinsics:
+    - [606.1235961914062, 0.0, 247.56045532226562]
+    - [0.0, 606.080078125, 325.16796875]
+    - [0.0, 0.0, 1.0]
+  # camera.pose is set per-frame at runtime from IMU yaw + T_base_camera.
+
+projection:
+  ground_z: 0.0
+  # 5 cm per BEV pixel — appropriate for a 25 cm rover.
+  resolution_m_per_px: 0.05
+  # Sidewalks: look ~6 m ahead; 5 m wide window.
+  forward_range_m: 6.0
+  side_range_m: 2.5
+  max_ray_distance_m: 10.0
+
+depth:
+  # Mini+ has no depth sensor. RGB-only planning.
+  enabled: false
+  unit: m
+  reliable_depth_m: 2.4
+  min_depth_m: 0.15
+  obstacle_height_thresh_m: 0.20
+
+fusion:
+  mode: rgb
+  rgb_weight: 1.0
+  depth_weight: 0.0
+  require_depth_for_rgbd: false
+
+observation_fusion:
+  # Start off; Phase 10 may enable multi-frame BEV fusion.
+  enabled: false
+  max_observations: 4
+  reference: last
+
+planning:
+  mode: rgb
+
+goal:
+  # Overridden per tick by autonav_urban.mission_loop().
+  x_m: 0.0
+  y_m: 6.0
+
+planner:
+  grid_size: 240
+  # Relaxed (Option-1 tuning) to work around SAM-TP being over-conservative on
+  # Mini+ imagery. If SAM-TP is retrained or replaced, revert to 0.30/0.55/0.08.
+  unknown_cost: 0.15                # was 0.30 — planner happier crossing unseen space
+  smooth_kernel: 3
+  num_goals: 30
+  num_mid_points_per_goal: 20
+  path_num_samples: 100
+  # 30 cm footprint at 5 cm/px = 6 planner pixels per half-side.
+  footprint_px: 6
+  threshold_cost: 0.75              # was 0.55 — only cells with trav < 0.25 count as blocking
+  threshold_points_ratio: 0.20      # was 0.08 — tolerate 20% bad cells in footprint before rejecting
+  # Only the first ~2 m of path matters for aggressive filtering.
+  number_of_points_to_filter: 40
+  alpha: 1.2
+  # Match upstream (2026-07-25): best_k 8→12, cluster_angle_threshold 30→40.
+  # With more paths in the top-K and a wider clustering angle, path fusion
+  # produces a smoother average that doesn't flip between left/right arcs
+  # every tick when the BEV changes slightly.
+  best_k: 12
+  use_clustering: true
+  max_clusters: 4
+  cluster_angle_threshold_deg: 40.0
+  random_seed: 42
+  include_goal_in_path_bank: false
+  include_random_goals: true
+
+robot:
+  name: mini_plus
+  # Optional base pose fallback [x_m, y_m, yaw_rad] — the runtime overrides.
+
+output:
+  # Relative to autonav-urban/ at runtime.
+  dir: autonav_logs/urban

@@ -25,13 +25,21 @@ class RtmClient:
             "payload": message_json
         }
 
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=1.5)
 
-        print(response)
-        print(response.status_code)
-        print(response.json())
-
-        if response.status_code == 200:
-            print("Message sent successfully")
-        else:
+        # Quiet by default (autonav sends this 10x/sec). Set RTM_CLIENT_DEBUG=1
+        # in the environment for verbose logs during troubleshooting.
+        import os as _os
+        if _os.getenv("RTM_CLIENT_DEBUG"):
+            print(response)
+            print(response.status_code)
             print(response.json())
+
+        if response.status_code != 200:
+            # Only surface non-200s. Raise so caller can log/handle.
+            body = None
+            try:
+                body = response.json()
+            except Exception:
+                body = response.text
+            raise RuntimeError(f"RTM send failed: {response.status_code} {body}")

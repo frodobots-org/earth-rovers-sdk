@@ -9,3 +9,7 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.4
 edge-tts>=6.1.0
 google-genai>=1.0.0
+
+# Autonav-urban (GENIE-SAMTP) additions live in autonav-urban/requirements.txt.
+# Install with: pip install -r autonav-urban/requirements.txt --no-deps-of-conflicts
+# (or plain: pip install -r autonav-urban/requirements.txt after the base venv is set up)

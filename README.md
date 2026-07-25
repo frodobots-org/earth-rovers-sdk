@@ -1,17 +1,18 @@
-<p align="center">
-  <img src="https://cdn.prod.website-files.com/66042185882fa3428f4dd6f1/662bee5b5ef7ed094186a56a_frodobots_ai_logo-p-500.png" alt="Earth Rovers SDK Logo" width="140">
-  <h3 align="center">Frodobots AI</h3>
-  <br>
-</p>
+
+
+### Frodobots AI
+
+  
+
+
+
 
 # Earth Rovers SDK v5.2
 
 ## Requirements
 
 1. Acquire one of our Earth Rovers in here: [Earth Rovers Shop](https://shop.frodobots.com/).
-
 2. Complete your Bot activation.
-
 3. After completing your bot activation. Get your SDK Access token in [here](https://my.frodobots.com/owner/settings).
 
 ## Software Requirements
@@ -20,12 +21,11 @@
 - Frodobots API key
 - Google Chrome 143+ (or any modern browser) installed
 
+
+
 ## Hardware Specs
 
-<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="assets/v5.2.png" alt="Hardware Specifications" width="200">
-  <img src="assets/axis.jpg" alt="Axis Camera" width="200">
-</div>
+
 
 For full details on the hardware specifications, please refer to the [Frodobots Hardware Specifications](https://docs.google.com/document/d/1Px-rNy0wQeG74mWcReiV4dEk5u4nfMPTVh-C4pXoieY).
 
@@ -56,19 +56,21 @@ TTS_API_KEY=
 TTS_VOICE=en-US-GuyNeural
 ```
 
-2. Install the SDK
+1. Install the SDK
 
 ```bash
 pip3 install -r requirements.txt
 ```
 
-3. Run the SDK
+1. Run the SDK
 
 ```bash
 hypercorn main:app --reload
 ```
 
-4. Now you can check the live streaming of the bot in the following URL: http://localhost:8000
+1. Now you can check the live streaming of the bot in the following URL: [http://localhost:8000](http://localhost:8000)
+
+
 
 ## Documentation
 
@@ -99,6 +101,8 @@ Example response:
     "message": "Command sent successfully"
 }
 ```
+
+
 
 ### GET /data
 
@@ -151,6 +155,8 @@ Example Response:
 }
 ```
 
+
+
 ### GET /screenshot
 
 With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
@@ -186,6 +192,8 @@ Example Response:
 }
 ```
 
+
+
 ### GET /v2/screenshot
 
 With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
@@ -210,6 +218,8 @@ Example Response:
 }
 ```
 
+
+
 ### GET /v2/front
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
@@ -228,6 +238,8 @@ Example Response:
     "timestamp": 1724189733.208559
 }
 ```
+
+
 
 ### GET /v2/rear
 
@@ -248,11 +260,14 @@ Example Response:
 }
 ```
 
+
+
 ### POST /speak
 
 With this endpoint you can send text-to-speech audio through the rover's physical speaker. The text is converted to speech and streamed to the rover via the Agora RTC audio channel.
 
 Supports two TTS providers, configurable via environment variables:
+
 - **edge** (default): Free, no API key required, uses Microsoft Edge neural voices
 - **gemini**: Uses Google Gemini API, requires `TTS_API_KEY`
 
@@ -279,6 +294,8 @@ Example Response:
     "message": "Speech sent to rover"
 }
 ```
+
+
 
 ## Missions API
 
@@ -318,6 +335,8 @@ Example Response:
 }
 ```
 
+
+
 ### POST /start-mission
 
 ```bash
@@ -340,7 +359,11 @@ Unsuccessful Response (Code: 400)
 }
 ```
 
+
+
 ### POST /checkpoints-list
+
+
 
 ### GET /checkpoints-list
 
@@ -378,6 +401,8 @@ Example Response:
 }
 ```
 
+
+
 ### POST /checkpoint-reached
 
 With this endpoint you can send the checkpoint that was scanned by the bot.
@@ -408,6 +433,8 @@ Unsuccessful Response (Code: 400)
 }
 ```
 
+
+
 ### POST /end-mission
 
 With this endpoint you can force the mission to end in case you face some errors. Note that once you run this endpoint, the bot will be disconnected and will be available again for other players to use.
@@ -427,6 +454,8 @@ Example Response:
     "message": "Mission ended successfully"
 }
 ```
+
+
 
 ### GET /missions-history
 
@@ -454,139 +483,4 @@ Example Response:
     ]
 }
 ```
-
-## Interventions API
-
-The Interventions API allows you to manage interventions during bot rides. An intervention represents a period where the bot requires special attention or handling.
-
-### POST /interventions/start
-
-Start a new intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
-
-```bash
-curl -X POST 'http://localhost:8000/interventions/start'
-```
-
-Successful Response (Code: 200)
-
-```JSON
-{
-    "message": "Intervention started successfully",
-    "intervention_id": "123e4567-e89b-12d3-a456-426614174000"
-}
-```
-
-### POST /interventions/end
-
-End an active intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
-
-```bash
-curl -X POST 'http://localhost:8000/interventions/end'
-```
-
-Successful Response (Code: 200)
-
-```JSON
-{
-    "message": "Intervention ended successfully"
-}
-```
-
-Unsuccessful Response (Code: 400)
-
-```JSON
-{
-    "detail": "No active intervention found"
-}
-```
-
-### GET /interventions/history
-
-Retrieve the history of interventions for the current bot.
-
-```bash
-curl --location 'http://localhost:8000/interventions/history'
-```
-
-Example Response:
-
-```JSON
-{
-    "interventions": [
-        {
-            "ride_id": "123",
-            "start_time": "2024-01-01T12:00:00Z",
-            "end_time": "2024-01-01T12:30:00Z",
-            "mission_name": "Mission 1",
-            "mission_slug": "mission-1",
-            "bot_name": "Bot 1",
-            "bot_slug": "bot-1"
-        }
-    ]
-}
-```
-
-# Latest updates
-
-- v.5.2:
-
-  - Added `/missions` endpoint to list the available missions for the connected bot
-  - No active mission is required; the returned `slug` can be used as `MISSION_SLUG` to start a mission
-  - Missions are only listed for remote bots (personal bots return an empty list)
-
-- v.5.1:
-
-  - Added Text-to-Speech (TTS) endpoint `/speak` to play audio through the rover's speaker
-  - Supports two TTS providers: Edge TTS (free, default) and Google Gemini
-  - Audio streamed to rover via Agora RTC custom audio track
-  - Added Openclaw agent configuration files for Telegram-based rover control
-
-- v.5.0:
-
-  - Updated video streaming SDK for Chrome 143+ compatibility
-  - Updated real-time messaging SDK to latest stable version
-  - Fixed video subscription errors during stream initialization
-  - Added subscription queue to prevent race conditions
-  - Improved error handling for video stream subscriptions
-
-- v.4.9:
-
-  - Added Interventions API with endpoints for starting, ending and retrieving intervention history
-  - New endpoints: /interventions/start, /interventions/end, /interventions/history
-  - Added timestamp to /v2/front and /v2/rear endpoints
-
-- v.4.8:
-  - Added compatibility for mini and zero bots
-  - Added HTML examples for bot control and video streaming (20 FPS)
-
-<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="screenshots/zero.jpg" alt="Zero Bot" width="900">
-  <img src="screenshots/mini.jpg" alt="Mini Bot" width="900">
-</div>
-
-- v.4.7:
-  - Optimized frame capture system to reduce CPU and memory usage
-  - Removed continuous frame capture loop, now frames are captured on-demand
-  - Improved resource management for video streaming
-  - Better handling of system resources during long-running sessions
-- v.4.6: Added image quality and format configuration options for better performance
-- v.4.5: Minor Bugfixes.
-- v.4.4: Minor Bugfixes. Spectate Rides.
-- v.4.3: Missions history and more information on checkpoint reached. Improved /data RTM messages
-- v.4.2: Updated Readme.md
-- v.4.1: End mission.
-- v.4.0: Added the ability to start a mission. Improved screenshots timings. Timestamps accuracy improved.
-- v3.3: Improved control speed.
-- v3.2: Added the ability to control the zoom level of the map.
-- v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
-
-## Contributions
-
-- [Michael Cho](mailto:michael.cho@frodobots.com)
-- [Santiago Pravisani](mailto:santiago.pravisani@frodobots.com)
-- [Esteban Fuhrmann](mailto:esteban.fuhrmann@frodobots.com)
-
-## Join our Discord
-
-- [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
 
