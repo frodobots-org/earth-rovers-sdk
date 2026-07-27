@@ -23,6 +23,7 @@ static/*.wav
 .pycache/
 /venv39
 /autonav_logs
+venv/
 
 # --- autonav-urban -------------------------------------------------------
 autonav-urban/third_party/sam2_ckpt/*.pt

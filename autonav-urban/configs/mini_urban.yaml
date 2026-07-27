@@ -12,7 +12,7 @@
 samtp:
   # Paths are resolved relative to autonav-urban/third_party/ at runtime.
   config_path: sam2/configs/sam2.1_inference_tiny/sam2.1_custom2.yaml
-  checkpoint_path: sam2_ckpt/checkpoint_2.pt
+  checkpoint_path: sam2_ckpt/checkpoint_finetuned.pt   # Mini-4K fine-tuned model (was checkpoint_2.pt, which is not on disk)
   score_thresh: 0.0
   multimask: false
   score_transform: sigmoid

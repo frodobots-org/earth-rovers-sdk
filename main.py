@@ -1519,17 +1519,15 @@ async def autonav_urban_dashboard():
   </div>
   <div class="panel"><h2>SAM-TP raw (image-space, before projection)</h2>
     <img id="samtp" width="480" alt="samtp raw" style="max-height:270px;object-fit:contain">
-    <div style="font-size:10px;color:#888">green = SAM-TP thinks drivable · red = obstacle</div>
-  </div>
-  <div class="panel"><h2>CLIPSeg obstacles (text-prompted)</h2>
-    <img id="clipseg" width="480" alt="clipseg" style="max-height:270px;object-fit:contain;background:#000">
-    <div style="font-size:10px;color:#888">red = CLIPSeg says obstacle (rover / car / grass / etc)</div>
+    <div style="font-size:10px;color:#888">JET (GeNIE-style, per-frame normalized): red = drivable · blue = obstacle</div>
   </div>
   <div class="panel"><h2>BEV traversability</h2>
     <img id="bev" width="240" alt="BEV">
+    <div style="font-size:10px;color:#888">JET (GeNIE-style): red = drivable · blue = impassable · black = unknown</div>
   </div>
-  <div class="panel"><h2>plan overlay (cost + paths)</h2>
+  <div class="panel"><h2>plan overlay (paths)</h2>
     <img id="plan" width="240" alt="plan overlay">
+    <div style="font-size:10px;color:#888">cyan = candidate paths · red = chosen path · green = goal</div>
   </div>
   <div class="panel" style="min-width:280px;max-width:360px">
     <h2>checkpoints</h2>
@@ -1565,7 +1563,6 @@ let paused = false;
 let last_bev_ts_seen   = 0;
 let last_plan_ts_seen  = 0;
 let last_samtp_ts_seen = 0;
-let last_clipseg_ts_seen = 0;
 
 function renderCheckpoints(s){
   const list = (s && s.checkpoints_status) || [];
@@ -1727,18 +1724,6 @@ async function pollSamtp(){
   schedule(pollSamtp, 1500);
 }
 
-// Poller F: CLIPSeg mask — same cadence as SAM-TP
-async function pollClipseg(){
-  if(paused){ return schedule(pollClipseg, 1500); }
-  try{
-    const s = latest_status;
-    if(s && s.running && s.last_clipseg_ts && s.last_clipseg_ts !== last_clipseg_ts_seen){
-      const ok = await loadImg('clipseg', '/autonav-urban/clipseg?t=' + s.last_clipseg_ts);
-      if(ok) last_clipseg_ts_seen = s.last_clipseg_ts;
-    }
-  }catch(_){}
-  schedule(pollClipseg, 1500);
-}
 
 // Poller D: front camera — fires as soon as the browser is warm, so the
 // dashboard shows live cam BEFORE the user clicks Start.
@@ -1864,6 +1849,5 @@ pollBev();
 pollPlan();
 pollFront();
 pollSamtp();
-pollClipseg();
 </script>
 </body></html>""")

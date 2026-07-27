@@ -73,15 +73,11 @@ def traversability_to_cost(
 
 
 def cost_to_vis(cost: np.ndarray, known_mask: np.ndarray | None = None) -> np.ndarray:
+    # GeNIE-paper planning style: grayscale traversability (bright = traversable),
+    # black = unknown, so the cyan candidate arcs + red chosen path read clearly.
     trav = 1.0 - np.clip(cost, 0.0, 1.0)
-    vis = np.stack(
-        [
-            ((1.0 - trav) * 255.0).astype(np.uint8),
-            (trav * 255.0).astype(np.uint8),
-            np.zeros_like(trav, dtype=np.uint8),
-        ],
-        axis=2,
-    )
+    g = (trav * 255.0).astype(np.uint8)
+    vis = np.stack([g, g, g], axis=2)
     if known_mask is not None:
         known = np.asarray(known_mask, dtype=bool)
         if known.shape != cost.shape:
@@ -157,27 +153,28 @@ def _draw_plan_overlay(
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
+    # GeNIE-paper palette: cyan candidate arcs, red chosen path, green goal.
     if len(all_paths) > 0:
         stride = max(1, len(all_paths) // 80)
         for path in all_paths[::stride]:
             pts = np.round(np.stack([path[:, 1], path[:, 0]], axis=1)).astype(np.int32)
-            draw.line([(int(c), int(r)) for c, r in pts], fill=(100, 100, 100, 70), width=1)
+            draw.line([(int(c), int(r)) for c, r in pts], fill=(0, 190, 255, 90), width=1)
 
     if len(selected_paths) > 0:
         stride = max(1, len(selected_paths) // 120)
         for path in selected_paths[::stride]:
             pts = np.round(np.stack([path[:, 1], path[:, 0]], axis=1)).astype(np.int32)
-            draw.line([(int(c), int(r)) for c, r in pts], fill=(255, 180, 40, 130), width=1)
+            draw.line([(int(c), int(r)) for c, r in pts], fill=(0, 255, 255, 150), width=1)
 
     if final_rows.size > 0 and final_cols.size > 0:
         pts = np.round(np.stack([final_cols, final_rows], axis=1)).astype(np.int32)
-        draw.line([(int(c), int(r)) for c, r in pts], fill=(255, 255, 255, 230), width=2)
+        draw.line([(int(c), int(r)) for c, r in pts], fill=(255, 40, 40, 245), width=2)
 
     sr, sc = int(start_rc[0]), int(start_rc[1])
     draw.ellipse((sc - 3, sr - 3, sc + 3, sr + 3), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240))
 
     gr, gc = int(goal_rc[0]), int(goal_rc[1])
-    draw.ellipse((gc - 4, gr - 4, gc + 4, gr + 4), fill=(40, 220, 255, 240), outline=(40, 220, 255, 240))
+    draw.ellipse((gc - 4, gr - 4, gc + 4, gr + 4), fill=(60, 255, 90, 240), outline=(60, 255, 90, 240))
 
     return np.asarray(Image.alpha_composite(img, overlay).convert("RGB"), dtype=np.uint8)
 

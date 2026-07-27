@@ -135,6 +135,29 @@ def build_T_world_camera(
     return T_world_base @ np.asarray(T_base_camera, dtype=np.float64)
 
 
+def scale_K_to_frame(K: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Rescale intrinsics to the ACTUAL frame size if it differs from K's implied
+    native resolution (2*cx, 2*cy).
+
+    The placeholder K hard-assumes 1024x576; SAM-TP runs on whatever the video
+    stream delivers. Applying a 1024-assumed K to a different-sized frame throws
+    the principal point off by hundreds of pixels -> obstacles land in the wrong
+    BEV columns. This is a no-op (within 2%) when they already match, so a real
+    per-resolution calibration is left untouched.
+    """
+    K = np.asarray(K, dtype=np.float64).copy()
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    native_w, native_h = 2.0 * cx, 2.0 * cy
+    if native_w <= 1.0 or native_h <= 1.0:
+        return K
+    sx, sy = w / native_w, h / native_h
+    if abs(sx - 1.0) < 0.02 and abs(sy - 1.0) < 0.02:
+        return K
+    K[0, 0] *= sx; K[0, 2] *= sx   # fx, cx
+    K[1, 1] *= sy; K[1, 2] *= sy   # fy, cy
+    return K
+
+
 def project_frame_to_bev(
     trav_hw: np.ndarray,
     yaw_from_north_deg: float,
@@ -149,6 +172,9 @@ def project_frame_to_bev(
     """Wrapper around GENIE's project_score_to_bev with our per-frame pose."""
     from genie_path_planner.projection import project_score_to_bev
 
+    # Guard against resolution mismatch between the stream and the (placeholder) K.
+    h, w = trav_hw.shape[:2]
+    K = scale_K_to_frame(K, h, w)
     T_world_camera = build_T_world_camera(yaw_from_north_deg, T_base_camera)
     bev, observed, stats = project_score_to_bev(
         score_map=trav_hw,

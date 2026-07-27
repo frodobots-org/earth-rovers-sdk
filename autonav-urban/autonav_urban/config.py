@@ -41,7 +41,7 @@ class UrbanRuntimeConfig:
     # turn-in-place.
     max_angular_while_pursuing: float = 0.5
     k_ang: float = 1.0                    # moderate P gain — was 2.0 which saturated angular at small heading errors
-    lookahead_m: float = 0.5              # near lookahead — was 1.0 which sampled deep-into-the-curve on hard-turning paths
+    lookahead_m: float = 0.9              # raised 0.5->0.9: 0.5 gave too-high steering gain (pure-pursuit zig-zag); longer lookahead smooths steering
     turn_in_place_thresh_deg: float = 80.0  # only turn-in-place when heading is very wrong; else keep forward crawl
     # If the path we picked is more than this many degrees off from the raw
     # goal direction, ignore the path's heading and just aim at the goal.
@@ -53,6 +53,10 @@ class UrbanRuntimeConfig:
     # left-right without making progress. 45° means we prefer the STABLE
     # goal direction over the JITTERY plan direction more often.
     goal_override_thresh_deg: float = 45.0
+    # Hysteresis exit for goal-override (enter above goal_override_thresh_deg,
+    # exit below this) so the path<->goal steering target stops flip-flopping
+    # near the boundary.
+    goal_override_exit_thresh_deg: float = 30.0
     # Closed-loop align-first control: if the goal bearing (computed every
     # tick from FRESH telemetry) is more than align_thresh_deg off from
     # straight-ahead, do a proportional turn-in-place (no forward motion)
@@ -112,7 +116,7 @@ class UrbanRuntimeConfig:
     # chairs, low objects) by comparing pixel luminance to the median
     # luminance of SAM-TP's own "drivable" pixels. See
     # samtp.refine_traversability_by_contrast for the math.
-    contrast_refine_enabled: bool = True
+    contrast_refine_enabled: bool = False   # OFF: not in GeNIE; was flipping dark-but-drivable ground (asphalt/shadows) to obstacle
     contrast_drivable_thresh: float = 0.5     # SAM-TP > this = "reference ground"
     contrast_darkness_ratio: float = 0.65     # pixel < median * this = obstacle
 
@@ -123,7 +127,7 @@ class UrbanRuntimeConfig:
     # traversability drops toward zero even when SAM-TP said "drivable".
     # Requires transformers + the CIDAS/clipseg-rd64-refined checkpoint
     # (~180 MB, downloaded once, cached to ~/.cache/huggingface).
-    clipseg_enabled: bool = True    # re-enabled after test confirmed SAM-TP alone paints everything green
+    clipseg_enabled: bool = False   # OFF: run GeNIE-style (SAM-TP only). Was compensating for the OLD checkpoint_2 painting everything green; the Mini-4K fine-tuned model should be discriminative on its own
     # CLIPSeg runs one image-encoding pass per prompt internally, so
     # doubling the prompt count roughly doubles perception latency. Keep
     # this list SHORT (≤ 5) or perception drops below the rate the
@@ -188,6 +192,7 @@ class UrbanRuntimeState:
     last_bev_ts: float = 0.0
     # Raw SAM-TP traversability in image space (HxW float32) — for debug view
     last_samtp_trav: Any = None
+    last_samtp_logits: Any = None       # raw logits, for GeNIE-style normalized JET
     last_samtp_ts: float = 0.0
     # Raw CLIPSeg obstacle mask in image space (HxW float32 in [0, 1]) — for debug view
     last_clipseg_mask: Any = None

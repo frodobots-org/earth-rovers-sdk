@@ -39,6 +39,44 @@ CheckpointsFetcher = Callable[[], Awaitable[dict]]                   # () -> /ch
 CheckpointReporter = Callable[[], Awaitable[dict]]                   # () -> /checkpoint-reached response OR raises
 
 
+def _jet_normalized(score: np.ndarray) -> np.ndarray:
+    """Per-frame min-max normalized JET colormap, matching the GeNIE paper's
+    traversability visualization: RED = highest traversability (drivable),
+    BLUE = lowest (obstacle). Normalizing per frame shows the relative gradient
+    even when all raw scores share the same sign."""
+    s = np.asarray(score, dtype=np.float32)
+    finite = np.isfinite(s)
+    lo = float(s[finite].min()) if finite.any() else 0.0
+    hi = float(s[finite].max()) if finite.any() else 1.0
+    t = np.clip((s - lo) / (hi - lo + 1e-8), 0.0, 1.0)
+    r = np.clip(1.5 - np.abs(4.0 * t - 3.0), 0.0, 1.0)
+    g = np.clip(1.5 - np.abs(4.0 * t - 2.0), 0.0, 1.0)
+    b = np.clip(1.5 - np.abs(4.0 * t - 1.0), 0.0, 1.0)
+    vis = (np.stack([r, g, b], axis=-1) * 255.0).astype(np.uint8)
+    vis[~finite] = 0
+    return vis
+
+
+def _jet_bev(score_map: np.ndarray, draw_robot_marker: bool = True) -> np.ndarray:
+    """GeNIE-style JET for the BEV: fixed [0,1] traversability (RED=drivable,
+    BLUE=impassable), BLACK for unknown (-1) cells. Fixed range (not per-frame
+    normalized) so BEV colors keep their absolute meaning."""
+    s = np.asarray(score_map, dtype=np.float32)
+    known = np.isfinite(s) & (s >= 0.0)
+    t = np.clip(s, 0.0, 1.0)
+    r = np.clip(1.5 - np.abs(4.0 * t - 3.0), 0.0, 1.0)
+    g = np.clip(1.5 - np.abs(4.0 * t - 2.0), 0.0, 1.0)
+    b = np.clip(1.5 - np.abs(4.0 * t - 1.0), 0.0, 1.0)
+    vis = (np.stack([r, g, b], axis=-1) * 255.0).astype(np.uint8)
+    vis[~known] = 0
+    if draw_robot_marker:
+        h, w = s.shape
+        cc, cr = w // 2, h - 1
+        vis[max(0, cr - 2):min(h, cr + 3), max(0, cc - 2):min(w, cc + 3)] = (255, 255, 255)
+        vis[max(0, cr - 28):cr + 1, max(0, cc - 1):min(w, cc + 1)] = (255, 255, 255)
+    return vis
+
+
 def _decode_frame_b64(frame_b64: str) -> np.ndarray:
     raw = base64.b64decode(frame_b64)
     im = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -445,6 +483,7 @@ class UrbanRuntime:
                     self.state.last_observed_mask = observed.astype(bool)
                     self.state.last_bev_ts = t_start
                     self.state.last_samtp_trav = trav
+                    self.state.last_samtp_logits = out["logits"]
                     self.state.last_samtp_ts = t_start
                     self.state.iterations += 1
                 self.state.error_streak = 0
@@ -751,16 +790,25 @@ class UrbanRuntime:
                     # instead of rotating to face the goal.
                     fresh_goal_bearing = math.atan2(live_gx, live_gy)
 
-                if (fresh_goal_bearing is not None
-                        and abs(math.degrees(fresh_goal_bearing)) > self.config.align_thresh_deg):
-                    # Rotation invalidates the body-frame lookahead history;
-                    # drop it so smoothing doesn't blend pre-rotation ghosts
-                    # into the first post-align pursuit command.
-                    self._lookahead_history.clear()
-                    lin, ang = align_in_place(fresh_goal_bearing, self.config)
-                    await self._send_control(float(lin), float(ang), reason="align")
-                    await asyncio.sleep(max(0.0, period - (time.time() - t_start)))
-                    continue
+                if fresh_goal_bearing is not None:
+                    bearing_deg = abs(math.degrees(fresh_goal_bearing))
+                    # Hysteresis: ENTER align above align_thresh_deg, and STAY in
+                    # align until bearing drops below align_deadband_deg. A single
+                    # hard threshold made the rover flip between align (linear=0)
+                    # and pursuit every tick on noisy bearings — and each flip
+                    # wiped the lookahead smoothing buffer, defeating it.
+                    if not self._aligning and bearing_deg > self.config.align_thresh_deg:
+                        self._aligning = True
+                        # Rotation invalidates the body-frame lookahead history —
+                        # clear it ONCE on entry, not on every align tick.
+                        self._lookahead_history.clear()
+                    elif self._aligning and bearing_deg <= self.config.align_deadband_deg:
+                        self._aligning = False
+                    if self._aligning:
+                        lin, ang = align_in_place(fresh_goal_bearing, self.config)
+                        await self._send_control(float(lin), float(ang), reason="align")
+                        await asyncio.sleep(max(0.0, period - (time.time() - t_start)))
+                        continue
 
                 # Pure pursuit — but if we have no path yet, do NOT emit
                 # a stop command every tick (that too resets the motors).
@@ -787,12 +835,22 @@ class UrbanRuntime:
                 else:
                     tx, ty = float(target[0]), float(target[1])
                     gx, gy = float(self.state.goal_x_m), float(self.state.goal_y_m)
-                    path_heading = math.atan2(tx, max(1e-3, ty))
-                    goal_heading = math.atan2(gx, max(1e-3, gy))
+                    # Full-range atan2 (no ty/gy clamp) so a target/goal BEHIND the
+                    # rover reads as ±180° instead of a clamped ±90° that oscillates
+                    # across the boundary.
+                    path_heading = math.atan2(tx, ty)
+                    goal_heading = math.atan2(gx, gy)
                     heading_diff_deg = abs(math.degrees(path_heading - goal_heading))
                     if heading_diff_deg > 180:
                         heading_diff_deg = 360 - heading_diff_deg
-                    if heading_diff_deg > self.config.goal_override_thresh_deg:
+                    # Hysteresis: ENTER override above goal_override_thresh_deg, EXIT
+                    # below goal_override_exit_thresh_deg — stops the path<->goal
+                    # steering target from flipping every replan near the boundary.
+                    if not self._goal_overriding and heading_diff_deg > self.config.goal_override_thresh_deg:
+                        self._goal_overriding = True
+                    elif self._goal_overriding and heading_diff_deg <= self.config.goal_override_exit_thresh_deg:
+                        self._goal_overriding = False
+                    if self._goal_overriding:
                         # Plan and goal disagree strongly — aim at a virtual
                         # target in the goal direction at lookahead distance.
                         gn = (gx * gx + gy * gy) ** 0.5
@@ -818,6 +876,8 @@ class UrbanRuntime:
     _last_sent_angular: float = 0.0
     _last_sent_ts: float = 0.0
     _last_hold_log_ts: float = 0.0
+    _aligning: bool = False           # hysteresis state for align-in-place mode
+    _goal_overriding: bool = False    # hysteresis state for path->goal override
 
     async def _send_control(self, linear: float, angular: float, reason: str = "") -> None:
         async with self._locks["control"]:
@@ -840,10 +900,15 @@ class UrbanRuntime:
         # cancelling in-flight motion. This matches the working openClaw
         # tick_ms=1500 pattern.
         now = time.time()
-        # Rate-limit: don't send if it's been < 0.9s since last send.
-        # This throttles bursts (e.g. hazard→pursuit→hazard alternation) but
-        # still keeps the ~1 Hz refresh cadence the rover needs.
-        if (now - self._last_sent_ts) < 0.9:
+        # Send FRESH commands immediately: a materially-changed linear/angular
+        # (e.g. an align correction) must NOT be throttled — the flat 0.9s gate
+        # dropped the fresher of every two 2 Hz ticks, reverting control to the
+        # ~1 Hz cadence that caused the runaway pirouette. Only an UNCHANGED
+        # command is resent at ~1 Hz to keep the firmware's motor cycle alive
+        # (avoids the 10 Hz spam that stalls the motors).
+        changed = (abs(linear - self._last_sent_linear) > 0.02
+                   or abs(angular - self._last_sent_angular) > 0.02)
+        if not changed and (now - self._last_sent_ts) < 0.9:
             return
 
         self._last_sent_linear = float(linear)
@@ -1018,24 +1083,24 @@ class UrbanRuntime:
     def latest_bev_png(self) -> Optional[bytes]:
         if self.state.last_bev is None:
             return None
-        from genie_path_planner.projection import traversability_vis
-        vis = traversability_vis(self.state.last_bev, draw_robot_marker=True)
+        vis = _jet_bev(np.asarray(self.state.last_bev, dtype=np.float32), draw_robot_marker=True)
         buf = io.BytesIO()
         Image.fromarray(vis).save(buf, format="PNG")
         return buf.getvalue()
 
     def latest_samtp_png(self) -> Optional[bytes]:
-        """Raw SAM-TP traversability in image space, colored green=high red=low.
+        """Raw SAM-TP traversability in image space, rendered like the GeNIE
+        paper: per-frame min-max normalized JET (RED = drivable, BLUE = obstacle).
 
-        Same color mapping as the BEV panel, but in the ORIGINAL front-camera
-        shape (before ground-plane projection). Useful for isolating whether
-        SAM-TP itself is over-conservative vs. the BEV projection being off.
+        Uses the raw logits (what the paper normalizes); falls back to the sigmoid
+        traversability if logits aren't available yet.
         """
-        trav = self.state.last_samtp_trav
-        if trav is None:
+        score = self.state.last_samtp_logits
+        if score is None:
+            score = self.state.last_samtp_trav
+        if score is None:
             return None
-        from genie_path_planner.projection import traversability_vis
-        vis = traversability_vis(np.asarray(trav, dtype=np.float32), draw_robot_marker=False)
+        vis = _jet_normalized(np.asarray(score, dtype=np.float32))
         buf = io.BytesIO()
         Image.fromarray(vis).save(buf, format="PNG")
         return buf.getvalue()
