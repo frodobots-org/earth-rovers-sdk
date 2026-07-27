@@ -33,6 +33,9 @@ class BrowserService:
                 self.browser = await launch(
                     executablePath=executable_path,
                     headless=True,
+                    userDataDir=os.path.join(
+                        os.path.dirname(__file__), ".chrome-profile"
+                    ),
                     args=[
                         "--ignore-certificate-errors",
                         "--no-sandbox",
@@ -67,9 +70,14 @@ class BrowserService:
                 await self.page.evaluate(call)
             except Exception as e:
                 print(f"Error initializing browser: {e}")
-                self.browser = None
-                self.page = None
-                await self.close_browser()
+                try:
+                    # Close first while the handle is still valid; close_browser nulls refs.
+                    await self.close_browser()
+                except Exception as close_err:
+                    # Dead handle: null manually so a later init is not wedged.
+                    print(f"Error closing browser after failed init: {close_err}")
+                    self.browser = None
+                    self.page = None
                 raise
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
