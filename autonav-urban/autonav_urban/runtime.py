@@ -89,6 +89,57 @@ def _load_planner_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _overlay_ideal_centerline(
+    vis: np.ndarray,
+    goal_x_m: float,
+    goal_y_m: float,
+    bev_res_m: float,
+    color: tuple = (255, 255, 0),
+) -> np.ndarray:
+    """Draw a dashed yellow reference line from the rover to the goal direction.
+    Lets the operator see at a glance when the planner's chosen (red) path is
+    drifting off-center: if the ideal line and the chosen path diverge, the
+    planner picked an asymmetric route. Also draws a short vertical crosshair
+    at the rover for a visual "straight ahead" reference.
+    """
+    if vis is None or bev_res_m <= 0.0:
+        return vis
+    out = np.ascontiguousarray(vis).copy()
+    H, W = out.shape[:2]
+    r0 = H - 1
+    c0 = W // 2
+
+    # Vertical straight-ahead reference (short white ticks, spaced)
+    for r in range(H - 1, -1, -6):
+        if 0 <= c0 < W and 0 <= r < H:
+            out[r, c0] = (255, 255, 255)
+
+    # Reach limit — clip endpoint to on-image
+    norm = (goal_x_m ** 2 + goal_y_m ** 2) ** 0.5
+    if norm < 1e-3:
+        return out
+    max_reach_m = float(H) * bev_res_m
+    scale = min(1.0, max_reach_m / norm)
+    end_x = goal_x_m * scale
+    end_y = goal_y_m * scale
+    r1 = int(round(r0 - end_y / bev_res_m))
+    c1 = int(round(c0 + end_x / bev_res_m))
+
+    steps = max(abs(r1 - r0), abs(c1 - c0)) + 1
+    for i in range(steps):
+        # Dashed: 4 on, 4 off
+        if (i // 4) % 2 != 0:
+            continue
+        t = i / max(1, steps - 1)
+        r = int(round(r0 + t * (r1 - r0)))
+        c = int(round(c0 + t * (c1 - c0)))
+        for dc in (-1, 0, 1):  # 3-px thick so it stands out over cyan candidates
+            cc = c + dc
+            if 0 <= r < H and 0 <= cc < W:
+                out[r, cc] = color
+    return out
+
+
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Haversine distance in meters."""
     R = 6_371_000.0
@@ -478,6 +529,34 @@ class UrbanRuntime:
                     bev_side,
                     max_ray,
                 )
+                # Temporal smoothing (EMA). Cuts frame-to-frame perception
+                # noise that makes the planner flip between near-equivalent
+                # paths on straight sections. Only applied when previous BEV
+                # exists with matching shape — first frame passes through.
+                # NOTE: assumes small pose change between frames. Valid at
+                # slow (confined) speeds; may lag at full cruise speed.
+                if (
+                    getattr(self.config, "bev_ema_enabled", False)
+                    and self.state.last_bev is not None
+                    and getattr(self.state.last_bev, "shape", None) == bev.shape
+                ):
+                    alpha = float(self.config.bev_ema_alpha)
+                    alpha = max(0.05, min(1.0, alpha))
+                    prev_bev = np.asarray(self.state.last_bev, dtype=np.float32)
+                    prev_obs = np.asarray(self.state.last_observed_mask, dtype=bool)
+                    # Blend only in cells both frames observed. Cells unique to
+                    # one frame take that frame's value. Unknown-in-both stays
+                    # unknown.
+                    new_obs = observed.astype(bool)
+                    both = prev_obs & new_obs
+                    only_new = new_obs & ~prev_obs
+                    only_old = prev_obs & ~new_obs
+                    blended = np.full_like(bev, -1.0, dtype=np.float32)
+                    blended[both] = alpha * bev[both] + (1.0 - alpha) * prev_bev[both]
+                    blended[only_new] = bev[only_new]
+                    blended[only_old] = prev_bev[only_old]
+                    bev = blended
+                    observed = new_obs | prev_obs
                 async with self._locks["perception"]:
                     self.state.last_bev = bev
                     self.state.last_observed_mask = observed.astype(bool)
@@ -619,9 +698,22 @@ class UrbanRuntime:
                     self._bev_resolution(),
                     self._planner_config,
                 )
+                # Overlay a yellow dashed reference line from rover to goal on the
+                # plan visualization. When the chosen path (red) diverges from
+                # this yellow line, the planner picked an asymmetric route.
+                plan_vis_with_ref = planned.visualization
+                try:
+                    plan_vis_with_ref = _overlay_ideal_centerline(
+                        planned.visualization,
+                        goal_x,
+                        goal_y,
+                        self._bev_resolution(),
+                    )
+                except Exception as exc:
+                    logger.debug("centerline overlay failed: %s", exc)
                 async with self._locks["planning"]:
                     self.state.last_path_xy_m = planned.final_path_xy_m
-                    self.state.last_plan_visualization = planned.visualization
+                    self.state.last_plan_visualization = plan_vis_with_ref
                     self.state.last_plan_meta = dict(planned.metadata or {})
                     self.state.last_plan_ts = time.time()
                 self._last_planned_from_gps = cur_gps
@@ -858,10 +950,22 @@ class UrbanRuntime:
                             scale = self.config.lookahead_m / gn
                             target = (gx * scale, gy * scale)
                         lin, ang = pure_pursuit(target, self.config)
-                        await self._send_control(float(lin), float(ang), reason="pursuit_goal_override")
+                        reason = "pursuit_goal_override"
                     else:
                         lin, ang = pure_pursuit(target, self.config)
-                        await self._send_control(float(lin), float(ang), reason="pursuit")
+                        reason = "pursuit"
+
+                    # Adaptive slowdown: if the scene is confined (walls close
+                    # on both sides), cap the forward speed. Slower motion =
+                    # fresher plans stay valid longer = safer in narrow gaps.
+                    cap = self._confinement_cap(bev, obs)
+                    if cap is not None and lin > cap:
+                        # Respect the firmware deadband: never floor below
+                        # min_linear when moving, else the rover stalls.
+                        lin = max(float(self.config.min_linear), cap)
+                        reason = reason + "_confined"
+
+                    await self._send_control(float(lin), float(ang), reason=reason)
 
             except asyncio.CancelledError:
                 raise
@@ -878,6 +982,48 @@ class UrbanRuntime:
     _last_hold_log_ts: float = 0.0
     _aligning: bool = False           # hysteresis state for align-in-place mode
     _goal_overriding: bool = False    # hysteresis state for path->goal override
+
+    def _confinement_cap(self, bev, obs) -> Optional[float]:
+        """Return a linear-speed cap when the rover is in a confined scene
+        (walls close on both sides), else None. Uses the fraction of observed
+        BEV cells within a radius that are obstacles as the confinement signal.
+
+        Side effect: updates self.state.confined_active + confined_obstacle_ratio
+        so the dashboard can show whether we're currently in confined mode.
+        """
+        if not getattr(self.config, "confined_speed_enabled", False):
+            self.state.confined_active = False
+            return None
+        if bev is None or obs is None:
+            return None
+        res = self._bev_resolution()
+        if res <= 0.0:
+            return None
+        H, W = bev.shape[:2]
+        r_m = float(self.config.confined_check_radius_m)
+        r_px = max(1, int(round(r_m / res)))
+        cr, cc = H - 1, W // 2
+        r0 = max(0, cr - r_px)
+        r1 = cr + 1
+        c0 = max(0, cc - r_px)
+        c1 = min(W, cc + r_px + 1)
+        patch = bev[r0:r1, c0:c1]
+        obs_patch = obs[r0:r1, c0:c1]
+        seen = obs_patch & np.isfinite(patch)
+        if not seen.any():
+            self.state.confined_active = False
+            return None
+        # An "obstacle" cell for this purpose = below the collision threshold.
+        thresh = float(getattr(self.config, "collision_trav_thresh", 0.1)) or 0.1
+        obstacles = seen & (patch < thresh)
+        ratio = float(obstacles.sum()) / float(seen.sum())
+        self.state.confined_obstacle_ratio = ratio
+        need = float(self.config.confined_obstacle_ratio_thresh)
+        if ratio >= need:
+            self.state.confined_active = True
+            return float(self.config.confined_speed_max)
+        self.state.confined_active = False
+        return None
 
     async def _send_control(self, linear: float, angular: float, reason: str = "") -> None:
         async with self._locks["control"]:
@@ -919,10 +1065,17 @@ class UrbanRuntime:
             await asyncio.wait_for(self.post_control(linear, angular, 0), timeout=1.5)
             # Sends are now rare (only on material change), so log EVERY one
             # for clear diagnostics.
+            # Zigzag debug: also log goal_local + how far chosen path leans off
+            # from goal direction. If ang flips sign every 1-2 sends while the
+            # goal bearing stays steady, that's plan flipping, not real steering.
+            gx = float(getattr(self.state, "goal_x_m", 0.0))
+            gy = float(getattr(self.state, "goal_y_m", 0.0))
+            goal_bearing_deg = math.degrees(math.atan2(gx, gy)) if (gx or gy) else 0.0
             logger.info(
-                "SEND -> linear=%.2f angular=%.2f reason=%s  yaw=%.1f dist=%.1f",
+                "SEND -> linear=%.2f angular=%+.2f reason=%s  yaw=%.1f goal(%.1f,%.1f)=%+.0f° dist=%.1f",
                 linear, angular, reason,
                 self.state.last_telemetry.yaw_deg or 0.0,
+                gx, gy, goal_bearing_deg,
                 self.state.distance_to_next_m
                 if self.state.distance_to_next_m != float("inf") else -1.0,
             )
@@ -1243,6 +1396,12 @@ class UrbanRuntime:
                 else None
             ),
             "clipseg_active": self._clipseg is not None,
+            "confined": {
+                "enabled": bool(getattr(self.config, "confined_speed_enabled", False)),
+                "active": bool(self.state.confined_active),
+                "obstacle_ratio": float(self.state.confined_obstacle_ratio),
+                "speed_cap": float(getattr(self.config, "confined_speed_max", 0.0)),
+            },
             "last_plan_ts": self.state.last_plan_ts,
             "last_plan_age_ms": (
                 int((time.time() - self.state.last_plan_ts) * 1000)

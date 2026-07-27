@@ -107,6 +107,25 @@ class UrbanRuntimeConfig:
     collision_trav_thresh: float = 0.10       # was 0.15 — stricter still (only very-obstacle cells count)
     collision_hazard_fraction: float = 0.40   # need 40% of strip to be obstacle before halting
 
+    # BEV temporal smoothing — exponential moving average across perception
+    # frames. Cuts frame-to-frame noise that makes the planner flip between
+    # near-equivalent paths ("zigzag on return path" symptom). Works best at
+    # slow speed (confined mode) because ignoring pose drift is OK when the
+    # rover moves <20 cm between frames.
+    #   alpha = 1.0 → no smoothing (use latest frame only)
+    #   alpha = 0.3 → new frame weighted 30%, history 70% (heavy smoothing)
+    bev_ema_enabled: bool = True
+    bev_ema_alpha: float = 0.4
+
+    # Adaptive speed — slow down in confined scenes (walls close on both sides).
+    # Slower speed = fresh plans stay valid longer, less chance of drifting
+    # into a wall between perception frames. Uses fraction of BEV cells inside
+    # `confined_check_radius_m` that are obstacles as the "confinement" signal.
+    confined_speed_enabled: bool = True
+    confined_speed_max: float = 0.55           # cap linear when confined (m/s command units)
+    confined_check_radius_m: float = 1.5       # BEV radius scanned for obstacles
+    confined_obstacle_ratio_thresh: float = 0.35  # if >= this fraction is obstacle → confined
+
     # Recovery
     recovery_off_road_votes: int = 2
     recovery_buffer_size: int = 5
@@ -127,7 +146,13 @@ class UrbanRuntimeConfig:
     # traversability drops toward zero even when SAM-TP said "drivable".
     # Requires transformers + the CIDAS/clipseg-rd64-refined checkpoint
     # (~180 MB, downloaded once, cached to ~/.cache/huggingface).
-    clipseg_enabled: bool = False   # OFF: run GeNIE-style (SAM-TP only). Was compensating for the OLD checkpoint_2 painting everything green; the Mini-4K fine-tuned model should be discriminative on its own
+    # OFF on MPS (2026-07-27): CLIPSeg + SAM-TP together pushed perception
+    # to 3.6s/frame (target 333ms), starving planner → constant stale-BEV →
+    # rover stuck at hazard forever. The M1/M2 MPS backend falls back to
+    # CPU for aten::upsample_bicubic2d, adding huge CPU-roundtrip cost.
+    # CLIPSeg on CUDA is fine; on Apple Silicon it's a hardware mismatch.
+    # For narrow-alley wall detection use SAM-TP only + wider footprint_px.
+    clipseg_enabled: bool = False
     # CLIPSeg runs one image-encoding pass per prompt internally, so
     # doubling the prompt count roughly doubles perception latency. Keep
     # this list SHORT (≤ 5) or perception drops below the rate the
@@ -140,7 +165,11 @@ class UrbanRuntimeConfig:
         "a robot or rover or car or truck or bicycle",
         "a person",
         "grass",
-        "a wall or fence or curb",
+        # Widened for narrow-alley scenes (2026-07-27): tunnel/alley walls
+        # commonly show as brick, concrete, or stone with heavy shadows that
+        # SAM-TP paints as partially drivable. Naming the materials directly
+        # gets CLIPSeg to segment them cleanly.
+        "a brick wall or concrete wall or stone wall or tunnel wall or fence or curb",
     )
     clipseg_alpha: float = 0.9                # blend weight of CLIPSeg into trav
     clipseg_confidence_thresh: float = 0.3    # ignore CLIPSeg pixels below this
@@ -217,6 +246,10 @@ class UrbanRuntimeState:
     last_angular: float = 0.0
     last_control_ts: float = 0.0
     last_control_reason: str = ""       # "pursuit" | "hazard" | "no_path" | "stale_plan" | "not_driving"
+
+    # Adaptive speed
+    confined_active: bool = False       # True when scene is narrow → speed cap engaged
+    confined_obstacle_ratio: float = 0.0  # last computed ratio (for dashboard)
 
 
 def make_state_locks() -> dict[str, asyncio.Lock]:

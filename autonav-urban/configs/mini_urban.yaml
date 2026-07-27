@@ -50,8 +50,11 @@ fusion:
   require_depth_for_rgbd: false
 
 observation_fusion:
-  # Start off; Phase 10 may enable multi-frame BEV fusion.
-  enabled: false
+  # NOTE (2026-07-27): this key is only honored by pipeline.py, which we
+  # don't call. Runtime does temporal smoothing via bev_ema_* in
+  # UrbanRuntimeConfig instead. Left enabled here for consistency if we
+  # ever migrate to the pipeline path.
+  enabled: true
   max_observations: 4
   reference: last
 
@@ -69,24 +72,37 @@ planner:
   # Mini+ imagery. If SAM-TP is retrained or replaced, revert to 0.30/0.55/0.08.
   unknown_cost: 0.15                # was 0.30 — planner happier crossing unseen space
   smooth_kernel: 3
-  num_goals: 30
+  # Reduced 30 → 15 (2026-07-27, A2): fewer candidate goal points means
+  # fewer near-tied paths for the planner to flip between on the return leg
+  # (open plaza with many valid arcs). Original was 30 to give more choice
+  # in cluttered scenes; 15 still covers a ±90° arc of directions.
+  num_goals: 15
   num_mid_points_per_goal: 20
   path_num_samples: 100
-  # 30 cm footprint at 5 cm/px = 6 planner pixels per half-side.
-  footprint_px: 6
+  # Widened from 6 → 10 half-side pixels (was 60 cm total footprint, now
+  # 100 cm at 5 cm/px). Actual Mini+ width is only 20 cm; the extra clearance
+  # forces the planner to keep 40 cm of margin from any wall on each side,
+  # which produces naturally-centered paths in narrow alleys.
+  footprint_px: 10
   threshold_cost: 0.75              # was 0.55 — only cells with trav < 0.25 count as blocking
   threshold_points_ratio: 0.20      # was 0.08 — tolerate 20% bad cells in footprint before rejecting
   # Only the first ~2 m of path matters for aggressive filtering.
   number_of_points_to_filter: 40
   alpha: 1.2
-  # Match upstream (2026-07-25): best_k 8→12, cluster_angle_threshold 30→40.
-  # With more paths in the top-K and a wider clustering angle, path fusion
-  # produces a smoother average that doesn't flip between left/right arcs
-  # every tick when the BEV changes slightly.
-  best_k: 12
+  # A2+A3 tuning (2026-07-27): reduce top-K + force paths into fewer groups
+  # so the final "fused path" is dominated by a stable majority direction
+  # each replan instead of flipping between two similar arcs.
+  #   best_k 12 → 6            : fewer paths contribute to the final average
+  #   max_clusters 4 → 2       : force everything into 2 direction groups
+  #   cluster_angle_threshold_deg 40 → 60 : merge cluster centroids more
+  #                              aggressively (paths within 60° = same group)
+  # OVERRIDES Nilesh's 2026-07-25 tuning (best_k=12, angle=40) which fixed
+  # a different flipping problem. If that scene re-breaks, revert this block
+  # and try A1 (path continuity bonus in planner) instead.
+  best_k: 6
   use_clustering: true
-  max_clusters: 4
-  cluster_angle_threshold_deg: 40.0
+  max_clusters: 2
+  cluster_angle_threshold_deg: 60.0
   random_seed: 42
   include_goal_in_path_bank: false
   include_random_goals: true

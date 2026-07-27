@@ -1527,7 +1527,8 @@ async def autonav_urban_dashboard():
   </div>
   <div class="panel"><h2>plan overlay (paths)</h2>
     <img id="plan" width="240" alt="plan overlay">
-    <div style="font-size:10px;color:#888">cyan = candidate paths · red = chosen path · green = goal</div>
+    <div style="font-size:10px;color:#888">cyan = candidate paths · red = chosen path · <span style="color:#ff0">yellow dashed = straight-to-goal reference</span> · green = goal</div>
+    <div id="confinedTag" style="display:none;margin-top:4px;font-size:11px;color:#fc0;background:#332;border:1px solid #664;border-radius:4px;padding:3px 6px"></div>
   </div>
   <div class="panel" style="min-width:280px;max-width:360px">
     <h2>checkpoints</h2>
@@ -1631,6 +1632,18 @@ function loadImg(elId, url){
 
 let latest_status = null;   // last status snapshot — shared by all pollers
 
+function renderConfinedTag(s){
+  const tag = document.getElementById('confinedTag');
+  const c = s && s.confined;
+  if(!tag || !c || !c.enabled){ if(tag) tag.style.display = 'none'; return; }
+  if(c.active){
+    tag.textContent = `⚠ confined scene (${(c.obstacle_ratio*100).toFixed(0)}% obstacle cells nearby) — speed capped at ${c.speed_cap.toFixed(2)} m/s`;
+    tag.style.display = 'block';
+  } else {
+    tag.style.display = 'none';
+  }
+}
+
 function renderWarmupBanner(s){
   const w = s && s.warmup;
   const banner = document.getElementById('warmupBanner');
@@ -1679,6 +1692,7 @@ async function pollStatus(){
     renderKV(s);
     renderCheckpoints(s);
     renderWarmupBanner(s);
+    renderConfinedTag(s);
   }catch(e){
     document.getElementById('status').textContent = 'status err: '+e.message;
   }
