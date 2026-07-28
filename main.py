@@ -406,7 +406,8 @@ async def control(request: Request):
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
         raise HTTPException(
-            status_code=500, detail="Failed to send control command"
+            status_code=500,
+            detail=f"Failed to send control command: {e}",
         ) from e
 
 

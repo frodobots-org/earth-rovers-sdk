@@ -12,7 +12,11 @@ $(document).ready(function () {
   const rtmChannel = rtmClient.createChannel(channelName);
 
   // Event listener for connection state changes
+  window.rtmConnectionState = "DISCONNECTED";
+  window.rtmConnectionReason = null;
   rtmClient.on("ConnectionStateChange", (newState, reason) => {
+    window.rtmConnectionState = newState;
+    window.rtmConnectionReason = reason;
     console.log(
       "on connection state changed to " + newState + " reason: " + reason
     );
@@ -77,12 +81,12 @@ $(document).ready(function () {
       });
   }
 
-  // Function to send message
+  // Function to send message (returns a Promise so Python can await success/failure)
   function sendMessage(json) {
     const message = JSON.stringify(json);
     console.warn("sending message to bot", botUid);
     console.warn("message", message);
-    rtmClient
+    return rtmClient
       .sendMessageToPeer(
         {
           text: message,
@@ -91,11 +95,26 @@ $(document).ready(function () {
       )
       .then(() => {
         console.warn("Message sent successfully:", message);
+        return { ok: true };
       })
       .catch((err) => {
         console.warn("Error sending message:", err);
+        const detail =
+          (err && (err.message || err.code || err.reason)) || String(err);
+        return Promise.reject(new Error(detail));
       });
   }
+
+  // Session health snapshot used by BrowserService auto-reinit
+  window.getRtmSessionHealth = function () {
+    const ts = window.rtm_data && window.rtm_data.timestamp;
+    return {
+      state: window.rtmConnectionState || null,
+      reason: window.rtmConnectionReason || null,
+      timestamp: ts == null ? null : String(ts),
+      hasTelemetry: Boolean(window.rtm_data),
+    };
+  };
 
   // Make the function globally accessible
   window.sendMessage = sendMessage;
