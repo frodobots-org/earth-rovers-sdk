@@ -1,23 +1,28 @@
 import base64
+import contextlib
 import functools
 import json
 import logging
 import os
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Literal
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
+from telemetry_hub import TelemetryHub
 from tts_service import generate_speech
+from video_feed import FrameBroadcaster
 
 load_dotenv()
 
@@ -25,7 +30,29 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("http_logger")
 
-app = FastAPI()
+
+async def warmup_browser_when_ready():
+    # Hold off while mission gating applies: launching the headless browser
+    # renders /sdk, which requires auth, and auth must not run before the
+    # user calls /start-mission.
+    while os.getenv("MISSION_SLUG") and not auth_response_data:
+        await asyncio.sleep(2)
+    await browser_service.warmup()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Background task: the page loads /sdk from this same server, which only
+    # accepts connections after startup yields — never await warm-up here.
+    warmup_task = asyncio.create_task(warmup_browser_when_ready())
+    yield
+    warmup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await warmup_task
+    await browser_service.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 # Middleware
@@ -93,6 +120,105 @@ checkpoints_list_data = {}
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 browser_service = BrowserService()
+telemetry_hub = TelemetryHub()
+
+feed_broadcasters = {
+    "front": FrameBroadcaster(browser_service.front),
+    "rear": FrameBroadcaster(browser_service.rear),
+}
+
+
+@app.get("/feed")
+async def feed(view: str = "front", fps: int = 15):
+    await need_start_mission()
+    if not auth_response_data:
+        await auth()
+
+    if view not in feed_broadcasters:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid view: {view}. Use front or rear"
+        )
+    fps = max(1, min(fps, 30))
+
+    broadcaster = feed_broadcasters[view]
+    queue = await broadcaster.subscribe(fps)
+
+    async def stream():
+        min_interval = 1.0 / fps
+        last_sent = 0.0
+        try:
+            while True:
+                jpeg = await queue.get()
+                now = time.monotonic()
+                if now - last_sent < min_interval * 0.9:
+                    continue  # this client asked for fewer fps than we capture
+                last_sent = now
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                    + jpeg
+                    + b"\r\n"
+                )
+        finally:
+            await broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+@app.websocket("/ws/ingest")
+async def ws_ingest(websocket: WebSocket):
+    # Private channel for the headless /sdk page; local connections only.
+    client_host = websocket.client.host if websocket.client else None
+    if client_host not in ("127.0.0.1", "::1"):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    telemetry_hub.ingest_connected = True
+    await telemetry_hub.broadcast({"type": "status", **telemetry_hub.status()})
+    try:
+        while True:
+            data = await websocket.receive_json()
+            await telemetry_hub.publish(data)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        telemetry_hub.ingest_connected = False
+        await telemetry_hub.broadcast({"type": "status", **telemetry_hub.status()})
+
+
+@app.websocket("/ws/data")
+async def ws_data(websocket: WebSocket):
+    await websocket.accept()
+    telemetry_hub.add_client(websocket)
+    try:
+        await websocket.send_json(telemetry_hub.snapshot())
+        while True:
+            # Incoming messages are ignored; the read doubles as a disconnect
+            # detector and its timeout paces the status heartbeat.
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=5)
+            except asyncio.TimeoutError:
+                await websocket.send_json(
+                    {"type": "status", **telemetry_hub.status()}
+                )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        telemetry_hub.remove_client(websocket)
+
+
+@app.get("/status")
+async def get_status():
+    return JSONResponse(
+        content={
+            "browser_ready": browser_service.is_ready,
+            "mission_started": bool(auth_response_data)
+            or not os.getenv("MISSION_SLUG"),
+            **telemetry_hub.status(),
+        }
+    )
 
 
 async def auth_common():
@@ -154,6 +280,9 @@ def get_env_tokens():
             "USERID": userid,
             "APP_ID": app_id,
             "BOT_UID": bot_uid,
+            "SPECTATOR_USERID": os.getenv("SPECTATOR_USERID"),
+            "SPECTATOR_RTC_TOKEN": os.getenv("SPECTATOR_RTC_TOKEN"),
+            "BOT_TYPE": os.getenv("BOT_TYPE", "mini"),
         }
     return None
 
@@ -334,6 +463,16 @@ async def end_mission():
         raise HTTPException(status_code=500, detail=f"Failed to end mission: {str(e)}")
 
 
+def render_template(filename: str, template_vars: dict) -> HTMLResponse:
+    with open(filename, "r", encoding="utf-8") as file:
+        html_content = file.read()
+
+    for key, value in template_vars.items():
+        html_content = html_content.replace(f"{{{{ {key} }}}}", str(value))
+
+    return HTMLResponse(content=html_content, status_code=200)
+
+
 async def render_index_html(is_spectator: bool):
     await need_start_mission()
     if not auth_response_data:
@@ -354,18 +493,40 @@ async def render_index_html(is_spectator: bool):
         "map_zoom_level": os.getenv("MAP_ZOOM_LEVEL", "18"),
     }
 
-    with open("index.html", "r", encoding="utf-8") as file:
-        html_content = file.read()
-
-    for key, value in template_vars.items():
-        html_content = html_content.replace(f"{{{{ {key} }}}}", str(value))
-
-    return HTMLResponse(content=html_content, status_code=200)
+    return render_template("index.html", template_vars)
 
 
 @app.get("/")
 async def get_index(request: Request):
-    return await render_index_html(is_spectator=True)
+    # The dashboard renders even when the mission hasn't started or auth
+    # fails — it degrades to "waiting" states instead of a raw JSON error.
+    boot_notice = ""
+    if not auth_response_data:
+        try:
+            await need_start_mission()
+            await auth()
+        except HTTPException as e:
+            boot_notice = e.detail if isinstance(e.detail, str) else "SDK not ready"
+        except Exception:
+            boot_notice = "SDK auth failed - check the credentials in .env"
+
+    tokens = auth_response_data or {}
+    template_vars = {
+        "appid": tokens.get("APP_ID") or "",
+        "rtc_token": tokens.get("SPECTATOR_RTC_TOKEN") or "",
+        "channel": tokens.get("CHANNEL_NAME") or "",
+        "uid": tokens.get("SPECTATOR_USERID") or "",
+        "bot_uid": tokens.get("BOT_UID") or "",
+        "checkpoints_list": json.dumps(
+            checkpoints_list_data.get("checkpoints_list", [])
+        ),
+        "map_zoom_level": os.getenv("MAP_ZOOM_LEVEL", "18"),
+        "bot_slug": os.getenv("BOT_SLUG", ""),
+        "mission_slug": os.getenv("MISSION_SLUG", ""),
+        # Injected inside a double-quoted JS string literal
+        "boot_notice": str(boot_notice).replace('"', "'").replace("\n", " "),
+    }
+    return render_template("dashboard.html", template_vars)
 
 
 @app.get("/sdk")
@@ -469,6 +630,10 @@ async def get_screenshot(view_types: str = "rear,map,front"):
 @app.get("/data")
 async def get_data():
     await need_start_mission()
+    # Fast path: fresh telemetry pushed by the /sdk page, no page.evaluate.
+    age = telemetry_hub.age_seconds
+    if telemetry_hub.latest is not None and age is not None and age < 2:
+        return JSONResponse(content=telemetry_hub.latest)
     data = await browser_service.data()
     return JSONResponse(content=data)
 
@@ -627,6 +792,8 @@ async def get_screenshot_v2():
 
     async def get_frame(frame_type):
         frame = await getattr(browser_service, frame_type)()
+        if not frame:
+            return {}
         _, frame = frame.split(",", 1)
         return {f"{frame_type}_frame": frame}
 
@@ -649,13 +816,6 @@ async def get_screenshot_v2():
     response_data["timestamp"] = datetime.utcnow().timestamp()
 
     return JSONResponse(content=response_data)
-
-
-if __name__ == "__main__":
-    from hypercorn.config import Config
-
-    config = Config()
-    config.bind = ["0.0.0.0:8000"]
 
 
 @app.get("/v2/front")

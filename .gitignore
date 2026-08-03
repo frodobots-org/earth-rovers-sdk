@@ -19,3 +19,6 @@ node_modules/
 screenshots/*.png
 static/*.mp3
 static/*.wav
+
+# Handoff docs for the GeNIE / Earth Rover Challenge team (local only)
+/plans/
