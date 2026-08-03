@@ -3,7 +3,9 @@
 // clients without extra page.evaluate round-trips.
 (function () {
   var rtmTokenInput = document.getElementById("rtm_token");
+  var ingestTokenInput = document.getElementById("ingest_token");
   if (!rtmTokenInput || !rtmTokenInput.value) return;
+  if (!ingestTokenInput || !ingestTokenInput.value) return;
 
   var ws = null;
   var retryDelay = 1000;
@@ -12,7 +14,8 @@
     ws = new WebSocket(
       (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
-        "/ws/ingest"
+        "/ws/ingest?token=" +
+        encodeURIComponent(ingestTokenInput.value)
     );
     ws.onopen = function () {
       retryDelay = 1000;
@@ -27,9 +30,12 @@
   }
   connect();
 
-  document.addEventListener("message-from-peer", function () {
-    if (ws && ws.readyState === WebSocket.OPEN && window.rtm_data) {
-      ws.send(JSON.stringify(window.rtm_data));
+  document.addEventListener("message-from-peer", function (event) {
+    if (ws && ws.readyState === WebSocket.OPEN && event.detail) {
+      // Local delivery should stay near-zero, but never build an unbounded
+      // browser queue if the server is temporarily overloaded.
+      if (ws.bufferedAmount > 64 * 1024) return;
+      ws.send(JSON.stringify(event.detail));
     }
   });
 })();

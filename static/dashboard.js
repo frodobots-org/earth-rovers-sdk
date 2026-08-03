@@ -7,13 +7,136 @@
     return document.getElementById(id);
   };
 
-  /* ---------- Header / boot notice ---------- */
+  /* ---------- Header / mission lifecycle ---------- */
 
   if (DASH.botSlug) $("bot-chip").textContent = DASH.botSlug;
   if (DASH.missionSlug) $("mission-chip").textContent = DASH.missionSlug;
+
+  function showBootNotice(message, isError) {
+    var notice = $("boot-notice");
+    notice.textContent = message || "";
+    notice.classList.toggle("hidden", !message);
+    notice.classList.toggle("error", !!isError);
+  }
+
+  // Empty-state message centered in the video area (title + hint + optional
+  // Start mission button). Used whenever no video is playing.
+  function setPlaceholder(title, opts) {
+    opts = opts || {};
+    var titleEl = $("ph-title");
+    titleEl.textContent = title;
+    titleEl.classList.toggle("warn", opts.tone === "warn");
+    titleEl.classList.toggle("error", opts.tone === "error");
+    var sub = $("ph-sub");
+    sub.textContent = opts.sub || "";
+    sub.classList.toggle("hidden", !opts.sub);
+    $("ph-mission-btn").classList.toggle("hidden", !opts.startButton);
+  }
+
+  function videoActive() {
+    return $("front-placeholder").classList.contains("hidden");
+  }
+
+  // Problems go where the user is looking: big and centered when the video
+  // area is empty, a slim overlay strip when video is playing.
+  function reportProblem(message, isError) {
+    if (videoActive()) {
+      showBootNotice(message, isError);
+    } else {
+      showBootNotice("", false);
+      setPlaceholder(message, {
+        tone: isError ? "error" : "warn",
+        sub: isError ? "Fix the issue and try again." : "",
+        startButton: !missionStarted && !!DASH.missionSlug,
+      });
+    }
+  }
+
+  var missionAction = $("mission-action-btn");
+  var missionStarted = !!DASH.missionStarted;
+
   if (DASH.bootNotice) {
-    $("boot-notice").textContent = DASH.bootNotice;
-    $("boot-notice").classList.remove("hidden");
+    if (/start-mission/i.test(DASH.bootNotice)) {
+      setPlaceholder("No mission running", {
+        sub: "Start a mission to connect to the rover and watch the live feed.",
+        startButton: !!DASH.missionSlug,
+      });
+    } else {
+      reportProblem(DASH.bootNotice, true);
+    }
+  }
+
+  function renderMissionAction() {
+    if (!DASH.missionSlug) return;
+    missionAction.classList.remove("hidden", "start", "stop");
+    missionAction.classList.add(missionStarted ? "stop" : "start");
+    missionAction.textContent = missionStarted ? "Stop mission" : "Start mission";
+  }
+
+  function responseError(response) {
+    return response
+      .json()
+      .catch(function () {
+        return {};
+      })
+      .then(function (body) {
+        throw new Error(body.detail || "Request failed (" + response.status + ")");
+      });
+  }
+
+  $("ph-mission-btn").addEventListener("click", function () {
+    missionAction.click();
+  });
+
+  missionAction.addEventListener("click", function () {
+    var stopping = missionStarted;
+    if (stopping && !window.confirm("Stop the active mission?")) return;
+
+    missionAction.disabled = true;
+    missionAction.textContent = stopping ? "Stopping…" : "Starting…";
+    showBootNotice("", false);
+    if (!stopping) {
+      setPlaceholder("Starting mission…", {
+        sub: "Connecting to the rover — this can take a few seconds.",
+      });
+      $("ph-mission-btn").disabled = true;
+    }
+
+    var request;
+    if (stopping) {
+      // Dispatch a confirmed zero command before ending the remote ride.
+      request = fetch("/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: { linear: 0, angular: 0 } }),
+      })
+        .catch(function () {})
+        .then(function () {
+          return fetch("/end-mission", { method: "POST" });
+        });
+    } else {
+      request = fetch("/start-mission", { method: "POST" });
+    }
+
+    request
+      .then(function (response) {
+        if (!response.ok) return responseError(response);
+        window.location.reload();
+      })
+      .catch(function (error) {
+        $("ph-mission-btn").disabled = false;
+        reportProblem(String(error.message || error), true);
+        missionAction.disabled = false;
+        renderMissionAction();
+      });
+  });
+
+  renderMissionAction();
+
+  if (!missionStarted) {
+    document.querySelectorAll(".pad, #lamp-btn, #speak-btn, #checkpoint-btn").forEach(function (control) {
+      control.disabled = true;
+    });
   }
 
   function setLed(id, state) {
@@ -102,6 +225,9 @@
 
   $("follow-switch").addEventListener("change", function () {
     window.DashMap.setFollow(this.checked);
+  });
+  $("radius-switch").addEventListener("change", function () {
+    window.DashMap.setRadiusVisible(this.checked);
   });
   window.onFollowChanged = function (value) {
     $("follow-switch").checked = value;
@@ -205,7 +331,12 @@
       setLed("led-telemetry", "on");
     };
     ws.onmessage = function (event) {
-      var msg = JSON.parse(event.data);
+      var msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
       if (msg.type === "snapshot" || msg.type === "telemetry") {
         if (msg.data) renderTelemetry(msg.data);
       }
@@ -270,6 +401,7 @@
   var held = { forward: false, back: false, left: false, right: false };
   var driveTimer = null;
   var commandInFlight = false;
+  var pendingCommand = null;
   var feedbackTimer = null;
 
   function speedScale() {
@@ -294,12 +426,22 @@
   }
 
   function sendCommand(command) {
-    if (commandInFlight) return; // coalesce, never queue
+    // Latest wins, but delivery remains ordered. In particular, a stop waits
+    // behind an in-flight motion command instead of racing it over HTTP/RTM.
+    pendingCommand = command;
+    flushCommand();
+  }
+
+  function flushCommand() {
+    if (commandInFlight || !pendingCommand) return;
+    var command = pendingCommand;
+    pendingCommand = null;
     commandInFlight = true;
     fetch("/control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: command }),
+      keepalive: true,
     })
       .then(function (r) {
         if (!r.ok) {
@@ -313,6 +455,7 @@
       })
       .finally(function () {
         commandInFlight = false;
+        flushCommand();
       });
   }
 
@@ -349,7 +492,6 @@
       driveTimer = null;
     }
     // Exactly one zero command so the rover stops promptly.
-    commandInFlight = false;
     sendCommand({ linear: 0, angular: 0, lamp: lampState });
   }
 
@@ -365,10 +507,11 @@
   }
 
   function releaseAll() {
-    var wasDriving = anyHeld();
     held.forward = held.back = held.left = held.right = false;
     refreshPads();
-    if (wasDriving || driveTimer) stopDriving();
+    // Always transmit the stop. The emergency button and page-safety events
+    // must not depend on potentially stale local key/pointer state.
+    stopDriving();
   }
 
   // On-screen d-pad
@@ -431,7 +574,6 @@
     $("lamp-btn").textContent = lampState ? "Lamp off" : "Lamp on";
     $("lamp-btn").classList.toggle("on", !!lampState);
     var command = currentCommand();
-    commandInFlight = false;
     sendCommand(command);
   });
 
@@ -500,7 +642,11 @@
         return r.ok ? r.json() : null;
       })
       .then(function (body) {
-        if (body && body.latest_scanned_checkpoint) {
+        if (
+          body &&
+          body.latest_scanned_checkpoint !== null &&
+          body.latest_scanned_checkpoint !== undefined
+        ) {
           renderCheckpoints(parseInt(body.latest_scanned_checkpoint, 10) + 1);
         }
       })
@@ -511,6 +657,7 @@
   }
 
   function renderCheckpoints(nextSequence) {
+    window.DashMap.setCheckpointStates(nextSequence);
     var list = $("checkpoint-chips");
     list.innerHTML = "";
     var done = 0;
@@ -694,12 +841,31 @@
   /* ---------- Spectator video (Agora RTC) ---------- */
 
   var audioTrack = null;
+  var audioTracks = {};
   var audioPlaying = false;
+
+  function selectAudioTrack() {
+    var nextTrack = audioTracks[1000] || audioTracks[1001] || null;
+    if (nextTrack === audioTrack) return;
+
+    var wasPlaying = audioPlaying;
+    if (audioTrack && wasPlaying) audioTrack.stop();
+    audioTrack = nextTrack;
+    if (audioTrack && wasPlaying) audioTrack.play();
+    if (!audioTrack) audioPlaying = false;
+    $("audio-btn").disabled = !audioTrack;
+    $("audio-btn").textContent = audioPlaying ? "Mute audio" : "Unmute audio";
+  }
 
   function initVideo() {
     if (!DASH.appid || !DASH.rtcToken) {
-      $("front-placeholder").textContent =
-        "Video unavailable — no spectator token configured";
+      if (missionStarted) {
+        setPlaceholder("Video unavailable", {
+          tone: "warn",
+          sub: "No spectator token configured for this session.",
+        });
+      }
+      // Not started: the placeholder already shows the mission empty state.
       return;
     }
 
@@ -717,22 +883,32 @@
       // The rover publishes front on 1000 and rear on 1001; ignore anyone
       // else in the channel (other spectators, the headless /sdk page).
       if (uid !== FRONT_UID && uid !== REAR_UID) return;
-      client.subscribe(user, mediaType).then(function () {
-        if (mediaType === "video") {
-          if (uid === REAR_UID) {
-            $("rear-player").classList.remove("hidden");
-            user.videoTrack.play("rear-player");
-          } else {
-            $("front-placeholder").classList.add("hidden");
-            user.videoTrack.play("front-player");
+      client
+        .subscribe(user, mediaType)
+        .then(function () {
+          if (mediaType === "video") {
+            if (uid === REAR_UID) {
+              $("rear-player").classList.remove("hidden");
+              user.videoTrack.play("rear-player");
+            } else {
+              $("front-placeholder").classList.add("hidden");
+              user.videoTrack.play("front-player");
+            }
           }
-        }
-        if (mediaType === "audio" && uid === FRONT_UID) {
-          // Remote audio starts muted so autoplay isn't blocked.
-          audioTrack = user.audioTrack;
-          $("audio-btn").disabled = false;
-        }
-      });
+          if (mediaType === "audio") {
+            // Rover models may publish audio with either camera UID. Prefer
+            // the front publisher if both exist, and never call play() until
+            // the user explicitly unmutes.
+            audioTracks[uid] = user.audioTrack;
+            selectAudioTrack();
+          }
+        })
+        .catch(function (error) {
+          console.error(
+            "Failed to subscribe to rover " + mediaType + " (UID " + uid + ")",
+            error
+          );
+        });
     });
 
     client.on("user-unpublished", function (user, mediaType) {
@@ -745,11 +921,9 @@
           $("front-placeholder").classList.remove("hidden");
         }
       }
-      if (mediaType === "audio" && uid === FRONT_UID) {
-        audioTrack = null;
-        audioPlaying = false;
-        $("audio-btn").disabled = true;
-        $("audio-btn").textContent = "Unmute audio";
+      if (mediaType === "audio") {
+        delete audioTracks[uid];
+        selectAudioTrack();
       }
     });
 
@@ -763,8 +937,10 @@
       .catch(function (err) {
         console.error("Agora join failed", err);
         setLed("led-video", "bad");
-        $("front-placeholder").textContent =
-          "Video connection failed — check tokens / channel";
+        setPlaceholder("Video connection failed", {
+          tone: "error",
+          sub: "Check the tokens and channel, then reload the page.",
+        });
       });
   }
 

@@ -10,18 +10,7 @@
 
   <body>
     <script>
-      window.DASH = {
-        appid: "{{ appid }}",
-        rtcToken: "{{ rtc_token }}",
-        channel: "{{ channel }}",
-        uid: "{{ uid }}",
-        botUid: "{{ bot_uid }}",
-        checkpointsList: {{ checkpoints_list }},
-        mapZoomLevel: {{ map_zoom_level }},
-        botSlug: "{{ bot_slug }}",
-        missionSlug: "{{ mission_slug }}",
-        bootNotice: "{{ boot_notice }}"
-      };
+      window.DASH = {{ dashboard_config }};
     </script>
 
     <header class="topbar">
@@ -31,6 +20,9 @@
       <div class="ident">
         <span class="chip" id="bot-chip"></span>
         <span class="chip chip-dim" id="mission-chip"></span>
+      </div>
+      <div class="mission-control">
+        <button type="button" class="btn btn-mission hidden" id="mission-action-btn"></button>
       </div>
       <div class="leds" role="status" aria-label="Connection status">
         <span
@@ -63,8 +55,6 @@
       </label>
     </header>
 
-    <div id="boot-notice" class="boot-notice hidden"></div>
-
     <main class="grid">
       <section class="panel video-panel">
         <div class="panel-head">
@@ -76,9 +66,18 @@
           </div>
         </div>
         <div class="video-stage">
+          <div id="boot-notice" class="boot-notice hidden" role="status"></div>
           <div id="front-player" class="player">
             <div class="placeholder" id="front-placeholder">
-              Waiting for rover video…
+              <p class="ph-title" id="ph-title">Waiting for rover video…</p>
+              <p class="ph-sub hidden" id="ph-sub"></p>
+              <button
+                type="button"
+                class="btn btn-mission start ph-start hidden"
+                id="ph-mission-btn"
+              >
+                Start mission
+              </button>
             </div>
           </div>
           <div id="rear-player" class="player pip hidden"></div>
@@ -89,6 +88,14 @@
         <div class="panel-head">
           <h2>Map</h2>
           <div class="panel-actions">
+            <label
+              class="mini-toggle"
+              for="radius-switch"
+              title="Draw a 15 m circle around each checkpoint"
+            >
+              <input type="checkbox" id="radius-switch" />
+              15 m radius
+            </label>
             <label class="mini-toggle" for="follow-switch">
               <input type="checkbox" id="follow-switch" checked />
               Follow rover

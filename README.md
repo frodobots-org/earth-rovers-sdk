@@ -47,9 +47,10 @@ MISSION_SLUG=
 # Image quality between 0.1 and 1.0 (default: 0.8)
 # Recommended: 0.8 for better performance
 IMAGE_QUALITY=0.8
-# Image format: jpeg, png or webp (default: png)
-# Recommended: jpeg for better performance and lower bandwidth usage
+# Image format: jpeg, png or webp (default: jpeg)
 IMAGE_FORMAT=jpeg
+# Dedicated MJPEG feed quality (always JPEG; default: 0.8)
+FEED_JPEG_QUALITY=0.8
 # TTS Provider: "edge" (free, default) or "gemini"
 TTS_PROVIDER=edge
 # API key (required for gemini only)
@@ -171,8 +172,7 @@ Example Response:
 
 ### GET /screenshot
 
-With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
-Inside the folder screenshots/ you can find the images.
+This endpoint captures the requested views and returns each image as base64. The timestamp records when the response capture completed (Unix Epoch UTC).
 
 This endpoint accepts a list of view types as a query parameter (view_types). Valid view types are rear, map, and front. If no view types are provided, it will return all three by default.
 
@@ -206,11 +206,7 @@ Example Response:
 
 ### GET /v2/screenshot
 
-With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
-
-This endpoint retrieves the latest emitted frame (both front and rear) and the corresponding timestamp. The frame is provided as a base64 encoded image, and the timestamp is given in Unix Epoch format (Unix Epoch UTC timestamp).
-
-Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
+This endpoint returns fresh cached camera frames as base64 with their actual capture timestamps. Mini bots return the front camera; zero bots return front and rear when both are available. The legacy `timestamp` field is the newest capture, while `front_timestamp` and `rear_timestamp` identify each frame precisely.
 
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
@@ -224,6 +220,8 @@ Example Response:
 {
     "front_frame": "base64_encoded_image",
     "rear_frame": "base64_encoded_image",
+    "front_timestamp": 1724189733.198559,
+    "rear_timestamp": 1724189733.208559,
     "timestamp": 1724189733.208559
 }
 ```
@@ -300,7 +298,7 @@ Example Response:
 
 ### GET /feed
 
-Live MJPEG stream of a camera (`multipart/x-mixed-replace`) — the recommended way to consume video programmatically (ROS2, OpenCV, recording). Unlike polling `/v2/screenshot`, frames are pushed as they're captured, there's no per-frame HTTP or base64 overhead, and any number of clients share a single capture loop.
+Live MJPEG stream of a camera (`multipart/x-mixed-replace`) — the recommended way to consume video programmatically (ROS2, OpenCV, recording). Unlike polling `/v2/screenshot`, frames are pushed as they're captured, there's no per-frame HTTP response overhead, and feed and v2 consumers share a latest-frame capture cache.
 
 Query params:
 
@@ -319,9 +317,11 @@ cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15")
 ok, frame = cap.read()
 ```
 
-Frames are always JPEG regardless of `IMAGE_FORMAT`. See `examples/ros2/` for a complete ROS2 bridge node (`cmd_vel`, camera, GPS, IMU, battery).
+Frames are always JPEG regardless of `IMAGE_FORMAT`; tune them with `FEED_JPEG_QUALITY`. A camera that is not ready returns HTTP 503 rather than holding an empty stream open. See `examples/ros2/` for a complete ROS2 bridge node (`cmd_vel`, camera, GPS, IMU, battery).
 
 > **Concurrency**: the SDK server is fully async — `/feed`, `/control`, `/data` and `/v2/*` can all be used simultaneously. Driving the rover while streaming video and reading telemetry is the intended usage pattern.
+
+Run one Hypercorn worker per SDK instance. Browser sessions, camera-frame caches and telemetry fan-out are intentionally kept in process so hot-path requests do not cross a process boundary.
 
 ### GET /status
 
@@ -651,11 +651,6 @@ Example Response:
   - Added compatibility for mini and zero bots
   - Added HTML examples for bot control and video streaming (20 FPS)
 
-<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="screenshots/zero.jpg" alt="Zero Bot" width="900">
-  <img src="screenshots/mini.jpg" alt="Mini Bot" width="900">
-</div>
-
 - v.4.7:
   - Optimized frame capture system to reduce CPU and memory usage
   - Removed continuous frame capture loop, now frames are captured on-demand
@@ -681,4 +676,3 @@ Example Response:
 ## Join our Discord
 
 - [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
-

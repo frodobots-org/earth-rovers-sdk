@@ -87,6 +87,29 @@ button {
   display: none;
 }
 
+.mission-control {
+  display: flex;
+  align-items: center;
+}
+
+.btn-mission {
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.btn-mission.start {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: rgba(64, 196, 124, 0.08);
+}
+
+.btn-mission.stop {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: rgba(239, 106, 106, 0.08);
+}
+
 .leds {
   display: flex;
   gap: 14px;
@@ -181,13 +204,43 @@ button {
 
 /* ---------- Notices ---------- */
 
+/* Slim overlay strip pinned to the top of the video stage. */
 .boot-notice {
-  margin: 14px 18px 0;
-  padding: 10px 14px;
-  border: 1px solid var(--warn);
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
   border-radius: 8px;
-  background: rgba(229, 168, 59, 0.08);
-  color: var(--warn);
+  background: rgba(13, 17, 22, 0.82);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: #e8ce96;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+
+.boot-notice::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(229, 168, 59, 0.7);
+}
+
+.boot-notice.error {
+  color: #f1b3b3;
+}
+
+.boot-notice.error::before {
+  background: var(--bad);
+  box-shadow: 0 0 6px rgba(239, 106, 106, 0.7);
 }
 
 .hidden {
@@ -287,11 +340,41 @@ button {
   inset: 0;
   z-index: 5;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   background: #000;
+  text-align: center;
+  padding: 0 24px;
+}
+
+.ph-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #cbd6df;
+}
+
+.ph-title.warn {
+  color: var(--warn);
+}
+
+.ph-title.error {
+  color: var(--bad);
+}
+
+.ph-sub {
+  margin: 0;
+  font-size: 13.5px;
   color: var(--muted);
-  font-size: 13px;
+  max-width: 480px;
+}
+
+.ph-start {
+  margin-top: 14px;
+  font-size: 14px;
+  padding: 10px 26px;
 }
 
 .pip {
@@ -335,18 +418,59 @@ button {
   transition: transform 0.2s ease-out;
 }
 
-.checkpoint-icon {
+/* Checkpoint markers: segmented pill, one segment per coinciding checkpoint,
+   each colored by its own state. */
+.cp-marker {
+  display: flex;
+  height: 24px;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 11px;
+  width: max-content;
+}
+
+.cp-seg {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  min-width: 25px;
+  padding: 0 5px;
+  background: #46535f;
+  color: #dbe4ec;
+}
+
+.cp-seg + .cp-seg {
+  border-left: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+.cp-seg.done {
   background: #2e7d4f;
   color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+.cp-seg.next {
+  background: var(--accent);
+  color: #10151b;
+}
+
+.cp-marker.has-next {
+  animation: cp-pulse 2s ease-out infinite;
+}
+
+@keyframes cp-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 178, 36, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 178, 36, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 178, 36, 0);
+  }
 }
 
 /* ---------- Compass ---------- */
@@ -859,5 +983,6 @@ input[type="range"] {
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+    animation: none !important;
   }
 }

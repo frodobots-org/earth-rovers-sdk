@@ -22,29 +22,37 @@ function initMap() {
 
 // Define updateMarker globally
 window.updateMarker = function (latitude, longitude) {
-  if (marker) {
-    map.removeLayer(marker);
+  const position = [latitude, longitude];
+  if (!marker) {
+    const mainMarkerEl = document.createElement("div");
+    mainMarkerEl.className = "main-marker";
+    mainMarkerEl.style.backgroundColor = "red";
+    mainMarkerEl.style.border = "2px solid white";
+    mainMarkerEl.style.borderRadius = "50%";
+    mainMarkerEl.style.width = "20px";
+    mainMarkerEl.style.height = "20px";
+
+    marker = L.marker(position, {
+      icon: L.divIcon({
+        className: "main-marker-icon",
+        html: mainMarkerEl.outerHTML,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
+      }),
+      zIndexOffset: 1000,
+    }).addTo(map);
+    map.setView(position, window.mapZoomLevel);
+    return;
   }
 
-  const mainMarkerEl = document.createElement("div");
-  mainMarkerEl.className = "main-marker";
-  mainMarkerEl.style.backgroundColor = "red";
-  mainMarkerEl.style.border = "2px solid white";
-  mainMarkerEl.style.borderRadius = "50%";
-  mainMarkerEl.style.width = "20px";
-  mainMarkerEl.style.height = "20px";
-
-  marker = L.marker([latitude, longitude], {
-    icon: L.divIcon({
-      className: "main-marker-icon",
-      html: mainMarkerEl.outerHTML,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10]
-    }),
-    zIndexOffset: 1000  // This ensures the marker is on top
-  }).addTo(map);
-
-  map.setView([latitude, longitude], window.mapZoomLevel);
+  const previous = marker.getLatLng();
+  if (
+    Math.abs(previous.lat - latitude) > 1e-7 ||
+    Math.abs(previous.lng - longitude) > 1e-7
+  ) {
+    marker.setLatLng(position);
+    map.panTo(position, { animate: false });
+  }
 };
 
 document.addEventListener("DOMContentLoaded", function () {

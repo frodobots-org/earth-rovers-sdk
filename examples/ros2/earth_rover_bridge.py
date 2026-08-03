@@ -36,11 +36,13 @@ import websocket
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, Image, Imu, NavSatFix
 from std_msgs.msg import Float32
 
 CONTROL_RATE_HZ = 10.0
 CMD_VEL_TIMEOUT_S = 0.5  # no cmd_vel for this long -> send stop
+CONTROL_HTTP_TIMEOUT_S = 0.5
 
 
 class EarthRoverBridge(Node):
@@ -52,11 +54,23 @@ class EarthRoverBridge(Node):
         self.feed_fps = int(self.get_parameter("feed_fps").value)
 
         self.bridge = CvBridge()
-        self.image_pub = self.create_publisher(Image, "earth_rover/front/image_raw", 10)
-        self.gps_pub = self.create_publisher(NavSatFix, "earth_rover/gps", 10)
-        self.imu_pub = self.create_publisher(Imu, "earth_rover/imu", 10)
-        self.battery_pub = self.create_publisher(BatteryState, "earth_rover/battery", 10)
-        self.heading_pub = self.create_publisher(Float32, "earth_rover/heading", 10)
+        sensor_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+        command_qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.image_pub = self.create_publisher(
+            Image, "earth_rover/front/image_raw", sensor_qos
+        )
+        self.gps_pub = self.create_publisher(NavSatFix, "earth_rover/gps", sensor_qos)
+        self.imu_pub = self.create_publisher(Imu, "earth_rover/imu", sensor_qos)
+        self.battery_pub = self.create_publisher(
+            BatteryState, "earth_rover/battery", sensor_qos
+        )
+        self.heading_pub = self.create_publisher(
+            Float32, "earth_rover/heading", sensor_qos
+        )
 
         # cmd_vel -> /control: keep only the latest command, send at a fixed
         # rate, and stop the rover if commands stop arriving.
@@ -64,11 +78,13 @@ class EarthRoverBridge(Node):
         self._last_cmd_at = 0.0
         self._stopped = True
         self._cmd_lock = threading.Lock()
-        self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
-        self.create_timer(1.0 / CONTROL_RATE_HZ, self._control_tick)
+        self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, command_qos)
 
         self._session = requests.Session()
         self._running = True
+        self._stop_event = threading.Event()
+        self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self._control_thread.start()
         threading.Thread(target=self._feed_loop, daemon=True).start()
         threading.Thread(target=self._telemetry_loop, daemon=True).start()
 
@@ -91,17 +107,38 @@ class EarthRoverBridge(Node):
             quiet = time.monotonic() - self._last_cmd_at > CMD_VEL_TIMEOUT_S
             if self._latest_cmd is None or (quiet and self._stopped):
                 return
-            command = (
-                {"linear": 0, "angular": 0} if quiet else dict(self._latest_cmd)
-            )
-            if quiet:
-                self._stopped = True
+            command = {"linear": 0, "angular": 0} if quiet else dict(self._latest_cmd)
+            last_cmd_at = self._last_cmd_at
         try:
-            self._session.post(
-                f"{self.sdk_url}/control", json={"command": command}, timeout=2
+            response = self._session.post(
+                f"{self.sdk_url}/control",
+                json={"command": command},
+                timeout=CONTROL_HTTP_TIMEOUT_S,
             )
+            response.raise_for_status()
+            if quiet:
+                # Only a confirmed HTTP success counts as stopped. A failed
+                # stop is retried on every control tick until acknowledged.
+                with self._cmd_lock:
+                    if (
+                        self._last_cmd_at == last_cmd_at
+                        and time.monotonic() - self._last_cmd_at > CMD_VEL_TIMEOUT_S
+                    ):
+                        self._stopped = True
         except requests.RequestException as e:
             self.get_logger().warning(f"/control failed: {e}", throttle_duration_sec=5)
+
+    def _control_loop(self):
+        interval = 1.0 / CONTROL_RATE_HZ
+        deadline = time.monotonic()
+        while self._running and rclpy.ok():
+            self._control_tick()
+            deadline += interval
+            wait = max(0.0, deadline - time.monotonic())
+            if self._stop_event.wait(wait):
+                break
+            if time.monotonic() - deadline > interval:
+                deadline = time.monotonic()
 
     # ---------------------------------------------------------------- feed
 
@@ -109,6 +146,7 @@ class EarthRoverBridge(Node):
         url = f"{self.sdk_url}/feed?view=front&fps={self.feed_fps}"
         while self._running and rclpy.ok():
             capture = cv2.VideoCapture(url)
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not capture.isOpened():
                 self.get_logger().warning(
                     "/feed not available, retrying in 3s", throttle_duration_sec=10
@@ -132,6 +170,7 @@ class EarthRoverBridge(Node):
     def _telemetry_loop(self):
         ws_url = self.sdk_url.replace("http", "ws", 1) + "/ws/data"
         while self._running and rclpy.ok():
+            ws = None
             try:
                 ws = websocket.create_connection(ws_url, timeout=10)
                 self.get_logger().info("Connected to /ws/data")
@@ -144,6 +183,9 @@ class EarthRoverBridge(Node):
                     f"/ws/data reconnecting: {e}", throttle_duration_sec=10
                 )
                 time.sleep(2)
+            finally:
+                if ws is not None:
+                    ws.close()
 
     def _publish_telemetry(self, data: dict):
         now = self.get_clock().now().to_msg()
@@ -191,6 +233,21 @@ class EarthRoverBridge(Node):
 
     def destroy_node(self):
         self._running = False
+        self._stop_event.set()
+        self._control_thread.join(timeout=1.0)
+        # Do not leave the last motion command active when the bridge exits.
+        for _ in range(3):
+            try:
+                response = self._session.post(
+                    f"{self.sdk_url}/control",
+                    json={"command": {"linear": 0, "angular": 0}},
+                    timeout=CONTROL_HTTP_TIMEOUT_S,
+                )
+                response.raise_for_status()
+                break
+            except requests.RequestException:
+                continue
+        self._session.close()
         super().destroy_node()
 
 

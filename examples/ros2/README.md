@@ -16,13 +16,15 @@ standard ROS2 topics, so your stack talks plain ROS:
 
 - **`cmd_vel` is latest-wins at 10 Hz**: the bridge keeps only the newest Twist
   and posts it to `/control` at a fixed rate — bursts of commands never queue up.
-- **Safety stop**: if no `cmd_vel` arrives for 0.5 s, one stop command
-  (`linear: 0, angular: 0`) is sent. Standard teleop/nav stacks that publish
-  continuously work unchanged.
+- **Safety stop**: if no `cmd_vel` arrives for 0.5 s, stop commands are retried
+  until the SDK acknowledges one. Shutdown also makes three best-effort stop
+  attempts. Standard teleop/nav stacks that publish continuously work unchanged.
 - **Twist mapping**: `linear.x` and `angular.z` are passed through clamped to
   the SDK's `-1..1` range. Treat them as normalized effort, not m/s / rad/s.
-- Video, telemetry and control run **concurrently** — the SDK server is fully
-  async and the bridge uses separate threads for each stream.
+- Video, telemetry and control run concurrently. HTTP control has its own fixed-
+  rate worker, so a slow request cannot block the ROS executor or `cmd_vel`.
+- Camera and sensor topics use best-effort, depth-one QoS to prevent stale data
+  from accumulating behind a slow subscriber.
 - Everything reconnects automatically if the SDK restarts.
 
 ## Setup

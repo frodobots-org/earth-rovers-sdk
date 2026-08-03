@@ -7,10 +7,7 @@
     <title>Frodobots SDK - Stream</title>
     <link rel="stylesheet" href="/static/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/index.css" />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
-    />
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
     <style>
       #map {
         width: 1000px;
@@ -173,6 +170,7 @@
               placeholder="Enter the user ID"
             />
             <input id="bot_uid" type="hidden" value="{{ bot_uid }}" />
+            <input id="ingest_token" type="hidden" value="{{ ingest_token }}" />
           </div>
         </div>
 
@@ -338,7 +336,7 @@
         <div id="messages"></div>
       </div>
     </div>
-    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
     <script src="/static/map.js"></script>
     <script src="/static/jquery-3.4.1.min.js"></script>
     <script src="/static/bootstrap.bundle.min.js"></script>
@@ -349,4 +347,3 @@
     <script src="/static/sdk-push.js" defer></script>
   </body>
 </html>
-

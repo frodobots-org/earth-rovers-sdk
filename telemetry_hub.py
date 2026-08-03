@@ -1,24 +1,21 @@
-import logging
+import asyncio
+import contextlib
 import time
 from typing import Optional
 
-from fastapi import WebSocket
-
-logger = logging.getLogger("telemetry_hub")
-
 
 class TelemetryHub:
-    """In-memory cache of the latest rover telemetry with WebSocket fan-out.
-
-    The /sdk page (headless browser) pushes every RTM message here via
-    /ws/ingest; dashboard clients subscribe via /ws/data.
-    """
+    """Latest telemetry cache with non-blocking, latest-wins fan-out."""
 
     def __init__(self):
         self.latest: Optional[dict] = None
-        self.last_update: Optional[float] = None  # time.monotonic()
-        self.ingest_connected = False
-        self._clients: set = set()
+        self.last_update: Optional[float] = None
+        self._ingest_connections: set[object] = set()
+        self._clients: set[asyncio.Queue] = set()
+
+    @property
+    def ingest_connected(self) -> bool:
+        return bool(self._ingest_connections)
 
     @property
     def age_seconds(self) -> Optional[float]:
@@ -26,30 +23,41 @@ class TelemetryHub:
             return None
         return time.monotonic() - self.last_update
 
-    def add_client(self, websocket: WebSocket):
-        self._clients.add(websocket)
+    def connect_ingest(self) -> object:
+        connection = object()
+        self._ingest_connections.add(connection)
+        self.broadcast({"type": "status", **self.status()})
+        return connection
 
-    def remove_client(self, websocket: WebSocket):
-        self._clients.discard(websocket)
+    def disconnect_ingest(self, connection: object):
+        self._ingest_connections.discard(connection)
+        self.broadcast({"type": "status", **self.status()})
 
-    async def publish(self, data: dict):
+    def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._clients.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue):
+        self._clients.discard(queue)
+
+    def publish(self, data: dict):
         self.latest = data
         self.last_update = time.monotonic()
-        await self.broadcast({"type": "telemetry", "data": data})
+        self.broadcast({"type": "telemetry", "data": data})
 
-    async def broadcast(self, message: dict):
-        dead = []
-        for websocket in list(self._clients):
-            try:
-                await websocket.send_json(message)
-            except Exception:
-                dead.append(websocket)
-        for websocket in dead:
-            self._clients.discard(websocket)
+    def broadcast(self, message: dict):
+        for queue in list(self._clients):
+            if queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(message)
 
     def status(self) -> dict:
         return {
             "ingest_connected": self.ingest_connected,
+            "ingest_connections": len(self._ingest_connections),
             "telemetry_age_s": self.age_seconds,
         }
 

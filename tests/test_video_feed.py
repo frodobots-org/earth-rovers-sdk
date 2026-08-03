@@ -1,0 +1,66 @@
+import asyncio
+import base64
+import time
+import unittest
+
+from video_feed import FrameBroadcaster
+
+
+JPEG_DATA_URL = "data:image/jpeg;base64," + base64.b64encode(
+    b"\xff\xd8test-frame\xff\xd9"
+).decode("ascii")
+
+
+class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_clients_share_one_capture_and_receive_frame(self):
+        calls = 0
+
+        async def capture():
+            nonlocal calls
+            calls += 1
+            return {"data_url": JPEG_DATA_URL, "timestamp": time.time()}
+
+        broadcaster = FrameBroadcaster(capture)
+        first = await broadcaster.subscribe(30, cached_max_age=0)
+        second = await broadcaster.subscribe(15, cached_max_age=0)
+        try:
+            frame1, frame2 = await asyncio.gather(first.get(), second.get())
+            self.assertEqual(frame1.jpeg, frame2.jpeg)
+            self.assertEqual(calls, 1)
+        finally:
+            await broadcaster.unsubscribe(first)
+            await broadcaster.unsubscribe(second)
+
+    async def test_snapshot_reuses_fresh_cached_frame(self):
+        calls = 0
+
+        async def capture():
+            nonlocal calls
+            calls += 1
+            return {"data_url": JPEG_DATA_URL, "timestamp": time.time()}
+
+        broadcaster = FrameBroadcaster(capture)
+        first = await broadcaster.get_frame(max_age=1, timeout=1)
+        second = await broadcaster.get_frame(max_age=1, timeout=1)
+        self.assertIs(first, second)
+        self.assertEqual(calls, 1)
+
+    async def test_unavailable_camera_backs_off(self):
+        calls = 0
+
+        async def capture():
+            nonlocal calls
+            calls += 1
+            return None
+
+        broadcaster = FrameBroadcaster(capture)
+        queue = await broadcaster.subscribe(30, cached_max_age=0)
+        try:
+            await asyncio.sleep(0.3)
+            self.assertLessEqual(calls, 2)
+        finally:
+            await broadcaster.unsubscribe(queue)
+
+
+if __name__ == "__main__":
+    unittest.main()
