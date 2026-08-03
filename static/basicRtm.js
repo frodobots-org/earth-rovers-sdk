@@ -11,10 +11,11 @@ $(document).ready(function () {
   // Create an instance of an RTM channel
   const rtmChannel = rtmClient.createChannel(channelName);
 
-  // Event listener for connection state changes
+  // Event listener for connection state changes.
+  // Agora RTM Web SDK emits "ConnectionStateChanged" (not "ConnectionStateChange").
   window.rtmConnectionState = "DISCONNECTED";
   window.rtmConnectionReason = null;
-  rtmClient.on("ConnectionStateChange", (newState, reason) => {
+  rtmClient.on("ConnectionStateChanged", (newState, reason) => {
     window.rtmConnectionState = newState;
     window.rtmConnectionReason = reason;
     console.log(
@@ -59,12 +60,37 @@ $(document).ready(function () {
     return formattedMessage;
   }
 
+  function formatRtmError(err) {
+    if (err == null) {
+      return "unknown RTM error";
+    }
+    if (typeof err === "string" || typeof err === "number") {
+      return String(err);
+    }
+    const parts = [err.code, err.reason, err.message].filter(
+      (v) => v !== undefined && v !== null && v !== ""
+    );
+    if (parts.length) {
+      return parts.map(String).join(":");
+    }
+    try {
+      return JSON.stringify(err);
+    } catch (_) {
+      return String(err);
+    }
+  }
+
   // Function to join the RTM channel
   function joinRTMChannel(uid) {
     rtmClient
       .login({ token: TOKEN, uid: String(uid) })
       .then(() => {
         console.log("AgoraRTM client login success");
+        // Belt-and-suspenders if the state event was missed.
+        if (window.rtmConnectionState === "DISCONNECTED") {
+          window.rtmConnectionState = "CONNECTED";
+          window.rtmConnectionReason = "LOGIN_SUCCESS";
+        }
         // Join a channel
         rtmChannel
           .join()
@@ -86,22 +112,49 @@ $(document).ready(function () {
     const message = JSON.stringify(json);
     console.warn("sending message to bot", botUid);
     console.warn("message", message);
+
+    if (window.rtmConnectionState && window.rtmConnectionState !== "CONNECTED") {
+      const detail =
+        "RTM not CONNECTED (state=" +
+        window.rtmConnectionState +
+        ", reason=" +
+        (window.rtmConnectionReason || "n/a") +
+        ")";
+      console.warn(detail);
+      return Promise.reject(new Error(detail));
+    }
+
     return rtmClient
       .sendMessageToPeer(
         {
           text: message,
         },
-        botUid
+        String(botUid)
       )
-      .then(() => {
+      .then((result) => {
+        // Agora resolves even when the peer did not receive the message.
+        const hasPeerReceived =
+          !result || result.hasPeerReceived === undefined
+            ? true
+            : Boolean(result.hasPeerReceived);
+        if (!hasPeerReceived) {
+          const detail = "RTM peer did not receive message (hasPeerReceived=false)";
+          console.warn(detail, result);
+          return Promise.reject(new Error(detail));
+        }
         console.warn("Message sent successfully:", message);
-        return { ok: true };
+        return { ok: true, hasPeerReceived: true };
       })
       .catch((err) => {
         console.warn("Error sending message:", err);
-        const detail =
-          (err && (err.message || err.code || err.reason)) || String(err);
-        return Promise.reject(new Error(detail));
+        const detail = formatRtmError(err);
+        window.lastRtmSendError = {
+          detail: detail,
+          state: window.rtmConnectionState || null,
+          reason: window.rtmConnectionReason || null,
+          at: Date.now(),
+        };
+        return Promise.reject(new Error(detail || "RTM send failed"));
       });
   }
 
@@ -113,6 +166,7 @@ $(document).ready(function () {
       reason: window.rtmConnectionReason || null,
       timestamp: ts == null ? null : String(ts),
       hasTelemetry: Boolean(window.rtm_data),
+      lastSendError: window.lastRtmSendError || null,
     };
   };
 
@@ -122,4 +176,3 @@ $(document).ready(function () {
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);
 });
-

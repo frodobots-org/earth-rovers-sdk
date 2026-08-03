@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import time
 from pyppeteer import launch
 from dotenv import load_dotenv
@@ -9,6 +10,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger("browser_service")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(levelname)s [browser_service] %(message)s")
+    )
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 # Configuration from environment variables with defaults
 FORMAT = os.getenv("IMAGE_FORMAT", "png")
@@ -40,15 +49,30 @@ def _force_cleanup_chrome_profile():
     """
     profile_dir = _chrome_profile_dir()
     try:
-        # Match only Chrome processes using this project's profile path.
-        subprocess.run(
-            ["pkill", "-f", f"user-data-dir={profile_dir}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if sys.platform == "win32":
+            # taskkill /pwm can't filter by command line; use WMIC/PowerShell match.
+            # Escape backslashes for the PowerShell string match.
+            needle = profile_dir.replace("'", "''")
+            ps = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -and $_.CommandLine -like '*{needle}*' }} | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", f"user-data-dir={profile_dir}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except Exception as e:
-        logger.warning("Failed to pkill chrome profile processes: %s", e)
+        logger.warning("Failed to kill chrome profile processes: %s", e)
 
     # Brief wait so Chrome can release file locks.
     time.sleep(0.5)
@@ -131,16 +155,15 @@ class BrowserService:
             await self.page.click("#join")
             await self.page.waitForSelector("#map", {"timeout": 30000})
 
-            # Video is created only when the bot publishes an RTC track.
-            # Personal/emu bots (or slow joins) may not show <video> quickly.
-            # Control only needs RTM CONNECTED, so accept either signal.
+            # Control needs a live RTM session. RTC <video> alone is NOT enough —
+            # the bot can keep publishing video while RTM is down, which previously
+            # made reinit "succeed" without restoring control.
             try:
                 await self.page.waitForFunction(
                     """() => {
                         const rtmReady = window.rtmConnectionState === 'CONNECTED';
-                        const hasVideo = Boolean(document.querySelector('video'));
                         const hasTelemetry = Boolean(window.rtm_data);
-                        return rtmReady || hasVideo || hasTelemetry;
+                        return rtmReady || hasTelemetry;
                     }""",
                     {"timeout": 60000},
                 )
@@ -148,6 +171,7 @@ class BrowserService:
                 diagnostics = await self.page.evaluate(
                     """() => ({
                         rtmState: window.rtmConnectionState || null,
+                        rtmReason: window.rtmConnectionReason || null,
                         hasVideo: Boolean(document.querySelector('video')),
                         hasTelemetry: Boolean(window.rtm_data),
                         channel: document.getElementById('channel')?.value || null,
@@ -155,7 +179,7 @@ class BrowserService:
                     })"""
                 )
                 raise TimeoutError(
-                    "Timed out waiting for Agora RTM/video after Join. "
+                    "Timed out waiting for Agora RTM after Join. "
                     f"diagnostics={diagnostics}"
                 ) from wait_err
 
@@ -170,6 +194,7 @@ class BrowserService:
             }}"""
             await self.page.evaluate(call)
             self._initialized_at = time.time()
+            logger.info("Browser/RTM session initialized")
         except Exception as e:
             print(f"Error initializing browser: {e}")
             try:
@@ -199,18 +224,22 @@ class BrowserService:
             None, _force_cleanup_chrome_profile
         )
 
-    async def reinitialize_browser(self):
+    async def reinitialize_browser(self, force: bool = False):
         """Tear down headless Chrome and join Agora again."""
         async with self._reinit_lock:
             now = time.time()
-            if now - self._last_reinit_at < RTM_REINIT_COOLDOWN_SECONDS and self.browser:
+            if (
+                not force
+                and now - self._last_reinit_at < RTM_REINIT_COOLDOWN_SECONDS
+                and self.browser
+            ):
                 logger.info(
                     "Skipping RTM reinit; cooldown %.0fs remaining",
                     RTM_REINIT_COOLDOWN_SECONDS - (now - self._last_reinit_at),
                 )
                 return False
 
-            logger.warning("Reinitializing browser/RTM session")
+            logger.warning("Reinitializing browser/RTM session (force=%s)", force)
             self._last_reinit_at = now
             await self._close_browser_unlocked()
             await self._initialize_browser_unlocked()
@@ -239,12 +268,23 @@ class BrowserService:
             return {"healthy": False, "reason": f"evaluate_failed:{e}"}
 
         state = (info or {}).get("state")
-        if state in ("DISCONNECTED", "ABORTED"):
-            return {
-                "healthy": False,
-                "reason": f"rtm_state:{state}",
-                "details": info,
-            }
+        # Only CONNECTED can send peer messages. RECONNECTING/CONNECTING/etc. fail sends.
+        if state != "CONNECTED":
+            # Fresh telemetry still proves the peer channel is alive even if the
+            # ConnectionStateChange event was missed.
+            ts = (info or {}).get("timestamp")
+            age = None
+            if ts is not None:
+                try:
+                    age = time.time() - float(ts)
+                except (TypeError, ValueError):
+                    age = None
+            if age is None or age > RTM_STALE_SECONDS:
+                return {
+                    "healthy": False,
+                    "reason": f"rtm_state:{state or 'unknown'}",
+                    "details": info,
+                }
 
         ts = (info or {}).get("timestamp")
         if ts is not None:
@@ -364,18 +404,53 @@ class BrowserService:
         return rear_frame
 
     async def _send_message_once(self, message: dict) -> dict:
+        if not self.page:
+            return {"ok": False, "error": "no_page"}
         return await self.page.evaluate(
             """async (message) => {
                 try {
                     if (typeof window.sendMessage !== 'function') {
-                        return { ok: false, error: 'sendMessage is not available' };
+                        return {
+                            ok: false,
+                            error: 'sendMessage is not available',
+                            state: window.rtmConnectionState || null,
+                        };
                     }
-                    await window.sendMessage(message);
-                    return { ok: true };
+                    const sendResult = await window.sendMessage(message);
+                    if (sendResult && sendResult.ok === false) {
+                        return {
+                            ok: false,
+                            error: sendResult.error || 'RTM send failed',
+                            state: window.rtmConnectionState || null,
+                            hasPeerReceived: sendResult.hasPeerReceived,
+                        };
+                    }
+                    return {
+                        ok: true,
+                        state: window.rtmConnectionState || null,
+                        hasPeerReceived: sendResult && sendResult.hasPeerReceived,
+                    };
                 } catch (e) {
+                    let error = 'RTM send failed';
+                    if (e == null) {
+                        error = 'RTM send failed (null error)';
+                    } else if (typeof e === 'string' || typeof e === 'number') {
+                        error = String(e);
+                    } else if (e.message || e.code || e.reason) {
+                        error = [e.code, e.reason, e.message]
+                            .filter((v) => v !== undefined && v !== null && v !== '')
+                            .map(String)
+                            .join(':') || 'RTM send failed';
+                    } else {
+                        try {
+                            error = JSON.stringify(e);
+                        } catch (_) {
+                            error = String(e);
+                        }
+                    }
                     return {
                         ok: false,
-                        error: String((e && (e.message || e.code)) || e),
+                        error: error,
                         state: window.rtmConnectionState || null,
                     };
                 }
@@ -386,21 +461,47 @@ class BrowserService:
     async def send_message(self, message: dict):
         await self.ensure_healthy()
 
-        result = await self._send_message_once(message)
+        try:
+            result = await self._send_message_once(message)
+        except Exception as e:
+            logger.warning(
+                "RTM evaluate failed (%s); attempting forced browser reinit", e
+            )
+            await self.reinitialize_browser(force=True)
+            try:
+                result = await self._send_message_once(message)
+            except Exception as retry_err:
+                raise RuntimeError(
+                    f"RTM send failed after reinit: {retry_err}"
+                ) from retry_err
+            if result and result.get("ok"):
+                return result
+            error = (result or {}).get("error") or "RTM send failed"
+            state = (result or {}).get("state")
+            raise RuntimeError(f"{error} (rtm_state={state})")
+
         if result and result.get("ok"):
             return result
 
         logger.warning(
-            "RTM send failed (%s); attempting browser reinit",
+            "RTM send failed (%s, state=%s); attempting forced browser reinit",
             (result or {}).get("error"),
+            (result or {}).get("state"),
         )
-        await self.reinitialize_browser()
-        result = await self._send_message_once(message)
+        # Bypass cooldown: an explicit send failure means the session is already dead.
+        await self.reinitialize_browser(force=True)
+        try:
+            result = await self._send_message_once(message)
+        except Exception as retry_err:
+            raise RuntimeError(
+                f"RTM send failed after reinit: {retry_err}"
+            ) from retry_err
         if result and result.get("ok"):
             return result
 
         error = (result or {}).get("error") or "RTM send failed"
-        raise RuntimeError(error)
+        state = (result or {}).get("state")
+        raise RuntimeError(f"{error} (rtm_state={state})")
 
     async def speak(self, audio_url: str):
         await self.ensure_healthy()
