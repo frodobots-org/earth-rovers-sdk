@@ -807,6 +807,31 @@
     });
   }
 
+  // The backend ends the ride once the last checkpoint is scanned: the feed
+  // drops and the bot stops listening. Reflect that instead of erroring.
+  function missionCompleted() {
+    missionStarted = false;
+    releaseAll();
+    document
+      .querySelectorAll(".pad, #lamp-btn, #speak-btn, #checkpoint-btn")
+      .forEach(function (control) {
+        control.disabled = true;
+      });
+    var maxSequence = checkpoints.reduce(function (acc, cp) {
+      return Math.max(acc, cp.sequence);
+    }, 0);
+    renderCheckpoints(maxSequence + 1); // everything shows as done
+    renderMissionAction();
+    setPlaceholder("Mission completed 🎉", {
+      sub:
+        "All checkpoints scanned. The ride has ended and the rover " +
+        "disconnected — start a new mission whenever you're ready.",
+      startButton: !!DASH.missionSlug,
+    });
+    $("ph-mission-btn").disabled = false;
+    feedback("mission completed");
+  }
+
   $("checkpoint-btn").addEventListener("click", function () {
     var btn = this;
     btn.disabled = true;
@@ -825,9 +850,13 @@
         });
       })
       .then(function (body) {
-        feedback("checkpoint reached");
-        if (body.next_checkpoint_sequence) {
-          renderCheckpoints(parseInt(body.next_checkpoint_sequence, 10));
+        if (body.mission_completed) {
+          missionCompleted();
+        } else {
+          feedback("checkpoint reached");
+          if (body.next_checkpoint_sequence) {
+            renderCheckpoints(parseInt(body.next_checkpoint_sequence, 10));
+          }
         }
       })
       .catch(function (err) {

@@ -475,9 +475,12 @@ Successful Response (Code: 200)
 ```JSON
 {
     "message": "Checkpoint reached successfully",
-    "next_checkpoint_sequence": 2
+    "next_checkpoint_sequence": 2,
+    "mission_completed": false
 }
 ```
+
+When the last checkpoint is scanned, `mission_completed` is `true` and the ride ends: the backend disconnects the rover, so the video feed stops and further `/control` commands fail with "Rover unreachable". The SDK clears its session automatically — call `POST /start-mission` to begin a new ride.
 
 Unsuccessful Response (Code: 400)
 

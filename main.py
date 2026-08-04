@@ -616,9 +616,10 @@ async def control(request: Request):
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
+        reason = browser_service.last_error or str(e).split("\n", 1)[0]
         detail = "Failed to send control command"
-        if browser_service.last_error:
-            detail += f": {browser_service.last_error}"
+        if reason:
+            detail += f": {reason}"
         raise HTTPException(status_code=500, detail=detail) from e
 
 
@@ -733,13 +734,36 @@ async def checkpoint_reached(request: Request):
                 ),
             },
         )
+    global auth_response_data, checkpoints_list_data
+    next_sequence = response_data.get("next_checkpoint_sequence", "")
+    sequences = [
+        cp.get("sequence")
+        for cp in checkpoints_list_data.get("checkpoints_list", [])
+        if isinstance(cp.get("sequence"), int)
+    ]
+    try:
+        past_last = bool(sequences) and int(next_sequence) > max(sequences)
+    except (TypeError, ValueError):
+        past_last = False
+    mission_completed = bool(sequences) and (not next_sequence or past_last)
+
+    if mission_completed:
+        # The backend ends the ride after the last checkpoint, which kills
+        # the feed and makes the bot unreachable. Drop the local session so
+        # /status reports it and /start-mission re-authenticates cleanly.
+        auth_response_data = {}
+        checkpoints_list_data = {}
+        await asyncio.gather(
+            *(broadcaster.close() for broadcaster in feed_broadcasters.values())
+        )
+        await browser_service.close()
+
     return JSONResponse(
         status_code=200,
         content={
             "message": "Checkpoint reached successfully",
-            "next_checkpoint_sequence": response_data.get(
-                "next_checkpoint_sequence", ""
-            ),
+            "next_checkpoint_sequence": next_sequence,
+            "mission_completed": mission_completed,
         },
     )
 
