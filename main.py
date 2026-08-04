@@ -185,7 +185,9 @@ async def feed(view: str = "front", fps: int = 15):
         last_sent = 0.0
         try:
             frame = first_frame
-            while True:
+            # A None frame is the broadcaster's end-of-stream sentinel
+            # (mission ended / server shutting down): finish the response.
+            while frame is not None:
                 now = time.monotonic()
                 if now - last_sent < min_interval * 0.9:
                     frame = await queue.get()

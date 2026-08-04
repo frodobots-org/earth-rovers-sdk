@@ -115,12 +115,21 @@ class FrameBroadcaster:
     async def close(self):
         task = None
         async with self._lock:
+            clients = list(self._clients)
             self._clients.clear()
             self._latest = None
             if self._task:
                 task = self._task
                 self._task = None
                 task.cancel()
+        # Wake every waiting stream client with an end-of-stream sentinel;
+        # otherwise generators blocked on queue.get() would hang forever.
+        for queue in clients:
+            if queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(None)
         if task:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
