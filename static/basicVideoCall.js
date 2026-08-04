@@ -404,33 +404,53 @@ function getCodec() {
   return value;
 }
 
-async function captureFrameAsBase64(videoTrack) {
+const captureSurfaces = new WeakMap();
+
+async function captureFrameAsBase64(videoTrack, imageFormat, imageQuality) {
   const frame = await videoTrack.getCurrentFrameData();
-  const canvas = document.createElement("canvas");
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  const ctx = canvas.getContext("2d");
-  ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL(
-    `image/${window.imageParams["imageFormat"]}`,
-    window.imageParams["imageQuality"]
+  if (!frame) return null;
+  let surface = captureSurfaces.get(videoTrack);
+  if (!surface) {
+    const canvas = document.createElement("canvas");
+    surface = { canvas: canvas, context: canvas.getContext("2d") };
+    captureSurfaces.set(videoTrack, surface);
+  }
+  if (surface.canvas.width !== frame.width) surface.canvas.width = frame.width;
+  if (surface.canvas.height !== frame.height) surface.canvas.height = frame.height;
+  surface.context.putImageData(frame, 0, 0);
+  const params = window.imageParams || { imageFormat: "jpeg", imageQuality: 0.8 };
+  return surface.canvas.toDataURL(
+    `image/${imageFormat || params.imageFormat}`,
+    imageQuality === undefined
+      ? params.imageQuality
+      : imageQuality
   );
 }
 
 // Add at the beginning of the file
 const DEBUG_MODE = false;
-const lastBase64Frames = {};
-
 // Function to get the latest base64 frame for a specific UID
 async function getLastBase64Frame(uid) {
+  const packet = await getFramePacket(uid);
+  return packet ? packet.data_url : null;
+}
+
+// Capture once and attach the capture time. The feed explicitly requests
+// JPEG, while the v2 endpoints retain IMAGE_FORMAT compatibility.
+async function getFramePacket(uid, imageFormat, imageQuality) {
   const user = remoteUsers[uid];
   if (!user || !user.videoTrack || !user.videoTrack.captureEnabled) {
     return null;
   }
 
-  const base64Frame = await captureFrameAsBase64(user.videoTrack);
-  lastBase64Frames[uid] = base64Frame;
-  return base64Frame;
+  const capturedAt = Date.now() / 1000;
+  const base64Frame = await captureFrameAsBase64(
+    user.videoTrack,
+    imageFormat,
+    imageQuality
+  );
+  if (!base64Frame) return null;
+  return { data_url: base64Frame, timestamp: capturedAt };
 }
 
 function initializeImageParams({ imageFormat, imageQuality }) {
@@ -438,6 +458,7 @@ function initializeImageParams({ imageFormat, imageQuality }) {
 }
 window.initializeImageParams = initializeImageParams;
 window.getLastBase64Frame = getLastBase64Frame;
+window.getFramePacket = getFramePacket;
 
 /*
  * Toggle mute/unmute for remote audio tracks (rover stream).

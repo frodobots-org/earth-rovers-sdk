@@ -1,4 +1,5 @@
 $(document).ready(function () {
+  window.rtmReady = false;
   const APP_ID = $("#appid").val();
   const USER_ID = $("#uid").val();
   const TOKEN = $("#rtm_token").val();
@@ -13,60 +14,57 @@ $(document).ready(function () {
 
   // Event listener for connection state changes
   rtmClient.on("ConnectionStateChange", (newState, reason) => {
+    window.rtmReady = newState === "CONNECTED";
     console.log(
       "on connection state changed to " + newState + " reason: " + reason
     );
   });
 
   // Event listener for receiving a channel message
-  rtmChannel.on("ChannelMessage", ({ text }, senderId) => {
-    console.log("AgoraRTM msg from user " + senderId + " received: \n" + text);
+  rtmChannel.on("ChannelMessage", () => {
+    // Channel messages are not used by the SDK hot path.
   });
 
   rtmClient.on("MessageFromPeer", function (message, peerId) {
-    const controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
+    // An SDK RTM user can receive direct messages from more than one peer.
+    // Only the rover selected by the auth response is a telemetry source.
+    if (String(peerId) !== String(botUid)) return;
+
+    let controls;
+    try {
+      controls = JSON.parse(new TextDecoder().decode(message.rawMessage));
+    } catch (_) {
+      return;
+    }
+    if (!controls || typeof controls !== "object") return;
     const event = new CustomEvent("message-from-peer", { detail: controls });
     window.rtm_data = controls;
-    window.rtm_data.timestamp = (Date.now() / 1000).toFixed(6);
-    const formattedMessage = formatMessage(controls);
-    $("#messages").html(formattedMessage);
+    window.rtm_data.timestamp = Date.now() / 1000;
     document.dispatchEvent(event);
 
-    if (controls.latitude && controls.longitude) {
+    if (
+      controls.latitude !== null &&
+      controls.latitude !== undefined &&
+      controls.longitude !== null &&
+      controls.longitude !== undefined
+    ) {
       const latitude = parseFloat(controls.latitude);
       const longitude = parseFloat(controls.longitude);
-      console.log("updating marker");
       window.updateMarker(latitude, longitude);
     }
-
-    console.log(
-      "AgoraRTM peer msg from user " + peerId + " received: \n",
-      controls
-    );
   });
-
-  function formatMessage(jsonData) {
-    let formattedMessage =
-      '<div class="card"><div class="card-body"><h5 class="card-title">Message from Peer</h5><ul class="list-group">';
-    for (const [key, value] of Object.entries(jsonData)) {
-      formattedMessage += `<li class="list-group-item"><strong>${key}:</strong> ${value}</li>`;
-    }
-    formattedMessage += "</ul></div></div>";
-    return formattedMessage;
-  }
 
   // Function to join the RTM channel
   function joinRTMChannel(uid) {
-    rtmClient
+    return rtmClient
       .login({ token: TOKEN, uid: String(uid) })
       .then(() => {
         console.log("AgoraRTM client login success");
-        // Join a channel
-        rtmChannel
+        return rtmChannel
           .join()
           .then(() => {
             console.log("RTM Channel join success");
-            // You can now send messages or set up more event listeners
+            window.rtmReady = true;
           })
           .catch((error) => {
             console.log("Failed to join channel for error: " + error);
@@ -79,21 +77,21 @@ $(document).ready(function () {
 
   // Function to send message
   function sendMessage(json) {
+    if (!window.rtmReady) {
+      return Promise.reject(new Error("RTM client is not connected"));
+    }
     const message = JSON.stringify(json);
-    console.warn("sending message to bot", botUid);
-    console.warn("message", message);
-    rtmClient
+    return rtmClient
       .sendMessageToPeer(
         {
           text: message,
         },
         botUid
       )
-      .then(() => {
-        console.warn("Message sent successfully:", message);
-      })
+      .then(() => undefined)
       .catch((err) => {
         console.warn("Error sending message:", err);
+        throw err;
       });
   }
 
@@ -103,4 +101,3 @@ $(document).ready(function () {
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);
 });
-

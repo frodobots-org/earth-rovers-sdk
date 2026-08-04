@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v5.2
+# Earth Rovers SDK v6.0
 
 ## Requirements
 
@@ -18,7 +18,8 @@
 
 - Python 3.9 or higher
 - Frodobots API key
-- Google Chrome 143+ (or any modern browser) installed
+
+The SDK uses [Playwright](https://playwright.dev/python/), which downloads and manages its own Chromium — no separate browser install is required. To use a specific browser binary instead (e.g. real Google Chrome), set `CHROME_EXECUTABLE_PATH` in your `.env`.
 
 ## Hardware Specs
 
@@ -38,16 +39,18 @@ More details about the bot sensors and actuators can be found [here](https://col
 ```bash
 SDK_API_TOKEN=
 BOT_SLUG=
-CHROME_EXECUTABLE_PATH=
+# Optional: use a specific browser binary instead of Playwright's Chromium
+# CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
 MAP_ZOOM_LEVEL=
 MISSION_SLUG=
 # Image quality between 0.1 and 1.0 (default: 0.8)
 # Recommended: 0.8 for better performance
 IMAGE_QUALITY=0.8
-# Image format: jpeg, png or webp (default: png)
-# Recommended: jpeg for better performance and lower bandwidth usage
+# Image format: jpeg, png or webp (default: jpeg)
 IMAGE_FORMAT=jpeg
+# Dedicated MJPEG feed quality (always JPEG; default: 0.8)
+FEED_JPEG_QUALITY=0.8
 # TTS Provider: "edge" (free, default) or "gemini"
 TTS_PROVIDER=edge
 # API key (required for gemini only)
@@ -60,6 +63,7 @@ TTS_VOICE=en-US-GuyNeural
 
 ```bash
 pip3 install -r requirements.txt
+playwright install chromium
 ```
 
 3. Run the SDK
@@ -68,7 +72,22 @@ pip3 install -r requirements.txt
 hypercorn main:app --reload
 ```
 
-4. Now you can check the live streaming of the bot in the following URL: http://localhost:8000
+4. Open the dashboard at http://localhost:8000 to watch the live stream, follow the rover on the map, monitor telemetry and drive the bot.
+
+## Dashboard
+
+`http://localhost:8000` serves a real-time operations dashboard:
+
+- **Live video**: the front camera stream (and rear camera picture-in-picture when the bot publishes one), joined directly as an Agora spectator.
+- **Map**: the rover's position with a heading arrow, a breadcrumb trail of its path, and the mission checkpoints.
+- **Compass**: the rover's orientation on an analog dial.
+- **Telemetry**: battery, speed, signal, GPS, vibration and lamp tiles. Flip the **Real time** switch in the header to stream updates live over a WebSocket; leave it off for a single snapshot.
+- **Drive controls**: on-screen d-pad or WASD/arrow keys (10 commands/s while held, an automatic stop command on release or when the tab loses focus), a speed slider, lamp toggle and a STOP button.
+- **Speak**: send text through the rover's speaker via `/speak`.
+
+The machine-facing page the SDK drives internally lives at `/sdk` and is intentionally minimal — the `/screenshot` and `/v2/*` endpoints capture from it.
+
+> Note: in previous versions `http://localhost:8000` served the raw spectator stream page. That page is gone; `/sdk` remains for the SDK's internal use.
 
 ## Documentation
 
@@ -153,8 +172,7 @@ Example Response:
 
 ### GET /screenshot
 
-With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
-Inside the folder screenshots/ you can find the images.
+This endpoint captures the requested views and returns each image as base64. The timestamp records when the response capture completed (Unix Epoch UTC).
 
 This endpoint accepts a list of view types as a query parameter (view_types). Valid view types are rear, map, and front. If no view types are provided, it will return all three by default.
 
@@ -181,18 +199,14 @@ Example Response:
 
 ```JSON
 {
-    "rear_video_frame": "base64_encoded_image",
+    "rear_frame": "base64_encoded_image",
     "timestamp": 1724189733.208559
 }
 ```
 
 ### GET /v2/screenshot
 
-With this endpoint you can retrieve the latest emitted frame and timestamp from the bot. The frame is a base64 encoded image. And the timestamp is the time when the frame was emitted (Unix Epoch UTC timestamp).
-
-This endpoint retrieves the latest emitted frame (both front and rear) and the corresponding timestamp. The frame is provided as a base64 encoded image, and the timestamp is given in Unix Epoch format (Unix Epoch UTC timestamp).
-
-Unlike the standard screenshot method, this version returns frames 15 times faster and always includes both the front and rear frames.
+This endpoint returns fresh cached camera frames as base64 with their actual capture timestamps. The rear camera is detected automatically: if the bot publishes a rear stream (e.g. Mini+, Zero), the response includes `rear_frame`; single-camera bots return only the front. The legacy `timestamp` field is the newest capture, while `front_timestamp` and `rear_timestamp` identify each frame precisely.
 
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
@@ -206,6 +220,8 @@ Example Response:
 {
     "front_frame": "base64_encoded_image",
     "rear_frame": "base64_encoded_image",
+    "front_timestamp": 1724189733.198559,
+    "rear_timestamp": 1724189733.208559,
     "timestamp": 1724189733.208559
 }
 ```
@@ -279,6 +295,70 @@ Example Response:
     "message": "Speech sent to rover"
 }
 ```
+
+### GET /feed
+
+Live MJPEG stream of a camera (`multipart/x-mixed-replace`) — the recommended way to consume video programmatically (ROS2, OpenCV, recording). Unlike polling `/v2/screenshot`, frames are pushed as they're captured, there's no per-frame HTTP response overhead, and feed and v2 consumers share a latest-frame capture cache.
+
+Query params:
+
+- `view`: `front` (default) or `rear` (bots with a rear camera; 404 otherwise)
+- `fps`: 1–30 (default 15)
+
+```bash
+# Watch it in a browser:
+open 'http://localhost:8000/feed?view=front&fps=15'
+```
+
+```python
+# Or consume it from OpenCV / ROS2:
+import cv2
+cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15")
+ok, frame = cap.read()
+```
+
+Frames are always JPEG regardless of `IMAGE_FORMAT`; tune them with `FEED_JPEG_QUALITY`. A camera that is not ready returns HTTP 503 rather than holding an empty stream open. See `examples/ros2/` for a complete ROS2 bridge node (`cmd_vel`, camera, GPS, IMU, battery).
+
+> **Concurrency**: the SDK server is fully async — `/feed`, `/control`, `/data` and `/v2/*` can all be used simultaneously. Driving the rover while streaming video and reading telemetry is the intended usage pattern.
+
+Run one Hypercorn worker per SDK instance. Browser sessions, camera-frame caches and telemetry fan-out are intentionally kept in process so hot-path requests do not cross a process boundary.
+
+### GET /status
+
+Lightweight health endpoint for the SDK pipeline — no side effects, safe to poll.
+
+Sample Request:
+
+```bash
+curl --location 'http://localhost:8000/status'
+```
+
+Sample Response:
+
+```json
+{
+  "browser_ready": true,
+  "mission_started": true,
+  "ingest_connected": true,
+  "telemetry_age_s": 0.42
+}
+```
+
+- `browser_ready`: the headless browser is connected to the rover's channel
+- `ingest_connected`: telemetry is flowing from the rover into the SDK
+- `telemetry_age_s`: seconds since the last telemetry message (`null` if none yet)
+
+### WS /ws/data
+
+WebSocket stream of telemetry for real-time consumers (the dashboard uses it). On connect you receive a `snapshot` message with the latest telemetry (or `data: null` if none yet), then a `telemetry` message per rover update and a `status` heartbeat every 5 seconds:
+
+```json
+{ "type": "snapshot", "data": { ... }, "ingest_connected": true, "telemetry_age_s": 0.1 }
+{ "type": "telemetry", "data": { "battery": 87, "latitude": ..., ... } }
+{ "type": "status", "ingest_connected": true, "telemetry_age_s": 1.2 }
+```
+
+(`WS /ws/ingest` is the internal, localhost-only channel the `/sdk` page uses to push telemetry into the server — not for external use.)
 
 ## Missions API
 
@@ -528,6 +608,19 @@ Example Response:
 
 # Latest updates
 
+- v.6.0:
+
+  - New real-time dashboard at `http://localhost:8000`: live video, map with heading arrow and breadcrumb trail, compass, telemetry tiles with a "Real time" WebSocket toggle, on-screen/keyboard drive controls and a speak box
+  - New `GET /feed` MJPEG streaming endpoint for programmatic video consumption (ROS2/OpenCV-ready), with a shared capture loop across clients
+  - New ROS2 bridge example under `examples/ros2/` (`cmd_vel` → control, camera → `sensor_msgs/Image`, GPS/IMU/battery topics)
+  - Replaced pyppeteer with Playwright; the browser now warms up eagerly at server start, so the first request is no longer slow
+  - Fixed duplicate-browser launches on concurrent first requests and browser-process leaks on failed initialization; the browser now reconnects automatically if it crashes
+  - Telemetry is pushed from the rover page into the server and cached, making `/data` faster and powering the new `WS /ws/data` stream and `GET /status` endpoint
+  - `playwright install chromium` replaces the Google Chrome requirement (`CHROME_EXECUTABLE_PATH` still works as an override)
+  - Removed ~1 MB of unused vendored code
+  - Breaking: the old spectator stream page at `/` was replaced by the dashboard (`/sdk` remains)
+  - Rear camera availability is now detected at runtime from the bot's published streams (works for any bot with a rear camera — Mini+, Zero); no `BOT_TYPE` configuration needed
+
 - v.5.2:
 
   - Added `/missions` endpoint to list the available missions for the connected bot
@@ -559,11 +652,6 @@ Example Response:
   - Added compatibility for mini and zero bots
   - Added HTML examples for bot control and video streaming (20 FPS)
 
-<div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="screenshots/zero.jpg" alt="Zero Bot" width="900">
-  <img src="screenshots/mini.jpg" alt="Mini Bot" width="900">
-</div>
-
 - v.4.7:
   - Optimized frame capture system to reduce CPU and memory usage
   - Removed continuous frame capture loop, now frames are captured on-demand
@@ -589,4 +677,3 @@ Example Response:
 ## Join our Discord
 
 - [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
-

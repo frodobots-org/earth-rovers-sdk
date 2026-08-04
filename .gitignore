@@ -20,3 +20,6 @@ screenshots/*.png
 static/*.mp3
 static/*.wav
 .chrome-profile/
+
+# Handoff docs for the GeNIE / Earth Rover Challenge team (local only)
+/plans/

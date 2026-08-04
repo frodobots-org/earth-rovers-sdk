@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Earth Rover SDK Ops</title>
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+
+  <body>
+    <script>
+      window.DASH = {{ dashboard_config }};
+    </script>
+
+    <header class="topbar">
+      <div class="wordmark">
+        Earth Rover <span class="wordmark-sub">SDK Ops</span>
+      </div>
+      <div class="ident">
+        <span class="chip" id="bot-chip"></span>
+        <span class="chip chip-dim" id="mission-chip"></span>
+      </div>
+      <div class="mission-control">
+        <button type="button" class="btn btn-mission hidden" id="mission-action-btn"></button>
+      </div>
+      <div class="leds" role="status" aria-label="Connection status">
+        <span
+          class="led"
+          id="led-video"
+          title="Status light: green when this page is receiving the camera stream"
+          ><i></i>Video</span
+        >
+        <span
+          class="led"
+          id="led-telemetry"
+          title="Status light: green when live telemetry is streaming to this page (needs the Real time switch)"
+          ><i></i>Telemetry</span
+        >
+        <span
+          class="led"
+          id="led-rover"
+          title="Status light: green when the rover is online and sending data to the SDK"
+          ><i></i>Rover</span
+        >
+      </div>
+      <label
+        class="rt-toggle"
+        for="rt-switch"
+        title="Stream telemetry live to this page (compass, map and tiles update in real time)"
+      >
+        <span class="rt-label">Real time</span>
+        <input type="checkbox" id="rt-switch" />
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+    </header>
+
+    <main class="grid">
+      <section class="panel video-panel">
+        <div class="panel-head">
+          <h2>Front camera</h2>
+          <div class="panel-actions">
+            <button type="button" class="btn btn-ghost" id="audio-btn" disabled>
+              Unmute audio
+            </button>
+          </div>
+        </div>
+        <div class="video-stage">
+          <div id="boot-notice" class="boot-notice hidden" role="status"></div>
+          <div id="front-player" class="player">
+            <div class="placeholder" id="front-placeholder">
+              <p class="ph-title" id="ph-title">Waiting for rover video…</p>
+              <p class="ph-sub hidden" id="ph-sub"></p>
+              <button
+                type="button"
+                class="btn btn-mission start ph-start hidden"
+                id="ph-mission-btn"
+              >
+                Start mission
+              </button>
+            </div>
+          </div>
+          <div id="rear-player" class="player pip hidden"></div>
+        </div>
+      </section>
+
+      <section class="panel map-panel">
+        <div class="panel-head">
+          <h2>Map</h2>
+          <div class="panel-actions">
+            <label
+              class="mini-toggle"
+              for="radius-switch"
+              title="Draw a 15 m circle around each checkpoint"
+            >
+              <input type="checkbox" id="radius-switch" />
+              15 m radius
+            </label>
+            <label class="mini-toggle" for="follow-switch">
+              <input type="checkbox" id="follow-switch" checked />
+              Follow rover
+            </label>
+          </div>
+        </div>
+        <div id="map"></div>
+      </section>
+
+      <section class="panel compass-panel">
+        <div class="panel-head"><h2>Heading</h2></div>
+        <div class="compass">
+          <svg id="compass-svg" viewBox="0 0 200 200" aria-hidden="true"></svg>
+          <div class="compass-readout">
+            <span class="compass-degrees" id="compass-degrees">—</span>
+            <span class="compass-cardinal" id="compass-cardinal">no fix</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel telemetry-panel">
+        <div class="panel-head">
+          <h2>Telemetry</h2>
+          <span class="freshness" id="freshness">no data yet</span>
+        </div>
+        <div class="tiles">
+          <div class="tile">
+            <span class="tile-label">Battery</span>
+            <span class="tile-value"><b id="t-battery">—</b><em>%</em></span>
+            <div class="meter"><div class="meter-fill" id="battery-fill"></div></div>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Speed</span>
+            <span class="tile-value"><b id="t-speed">—</b><em>m/s</em></span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Signal</span>
+            <span class="tile-value"><b id="t-signal">—</b><em>/5</em></span>
+            <div class="sig-bars" id="sig-bars">
+              <i></i><i></i><i></i><i></i><i></i>
+            </div>
+          </div>
+          <div class="tile">
+            <span class="tile-label">GPS</span>
+            <span class="tile-value"><b id="t-gps">—</b></span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Vibration</span>
+            <span class="tile-value"><b id="t-vibration">—</b></span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Lamp</span>
+            <span class="tile-value"><b id="t-lamp">—</b></span>
+          </div>
+          <div class="tile tile-wide">
+            <span class="tile-label">Position</span>
+            <span class="tile-value tile-mono" id="t-position">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel control-panel">
+        <div class="panel-head">
+          <h2>Drive</h2>
+          <span class="kbd-hint">WASD / arrows</span>
+        </div>
+        <div class="drive">
+          <div class="dpad">
+            <button type="button" class="pad" data-dir="forward" aria-label="Forward">▲</button>
+            <button type="button" class="pad" data-dir="left" aria-label="Left">◀</button>
+            <button type="button" class="pad pad-stop" id="stop-btn" aria-label="Stop">STOP</button>
+            <button type="button" class="pad" data-dir="right" aria-label="Right">▶</button>
+            <button type="button" class="pad" data-dir="back" aria-label="Back">▼</button>
+          </div>
+          <div class="drive-side">
+            <label class="slider-label" for="speed-slider">
+              Speed <b id="speed-value">50%</b>
+            </label>
+            <input
+              type="range"
+              id="speed-slider"
+              min="10"
+              max="100"
+              value="50"
+              step="5"
+            />
+            <button type="button" class="btn" id="lamp-btn">Lamp on</button>
+            <span class="control-feedback" id="control-feedback"></span>
+          </div>
+        </div>
+        <form class="speak" id="speak-form">
+          <input
+            type="text"
+            id="speak-input"
+            placeholder="Say something through the rover speaker"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn" id="speak-btn">Speak</button>
+        </form>
+      </section>
+
+      <section class="panel missions-panel" id="missions-panel">
+        <div class="panel-head">
+          <nav class="tabs" role="tablist">
+            <button type="button" class="tab active" data-tab="active" role="tab">
+              Active mission
+            </button>
+            <button type="button" class="tab" data-tab="available" role="tab">
+              Available missions
+            </button>
+            <button type="button" class="tab" data-tab="history" role="tab">
+              History
+            </button>
+          </nav>
+          <button type="button" class="btn" id="checkpoint-btn">
+            Mark checkpoint reached
+          </button>
+        </div>
+        <div class="tab-pane" id="tab-active">
+          <div class="active-mission-head hidden" id="active-mission-head">
+            <span class="chip" id="active-mission-slug"></span>
+            <span class="mission-meta" id="active-mission-progress"></span>
+          </div>
+          <ol class="chips" id="checkpoint-chips"></ol>
+          <p class="empty hidden" id="active-empty">
+            No active mission. Pick one in “Available missions”, set it as
+            MISSION_SLUG in .env and call POST /start-mission.
+          </p>
+        </div>
+        <div class="tab-pane hidden" id="tab-available">
+          <div class="mission-list" id="available-list"></div>
+        </div>
+        <div class="tab-pane hidden" id="tab-history">
+          <div class="mission-list" id="history-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a href="/docs">API docs</a>
+      <a href="/sdk">SDK page</a>
+      <a href="/data">/data</a>
+      <a href="/status">/status</a>
+    </footer>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/AgoraRTC_N-4.24.2.js"></script>
+    <script src="/static/dashboard-map.js"></script>
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>

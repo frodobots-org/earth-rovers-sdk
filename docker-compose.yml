@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   app:
     build: .
@@ -7,10 +5,10 @@ services:
       - DEBUG=true
       - BOT_SLUG=yout-bot-name
       - SDK_API_TOKEN=y0ur4p1tok3n
-      - CHROME_EXECUTABLE_PATH=/usr/bin/chromium
       - MAP_ZOOM_LEVEL=18
+      - IMAGE_FORMAT=jpeg
+      - IMAGE_QUALITY=0.8
     ports:
       - "8000:8000"
-      - "9222:9222"
     volumes:
       - ./screenshots:/app/screenshots

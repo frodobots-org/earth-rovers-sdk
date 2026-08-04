@@ -1,14 +1,20 @@
+import asyncio
+import logging
 import os
 import time
-from pyppeteer import launch
+
 from dotenv import load_dotenv
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
+logger = logging.getLogger("browser_service")
+
 # Configuration from environment variables with defaults
-FORMAT = os.getenv("IMAGE_FORMAT", "png")
-QUALITY = float(os.getenv("IMAGE_QUALITY", "1.0"))
-HAS_REAR_CAMERA = os.getenv("HAS_REAR_CAMERA", "False").lower() == "true"
+FORMAT = os.getenv("IMAGE_FORMAT", "jpeg")
+QUALITY = float(os.getenv("IMAGE_QUALITY", "0.8"))
+FEED_QUALITY = float(os.getenv("FEED_JPEG_QUALITY", "0.8"))
 
 if FORMAT not in ["png", "jpeg", "webp"]:
     raise ValueError("Invalid image format. Supported formats: png, jpeg, webp")
@@ -16,169 +22,277 @@ if FORMAT not in ["png", "jpeg", "webp"]:
 if QUALITY < 0 or QUALITY > 1:
     raise ValueError("Invalid image quality. Quality should be between 0 and 1")
 
+if FEED_QUALITY < 0 or FEED_QUALITY > 1:
+    raise ValueError("Invalid feed quality. Quality should be between 0 and 1")
+
+SDK_PAGE_URL = os.getenv("SDK_PAGE_URL", "http://127.0.0.1:8000/sdk")
+
 
 class BrowserService:
     def __init__(self):
-        self.browser = None
-        self.page = None
-        self.default_viewport = {"width": 3840, "height": 2160}
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._ready = False
+        self._lock = asyncio.Lock()
+        # Large enough for the legacy front/rear/map element captures without
+        # paying for an 8.3-megapixel headless render surface on every frame.
+        self._viewport = {"width": 1920, "height": 1200}
 
-    async def initialize_browser(self):
-        if not self.browser:
-            try:
-                executable_path = os.getenv(
-                    "CHROME_EXECUTABLE_PATH",
-                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                )
-                self.browser = await launch(
-                    executablePath=executable_path,
-                    headless=True,
-                    userDataDir=os.path.join(
-                        os.path.dirname(__file__), ".chrome-profile"
-                    ),
-                    args=[
-                        "--ignore-certificate-errors",
-                        "--no-sandbox",
-                        "--autoplay-policy=no-user-gesture-required",
-                        "--use-fake-ui-for-media-stream",
-                        "--disable-application-cache",
-                        "--disk-cache-size=0",
-                        f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
-                    ],
-                )
-                self.page = await self.browser.newPage()
-                await self.page.setViewport(self.default_viewport)
-                await self.page.setExtraHTTPHeaders(
-                    {"Accept-Language": "en-US,en;q=0.9"}
-                )
-                await self.page.goto(
-                    "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
-                )
-                await self.page.click("#join")
-                await self.page.waitForSelector("video")
-                await self.page.waitForSelector("#map")
-                await self.page.setViewport(self.default_viewport)
-
-                await self.page.waitFor(2000)
-
-                call = f"""() => {{
-                    window.initializeImageParams({{
-                        imageFormat: "{FORMAT}",
-                        imageQuality: {QUALITY}
-                    }});
-                }}"""
-                await self.page.evaluate(call)
-            except Exception as e:
-                print(f"Error initializing browser: {e}")
-                try:
-                    # Close first while the handle is still valid; close_browser nulls refs.
-                    await self.close_browser()
-                except Exception as close_err:
-                    # Dead handle: null manually so a later init is not wedged.
-                    print(f"Error closing browser after failed init: {close_err}")
-                    self.browser = None
-                    self.page = None
-                raise
-
-    async def take_screenshot(self, video_output_folder: str, elements: list):
-        await self.initialize_browser()
-
-        dimensions = await self.page.evaluate(
-            """() => {
-            return {
-                width: Math.max(document.documentElement.scrollWidth, window.innerWidth),
-                height: Math.max(document.documentElement.scrollHeight, window.innerHeight),
-            }
-        }"""
+    @property
+    def is_ready(self) -> bool:
+        return bool(
+            self._ready
+            and self._page
+            and not self._page.is_closed()
+            and self._browser
+            and self._browser.is_connected()
         )
 
-        if (
-            dimensions["width"] > self.default_viewport["width"]
-            or dimensions["height"] > self.default_viewport["height"]
-        ):
-            await self.page.setViewport(dimensions)
+    async def ensure_page(self):
+        # Lock-free fast path: concurrent /control, /feed and /v2 calls must
+        # not serialize on the init lock once the page is up.
+        if self.is_ready:
+            return self._page
+        async with self._lock:
+            if self.is_ready:
+                return self._page
+            await self._teardown()
+            await self._launch()
+            return self._page
 
+    async def _launch(self):
+        self._ready = False
+        try:
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+
+            # Playwright manages its own Chromium; CHROME_EXECUTABLE_PATH
+            # remains an override (e.g. real Chrome for H.264 streams).
+            executable_path = os.getenv("CHROME_EXECUTABLE_PATH") or None
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                executable_path=executable_path,
+                args=[
+                    "--ignore-certificate-errors",
+                    "--no-sandbox",
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--use-fake-ui-for-media-stream",
+                    "--disable-application-cache",
+                    "--disk-cache-size=0",
+                ],
+            )
+            self._context = await self._browser.new_context(
+                viewport=self._viewport,
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            self._page = await self._context.new_page()
+            await self._page.goto(SDK_PAGE_URL, wait_until="domcontentloaded")
+            await self._page.click("#join")
+            # Control and telemetry must remain available when a camera is
+            # offline. Wait for RTM readiness, not for a video DOM element.
+            await self._page.wait_for_function(
+                "() => typeof window.sendMessage === 'function'"
+                " && window.rtmReady === true",
+                timeout=15000,
+            )
+
+            call = f"""() => {{
+                window.initializeImageParams({{
+                    imageFormat: "{FORMAT}",
+                    imageQuality: {QUALITY}
+                }});
+            }}"""
+            await self._page.evaluate(call)
+            self._ready = True
+            logger.info("Headless browser connected to %s", SDK_PAGE_URL)
+        except Exception as e:
+            logger.error("Error initializing browser: %s", e)
+            await self._teardown()
+            # A failed Playwright transport cannot recover by reusing the same
+            # driver instance. Recreate it on the next warm-up attempt.
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
+            raise
+
+    async def _teardown(self):
+        self._ready = False
+        for target in (self._page, self._context, self._browser):
+            if target:
+                try:
+                    await target.close()
+                except Exception:
+                    pass
+        self._page = None
+        self._context = None
+        self._browser = None
+
+    async def _invalidate(self, failed_page):
+        """Tear down only if the failed page is still the active generation."""
+        async with self._lock:
+            if self._page is failed_page:
+                await self._teardown()
+
+    async def _run(self, fn, *, retry_on_disconnect: bool = True):
+        page = await self.ensure_page()
+        try:
+            return await fn(page)
+        except PlaywrightError as e:
+            disconnected = page.is_closed() or not (
+                self._browser and self._browser.is_connected()
+            )
+            if not disconnected:
+                # JavaScript/application errors are not browser crashes. Do not
+                # disrupt feed/control calls that are sharing a healthy page.
+                raise
+            logger.warning("Browser disconnected (%s); relaunching", e)
+            await self._invalidate(page)
+            if not retry_on_disconnect:
+                raise
+            page = await self.ensure_page()
+            return await fn(page)
+
+    async def warmup(self, max_attempts: int = 5):
+        delay = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self.ensure_page()
+                return True
+            except Exception as e:
+                logger.warning(
+                    "Browser warm-up attempt %s/%s failed: %s",
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30)
+        logger.warning(
+            "Browser warm-up gave up after %s attempts;"
+            " it will initialize lazily on the next request",
+            max_attempts,
+        )
+        return False
+
+    async def capture_screenshots(self, elements: list) -> dict[str, bytes]:
         element_map = {"front": "#player-1000", "rear": "#player-1001", "map": "#map"}
 
-        screenshots = {}
-        for name in elements:
-            if name in element_map:
-                element_id = element_map[name]
-                output_path = f"{video_output_folder}/{name}.png"
-                element = await self.page.querySelector(element_id)
-                if element:
-                    start_time = time.time()  # Start time
-                    await element.screenshot({"path": output_path})
-                    end_time = time.time()  # End time
-                    elapsed_time = (
-                        end_time - start_time
-                    ) * 1000  # Convert to milliseconds
-                    print(f"Screenshot for {name} took {elapsed_time:.2f} ms")
-                    screenshots[name] = output_path
-                else:
-                    print(f"Element {element_id} not found")
-            else:
-                print(f"Invalid element name: {name}")
+        async def capture(page):
+            screenshots = {}
+            for name in elements:
+                if name not in element_map:
+                    logger.warning("Invalid element name: %s", name)
+                    continue
+                locator = page.locator(element_map[name])
+                if await locator.count() == 0:
+                    logger.warning("Element %s not found", element_map[name])
+                    continue
+                start_time = time.time()
+                image = await locator.screenshot(type="png", timeout=5000)
+                elapsed_ms = (time.time() - start_time) * 1000
+                logger.info("Screenshot for %s took %.2f ms", name, elapsed_ms)
+                screenshots[name] = image
+            return screenshots
 
-        return screenshots
+        return await self._run(capture)
+
+    async def take_screenshot(self, video_output_folder: str, elements: list):
+        """Backward-compatible wrapper; new API consumers should use bytes."""
+        screenshots = await self.capture_screenshots(elements)
+        paths = {}
+        for name, image in screenshots.items():
+            output_path = os.path.join(video_output_folder, f"{name}.png")
+            await asyncio.to_thread(self._write_file, output_path, image)
+            paths[name] = output_path
+        return paths
+
+    @staticmethod
+    def _write_file(path: str, content: bytes):
+        with open(path, "wb") as output:
+            output.write(content)
 
     async def data(self) -> dict:
-        await self.initialize_browser()
+        return await self._run(lambda page: page.evaluate("() => window.rtm_data"))
 
-        bot_data = await self.page.evaluate(
-            """() => {
-        return window.rtm_data;
-        }"""
+    async def has_rear_camera(self) -> bool:
+        # Capability comes from reality, not BOT_TYPE: the rover either
+        # publishes a rear video track (uid 1001) or it doesn't.
+        result = await self._run(
+            lambda page: page.evaluate(
+                "() => !!(typeof remoteUsers !== 'undefined'"
+                " && remoteUsers[1001] && remoteUsers[1001].videoTrack)"
+            )
         )
-
-        return bot_data
+        return bool(result)
 
     async def front(self) -> str:
-        await self.initialize_browser()
-
-        front_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1000) || null;
-        }"""
+        return await self._run(
+            lambda page: page.evaluate("() => getLastBase64Frame(1000) || null")
         )
-
-        return front_frame
 
     async def rear(self) -> str:
-        await self.initialize_browser()
-
-        rear_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1001) || null;
-        }"""
+        return await self._run(
+            lambda page: page.evaluate("() => getLastBase64Frame(1001) || null")
         )
 
-        return rear_frame
+    async def front_feed(self) -> dict:
+        return await self._run(
+            lambda page: page.evaluate(
+                "([quality]) => getFramePacket(1000, 'jpeg', quality)",
+                [FEED_QUALITY],
+            )
+        )
+
+    async def rear_feed(self) -> dict:
+        return await self._run(
+            lambda page: page.evaluate(
+                "([quality]) => getFramePacket(1001, 'jpeg', quality)",
+                [FEED_QUALITY],
+            )
+        )
+
+    async def configured_frame(self, view: str) -> dict:
+        uid = 1000 if view == "front" else 1001
+        return await self._run(
+            lambda page: page.evaluate(
+                "([uid, format, quality]) => getFramePacket(uid, format, quality)",
+                [uid, FORMAT, QUALITY],
+            )
+        )
 
     async def send_message(self, message: dict):
-        await self.initialize_browser()
-
-        await self.page.evaluate(
-            """(message) => {
-                window.sendMessage(message);
-            }""",
-            message,
+        return await self._run(
+            lambda page: page.evaluate(
+                "(message) => window.sendMessage(message)", message
+            ),
+            retry_on_disconnect=False,
         )
 
     async def speak(self, audio_url: str):
-        await self.initialize_browser()
-
-        result = await self.page.evaluate(
-            """async (audioUrl) => {
-                return await window.playAudioToRover(audioUrl);
-            }""",
-            audio_url,
+        return await self._run(
+            lambda page: page.evaluate(
+                "async (audioUrl) => await window.playAudioToRover(audioUrl)",
+                audio_url,
+            ),
+            retry_on_disconnect=False,
         )
 
-        return result
+    async def close(self):
+        async with self._lock:
+            await self._teardown()
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
 
+    # Backward-compatible alias
     async def close_browser(self):
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-            self.page = None
+        await self.close()

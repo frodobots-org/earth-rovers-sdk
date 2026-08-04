@@ -1,5 +1,7 @@
-import requests
 import json
+
+import requests
+
 
 class RtmClient:
     def __init__(self, auth_response_data):
@@ -10,28 +12,18 @@ class RtmClient:
 
     def send_message(self, message: dict):
         # Convert the message dictionary to a JSON string
-        message_json = json.dumps(message, separators=(',', ':'))
+        message_json = json.dumps(message, separators=(",", ":"))
 
         url = f"https://api.agora.io/dev/v2/project/{self.app_id}/rtm/users/{self.uid}/peer_messages"
-        headers = {
-            "x-agora-uid": self.uid,
-            "x-agora-token": self.token
-        }
+        headers = {"x-agora-uid": self.uid, "x-agora-token": self.token}
 
         payload = {
-            "destination": self.channel.replace('sdk_', '', 1),
+            "destination": self.channel.replace("sdk_", "", 1),
             "enable_offline_messaging": False,
             "enable_historical_messaging": False,
-            "payload": message_json
+            "payload": message_json,
         }
 
-        response = requests.post(url, headers=headers, json=payload)
-
-        print(response)
-        print(response.status_code)
-        print(response.json())
-
-        if response.status_code == 200:
-            print("Message sent successfully")
-        else:
-            print(response.json())
+        response = requests.post(url, headers=headers, json=payload, timeout=5)
+        response.raise_for_status()
+        return response.json()
