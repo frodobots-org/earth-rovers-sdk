@@ -61,6 +61,7 @@ class FrameBroadcaster:
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
         self._latest: Optional[Frame] = None
+        self.last_error: Optional[str] = None
 
     @property
     def latest(self) -> Optional[Frame]:
@@ -129,6 +130,10 @@ class FrameBroadcaster:
 
     async def _build_frame(self, result: CaptureResult) -> Optional[Frame]:
         if isinstance(result, dict):
+            if result.get("error"):
+                # The page diagnosed the failure (e.g. missing H.264 codec) —
+                # surface its message instead of a generic "not available".
+                raise RuntimeError(result["error"])
             data_url = result.get("data_url")
             captured_at = float(result.get("timestamp") or time.time())
         else:
@@ -156,6 +161,7 @@ class FrameBroadcaster:
                 if frame is None:
                     raise RuntimeError("camera frame is not available")
                 failures = 0
+                self.last_error = None
                 self._latest = frame
                 for queue in list(self._clients):
                     if queue.full():
@@ -167,6 +173,7 @@ class FrameBroadcaster:
                 raise
             except Exception as exc:
                 failures += 1
+                self.last_error = str(exc).split("\n", 1)[0]
                 if failures in (1, 5) or failures % 30 == 0:
                     logger.warning("Feed capture failing (%s): %s", failures, exc)
 

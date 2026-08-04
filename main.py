@@ -125,16 +125,19 @@ async def get_camera_frame(
 ) -> tuple[Optional[str], Optional[float]]:
     """Return a shared fresh frame and its capture timestamp."""
     if FORMAT == "jpeg" and QUALITY == FEED_QUALITY:
-        frame = await feed_broadcasters[view].get_frame(
-            max_age=1 / 30, timeout=5, fps=30
-        )
+        broadcaster = feed_broadcasters[view]
+        frame = await broadcaster.get_frame(max_age=1 / 30, timeout=5, fps=30)
         if frame:
             return frame.base64_data, frame.captured_at
+        if broadcaster.last_error:
+            raise HTTPException(status_code=503, detail=broadcaster.last_error)
         return None, None
 
     # Preserve explicit png/webp v2 configurations. The default and fastest
     # path is JPEG and shares the feed broadcaster above.
     packet = await browser_service.configured_frame(view)
+    if packet and packet.get("error"):
+        raise HTTPException(status_code=503, detail=packet["error"])
     if not packet or not packet.get("data_url"):
         return None, None
     return packet["data_url"].split(",", 1)[1], float(packet["timestamp"])
@@ -169,9 +172,10 @@ async def feed(view: str = "front", fps: int = 15):
         first_frame = await asyncio.wait_for(queue.get(), timeout=5)
     except asyncio.TimeoutError as exc:
         await broadcaster.unsubscribe(queue)
-        raise HTTPException(
-            status_code=503, detail=f"{view} camera is not ready"
-        ) from exc
+        detail = f"{view} camera is not ready"
+        if broadcaster.last_error:
+            detail += f": {broadcaster.last_error}"
+        raise HTTPException(status_code=503, detail=detail) from exc
     except asyncio.CancelledError:
         await broadcaster.unsubscribe(queue)
         raise

@@ -444,13 +444,28 @@ async function getFramePacket(uid, imageFormat, imageQuality) {
   }
 
   const capturedAt = Date.now() / 1000;
-  const base64Frame = await captureFrameAsBase64(
-    user.videoTrack,
-    imageFormat,
-    imageQuality
-  );
-  if (!base64Frame) return null;
-  return { data_url: base64Frame, timestamp: capturedAt };
+  try {
+    const base64Frame = await captureFrameAsBase64(
+      user.videoTrack,
+      imageFormat,
+      imageQuality
+    );
+    if (!base64Frame) return null;
+    return { data_url: base64Frame, timestamp: capturedAt };
+  } catch (err) {
+    const text = String((err && err.message) || err);
+    // getImageData with "source width is 0": the track is subscribed but
+    // nothing decodes — the classic sign of a missing H.264 codec.
+    if (/IndexSizeError|source (width|height) is 0/i.test(text)) {
+      return {
+        error:
+          "video track is publishing but no frames are decoding (0x0); " +
+          "the browser likely lacks the H.264 codec - install Google Chrome " +
+          "or set CHROME_EXECUTABLE_PATH to a codec-capable browser",
+      };
+    }
+    return { error: text };
+  }
 }
 
 function initializeImageParams({ imageFormat, imageQuality }) {
