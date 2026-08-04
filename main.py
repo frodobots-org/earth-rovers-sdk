@@ -248,6 +248,7 @@ async def get_status():
     return JSONResponse(
         content={
             "browser_ready": browser_service.is_ready,
+            "browser_error": browser_service.last_error,
             "mission_started": bool(auth_response_data)
             or not os.getenv("MISSION_SLUG"),
             **telemetry_hub.status(),
@@ -615,9 +616,10 @@ async def control(request: Request):
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
-        raise HTTPException(
-            status_code=500, detail="Failed to send control command"
-        ) from e
+        detail = "Failed to send control command"
+        if browser_service.last_error:
+            detail += f": {browser_service.last_error}"
+        raise HTTPException(status_code=500, detail=detail) from e
 
 
 @app.post("/speak")

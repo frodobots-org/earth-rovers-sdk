@@ -66,6 +66,8 @@ pip3 install -r requirements.txt
 playwright install chromium
 ```
 
+> **Don't skip `playwright install chromium`** — it downloads the headless browser the SDK drives. Without it, endpoints fail with "Executable doesn't exist". On Windows, run it as `python -m playwright install chromium` from the same environment/venv you installed the requirements in. Re-run it after upgrading the `playwright` package (each version pins its own browser build).
+
 3. Run the SDK
 
 ```bash

@@ -36,6 +36,7 @@ class BrowserService:
         self._page = None
         self._ready = False
         self._lock = asyncio.Lock()
+        self.last_error = None
         # Large enough for the legacy front/rear/map element captures without
         # paying for an 8.3-megapixel headless render surface on every frame.
         self._viewport = {"width": 1920, "height": 1200}
@@ -71,6 +72,14 @@ class BrowserService:
             # Playwright manages its own Chromium; CHROME_EXECUTABLE_PATH
             # remains an override (e.g. real Chrome for H.264 streams).
             executable_path = os.getenv("CHROME_EXECUTABLE_PATH") or None
+            if not executable_path and not os.path.exists(
+                self._playwright.chromium.executable_path
+            ):
+                raise RuntimeError(
+                    "Playwright's Chromium is not installed on this machine."
+                    " Run: python -m playwright install chromium"
+                    " (or set CHROME_EXECUTABLE_PATH to a browser binary)"
+                )
             self._browser = await self._playwright.chromium.launch(
                 headless=True,
                 executable_path=executable_path,
@@ -106,8 +115,10 @@ class BrowserService:
             }}"""
             await self._page.evaluate(call)
             self._ready = True
+            self.last_error = None
             logger.info("Headless browser connected to %s", SDK_PAGE_URL)
         except Exception as e:
+            self.last_error = str(e).split("\n", 1)[0]
             logger.error("Error initializing browser: %s", e)
             await self._teardown()
             # A failed Playwright transport cannot recover by reusing the same
