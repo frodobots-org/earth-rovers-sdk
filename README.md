@@ -78,7 +78,7 @@ hypercorn main:app --reload
 
 `http://localhost:8000` serves a real-time operations dashboard:
 
-- **Live video**: the front camera stream (and rear camera picture-in-picture on zero bots), joined directly as an Agora spectator.
+- **Live video**: the front camera stream (and rear camera picture-in-picture when the bot publishes one), joined directly as an Agora spectator.
 - **Map**: the rover's position with a heading arrow, a breadcrumb trail of its path, and the mission checkpoints.
 - **Compass**: the rover's orientation on an analog dial.
 - **Telemetry**: battery, speed, signal, GPS, vibration and lamp tiles. Flip the **Real time** switch in the header to stream updates live over a WebSocket; leave it off for a single snapshot.
@@ -206,7 +206,7 @@ Example Response:
 
 ### GET /v2/screenshot
 
-This endpoint returns fresh cached camera frames as base64 with their actual capture timestamps. Mini bots return the front camera; zero bots return front and rear when both are available. The legacy `timestamp` field is the newest capture, while `front_timestamp` and `rear_timestamp` identify each frame precisely.
+This endpoint returns fresh cached camera frames as base64 with their actual capture timestamps. The rear camera is detected automatically: if the bot publishes a rear stream (e.g. Mini+, Zero), the response includes `rear_frame`; single-camera bots return only the front. The legacy `timestamp` field is the newest capture, while `front_timestamp` and `rear_timestamp` identify each frame precisely.
 
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
@@ -302,7 +302,7 @@ Live MJPEG stream of a camera (`multipart/x-mixed-replace`) — the recommended 
 
 Query params:
 
-- `view`: `front` (default) or `rear` (zero bots)
+- `view`: `front` (default) or `rear` (bots with a rear camera; 404 otherwise)
 - `fps`: 1–30 (default 15)
 
 ```bash
@@ -618,7 +618,8 @@ Example Response:
   - Telemetry is pushed from the rover page into the server and cached, making `/data` faster and powering the new `WS /ws/data` stream and `GET /status` endpoint
   - `playwright install chromium` replaces the Google Chrome requirement (`CHROME_EXECUTABLE_PATH` still works as an override)
   - Removed ~1 MB of unused vendored code
-  - Breaking: the old spectator stream page at `/` was replaced by the dashboard (`/sdk` remains); with pre-seeded env tokens, set `BOT_TYPE=zero` to enable rear-camera frames
+  - Breaking: the old spectator stream page at `/` was replaced by the dashboard (`/sdk` remains)
+  - Rear camera availability is now detected at runtime from the bot's published streams (works for any bot with a rear camera — Mini+, Zero); no `BOT_TYPE` configuration needed
 
 - v.5.2:
 

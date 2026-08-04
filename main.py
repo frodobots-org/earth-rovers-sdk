@@ -158,7 +158,7 @@ async def feed(view: str = "front", fps: int = 15):
             status_code=400, detail=f"Invalid view: {view}. Use front or rear"
         )
     fps = max(1, min(fps, 30))
-    if view == "rear" and auth_response_data.get("BOT_TYPE") != "zero":
+    if view == "rear" and not await browser_service.has_rear_camera():
         raise HTTPException(status_code=404, detail="Rear camera is not available")
 
     broadcaster = feed_broadcasters[view]
@@ -826,7 +826,7 @@ async def get_screenshot_v2():
     front_task = asyncio.create_task(get_frame("front"))
     tasks = [front_task]
 
-    if auth_response_data.get("BOT_TYPE") == "zero":
+    if await browser_service.has_rear_camera():
         rear_task = asyncio.create_task(get_frame("rear"))
         tasks.append(rear_task)
 
@@ -868,7 +868,7 @@ async def get_rear_frame():
     if not auth_response_data:
         await auth()
 
-    if auth_response_data.get("BOT_TYPE") != "zero":
+    if not await browser_service.has_rear_camera():
         raise HTTPException(status_code=404, detail="Rear camera is not available")
     rear_frame, captured_at = await get_camera_frame("rear")
     response_data = {}

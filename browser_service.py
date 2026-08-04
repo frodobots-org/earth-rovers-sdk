@@ -220,6 +220,17 @@ class BrowserService:
     async def data(self) -> dict:
         return await self._run(lambda page: page.evaluate("() => window.rtm_data"))
 
+    async def has_rear_camera(self) -> bool:
+        # Capability comes from reality, not BOT_TYPE: the rover either
+        # publishes a rear video track (uid 1001) or it doesn't.
+        result = await self._run(
+            lambda page: page.evaluate(
+                "() => !!(typeof remoteUsers !== 'undefined'"
+                " && remoteUsers[1001] && remoteUsers[1001].videoTrack)"
+            )
+        )
+        return bool(result)
+
     async def front(self) -> str:
         return await self._run(
             lambda page: page.evaluate("() => getLastBase64Frame(1000) || null")
