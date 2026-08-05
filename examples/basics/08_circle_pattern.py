@@ -12,6 +12,7 @@ import time
 import math
 
 BASE_URL = "http://localhost:8000"
+CONTROL_RATE_HZ = 10.0
 
 
 def send_command(linear: float, angular: float, lamp: int = 0):
@@ -26,6 +27,18 @@ def send_command(linear: float, angular: float, lamp: int = 0):
 def stop():
     """Stop all movement."""
     send_command(0, 0)
+
+
+def stream_command(linear: float, angular: float, duration: float, lamp: int = 0):
+    """Continuously refresh a time-bounded motion command at 10 Hz."""
+    interval = 1.0 / CONTROL_RATE_HZ
+    deadline = time.monotonic() + duration
+    while True:
+        send_command(linear, angular, lamp)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
 
 
 def drive_circle(radius: str = "medium", direction: str = "right", duration: float = 5.0):
@@ -51,8 +64,7 @@ def drive_circle(radius: str = "medium", direction: str = "right", duration: flo
     print(f"Driving {radius} circle to the {direction}...")
     print(f"  Linear: {linear}, Angular: {angular}")
 
-    send_command(linear, angular)
-    time.sleep(duration)
+    stream_command(linear, angular, duration)
     stop()
 
     print("Circle complete!")
@@ -68,18 +80,15 @@ def drive_figure_eight(loop_duration: float = 4.0, speed: float = 0.5, turn_inte
 
     # First loop (right)
     print("  Loop 1: turning right...")
-    send_command(speed, turn_intensity)
-    time.sleep(loop_duration)
+    stream_command(speed, turn_intensity, loop_duration)
 
     # Transition
     print("  Transitioning...")
-    send_command(speed, 0)
-    time.sleep(0.5)
+    stream_command(speed, 0, 0.5)
 
     # Second loop (left)
     print("  Loop 2: turning left...")
-    send_command(speed, -turn_intensity)
-    time.sleep(loop_duration)
+    stream_command(speed, -turn_intensity, loop_duration)
 
     stop()
     print("Figure-8 complete!")

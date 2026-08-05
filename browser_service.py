@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -299,12 +300,45 @@ class BrowserService:
         )
 
     async def send_message(self, message: dict):
+        # Non-blocking dispatch: returns once the message is on the wire.
+        # Delivery is observed asynchronously via rtm_health().
         return await self._run(
             lambda page: page.evaluate(
                 "(message) => window.sendMessage(message)", message
             ),
             retry_on_disconnect=False,
         )
+
+    async def send_message_confirmed(self, message: dict) -> bool:
+        """Send and wait for the rover's receipt (hasPeerReceived)."""
+        result = await self._run(
+            lambda page: page.evaluate(
+                "async (message) => await window.sendMessageAwait(message)",
+                message,
+            ),
+            retry_on_disconnect=False,
+        )
+        return result is True
+
+    async def rtm_health(self) -> Optional[dict]:
+        if not self.is_ready:
+            return None
+        try:
+            return await self._run(
+                lambda page: page.evaluate(
+                    "() => window.rtmHealth ? window.rtmHealth() : null"
+                ),
+                retry_on_disconnect=False,
+            )
+        except Exception:
+            return None
+
+    async def reset(self):
+        """Force a relaunch on next use — rebuilds the page, the Agora
+        connections, and the RTM session (for when RTM dies but the page
+        itself is still healthy)."""
+        async with self._lock:
+            await self._teardown()
 
     async def speak(self, audio_url: str):
         return await self._run(

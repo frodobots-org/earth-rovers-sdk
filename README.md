@@ -101,7 +101,9 @@ With this endpoint you can send linear and angular values to move the bot, and c
 
 > **Important — the rover executes its last command until a new one arrives.** A single `{"linear": 1}` keeps the bot driving indefinitely. Always stream commands continuously while moving (10 Hz is typical) and send `{"linear": 0, "angular": 0}` to stop.
 >
-> **Dead-man watchdog (v6.1)**: as a safety net, if the SDK forwards a motion command and no follow-up command arrives within `CONTROL_WATCHDOG_S` seconds (default **5**), the SDK automatically sends a stop command and retries until the rover acknowledges it. This prevents runaway bots when the controlling process crashes or the command path drops mid-drive. Long single-command moves (sleep > 5s between commands) will now be stopped by the watchdog — stream commands instead, raise `CONTROL_WATCHDOG_S`, or set it to `0` to disable.
+> **Delivery semantics (v6.1)**: a `200` means the command was **dispatched** to the rover's messaging channel — it does not wait for the rover's acknowledgement, so the endpoint stays fast for control loops. Delivery health (messages dispatched/delivered/failed, last error) is visible in `GET /status` under `rtm`.
+>
+> **Dead-man watchdog (v6.1)**: the watchdog arms when a motion command is accepted (even if delivery is uncertain), then follows Agora's confirmed-delivery timestamp rather than raw incoming requests. If no command is confirmed within `CONTROL_WATCHDOG_S` seconds (default **3**), the SDK sends a stop and keeps retrying — rebuilding the browser/RTM session if needed — until the rover **confirms receipt**. Failed retry traffic therefore cannot suppress the deadline. This protects against controller crashes and command-path drops mid-drive; it cannot help if the **rover itself** loses connectivity (that requires a firmware-side failsafe). Streaming clients should set `CONTROL_WATCHDOG_S=0.5`–`1`; `0` disables it.
 
 ```bash
 curl --location 'http://localhost:8000/control' \
@@ -484,7 +486,7 @@ Successful Response (Code: 200)
 }
 ```
 
-When the last checkpoint is scanned, `mission_completed` is `true` and the ride ends: the backend disconnects the rover, so the video feed stops and further `/control` commands fail with "Rover unreachable". The SDK clears its session automatically — call `POST /start-mission` to begin a new ride.
+When the last checkpoint is scanned, the SDK first requires the rover to confirm a zero-motion command. Only then is the checkpoint reported and the ride allowed to end. If the stop cannot be confirmed within `SAFETY_STOP_CONFIRM_TIMEOUT_S` (default 12 seconds), the endpoint returns 503 without reporting the final checkpoint, while stop recovery continues. On success, `mission_completed` is `true`, the SDK clears its session automatically, and `POST /start-mission` begins a new ride.
 
 Unsuccessful Response (Code: 400)
 
@@ -619,7 +621,10 @@ Example Response:
 
 - v.6.1:
 
-  - **Safety: dead-man control watchdog.** The rover keeps executing its last command until a new one arrives, so a broken command path after a motion command meant a runaway bot. The SDK now auto-sends a stop (with retries until acknowledged) when no command follows a motion command within `CONTROL_WATCHDOG_S` seconds (default 5, `0` disables). Covers client crashes, network drops and headless-browser restarts mid-drive.
+  - **Safety: dead-man control watchdog.** The rover keeps executing its last command until a new one arrives, so a broken command path after a motion command meant a runaway bot. The watchdog arms when motion is accepted and, once confirmed deliveries go stale for `CONTROL_WATCHDOG_S` (default 3s, `0` disables), delivers a stop and retries — rebuilding the RTM session if needed — until the rover confirms receipt. Failed incoming traffic cannot refresh the deadline.
+  - **Fixed RTM disconnect tracking**: the SDK listened for `ConnectionStateChange` but Agora emits `ConnectionStateChanged` — session drops were invisible
+  - **Non-blocking control dispatch**: `/control` returns as soon as the command is on the wire instead of blocking up to 4s on the rover's acknowledgement; delivery stats (including Agora's `hasPeerReceived`, previously discarded) are exposed in `GET /status` under `rtm`
+  - `/end-mission` and final-checkpoint completion require a confirmed stop before destroying the rover's command session
   - Documented the command-persistence behavior and the recommended continuous-streaming pattern for `/control`
 
 - v.6.0:
