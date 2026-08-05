@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     warmup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await warmup_task
+    cancel_control_watchdog()
     await asyncio.gather(
         *(broadcaster.close() for broadcaster in feed_broadcasters.values())
     )
@@ -493,6 +494,7 @@ async def end_mission():
 
     try:
         await end_ride(headers, bot_slug, mission_slug)
+        cancel_control_watchdog()
         # Clear the stored auth and checkpoints data
         global auth_response_data, checkpoints_list_data
         auth_response_data = {}
@@ -602,8 +604,72 @@ async def control_legacy(request: Request):
         raise HTTPException(status_code=400, detail="Command not provided")
 
     await asyncio.to_thread(RtmClient(auth_response_data).send_message, command)
+    arm_control_watchdog(command)
 
     return {"message": "Command sent successfully"}
+
+
+# Dead-man watchdog: the rover keeps executing its last command until a new
+# one arrives, so a broken command path after a motion command means a
+# runaway bot. If no follow-up command lands within CONTROL_WATCHDOG_S of a
+# motion command, the server itself sends a safety stop and retries until
+# the rover acknowledges it. Set CONTROL_WATCHDOG_S=0 to disable.
+CONTROL_WATCHDOG_S = float(os.getenv("CONTROL_WATCHDOG_S", "5"))
+
+_control_watchdog_task: Optional[asyncio.Task] = None
+
+
+def _command_is_moving(command) -> bool:
+    try:
+        return bool(
+            float(command.get("linear") or 0) or float(command.get("angular") or 0)
+        )
+    except (TypeError, ValueError, AttributeError):
+        return True  # unparseable command: assume motion, err on the safe side
+
+
+def cancel_control_watchdog():
+    global _control_watchdog_task
+    if _control_watchdog_task and not _control_watchdog_task.done():
+        _control_watchdog_task.cancel()
+    _control_watchdog_task = None
+
+
+def arm_control_watchdog(command):
+    """Call after a successfully forwarded command."""
+    if CONTROL_WATCHDOG_S <= 0:
+        return
+    global _control_watchdog_task
+    cancel_control_watchdog()
+    if _command_is_moving(command):
+        lamp = command.get("lamp") or 0 if isinstance(command, dict) else 0
+        _control_watchdog_task = asyncio.create_task(_control_watchdog(lamp))
+
+
+async def _control_watchdog(lamp):
+    await asyncio.sleep(CONTROL_WATCHDOG_S)
+    logger.warning(
+        "Dead-man watchdog: no control command for %.1fs after motion"
+        " - sending safety stop",
+        CONTROL_WATCHDOG_S,
+    )
+    stop_command = {"linear": 0, "angular": 0, "lamp": lamp}
+    for attempt in range(1, 31):
+        if not auth_response_data:
+            logger.info("Watchdog safety stop skipped: mission session cleared")
+            return
+        try:
+            await browser_service.send_message(stop_command)
+            logger.warning("Watchdog safety stop delivered (attempt %s)", attempt)
+            return
+        except Exception as e:
+            logger.warning(
+                "Watchdog safety stop attempt %s failed: %s",
+                attempt,
+                str(e).split("\n", 1)[0],
+            )
+            await asyncio.sleep(2)
+    logger.error("Watchdog safety stop could not be delivered after 30 attempts")
 
 
 @app.post("/control")
@@ -619,6 +685,7 @@ async def control(request: Request):
 
     try:
         await browser_service.send_message(command)
+        arm_control_watchdog(command)
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
@@ -757,6 +824,7 @@ async def checkpoint_reached(request: Request):
         # The backend ends the ride after the last checkpoint, which kills
         # the feed and makes the bot unreachable. Drop the local session so
         # /status reports it and /start-mission re-authenticates cleanly.
+        cancel_control_watchdog()
         auth_response_data = {}
         checkpoints_list_data = {}
         await asyncio.gather(

@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v6.0
+# Earth Rovers SDK v6.1
 
 ## Requirements
 
@@ -98,6 +98,10 @@ This SDK is meant to control the bot and at the same time monitor its status. Th
 ### POST /control
 
 With this endpoint you can send linear and angular values to move the bot, and control the lamp. The linear and angular values are between -1 and 1. The lamp value is 0 (off) or 1 (on).
+
+> **Important — the rover executes its last command until a new one arrives.** A single `{"linear": 1}` keeps the bot driving indefinitely. Always stream commands continuously while moving (10 Hz is typical) and send `{"linear": 0, "angular": 0}` to stop.
+>
+> **Dead-man watchdog (v6.1)**: as a safety net, if the SDK forwards a motion command and no follow-up command arrives within `CONTROL_WATCHDOG_S` seconds (default **5**), the SDK automatically sends a stop command and retries until the rover acknowledges it. This prevents runaway bots when the controlling process crashes or the command path drops mid-drive. Long single-command moves (sleep > 5s between commands) will now be stopped by the watchdog — stream commands instead, raise `CONTROL_WATCHDOG_S`, or set it to `0` to disable.
 
 ```bash
 curl --location 'http://localhost:8000/control' \
@@ -612,6 +616,11 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.6.1:
+
+  - **Safety: dead-man control watchdog.** The rover keeps executing its last command until a new one arrives, so a broken command path after a motion command meant a runaway bot. The SDK now auto-sends a stop (with retries until acknowledged) when no command follows a motion command within `CONTROL_WATCHDOG_S` seconds (default 5, `0` disables). Covers client crashes, network drops and headless-browser restarts mid-drive.
+  - Documented the command-persistence behavior and the recommended continuous-streaming pattern for `/control`
 
 - v.6.0:
 
