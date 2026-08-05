@@ -61,6 +61,34 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await broadcaster.unsubscribe(queue)
 
+    async def test_close_wakes_waiting_clients_with_sentinel(self):
+        # A camera that never produces a frame keeps stream clients blocked
+        # on queue.get(); close() must wake them so /feed responses can end
+        # instead of hanging when the mission completes.
+        async def capture():
+            return None
+
+        broadcaster = FrameBroadcaster(capture)
+        queue = await broadcaster.subscribe(30, cached_max_age=0)
+        waiter = asyncio.create_task(queue.get())
+        await asyncio.sleep(0.05)
+        self.assertFalse(waiter.done())
+
+        await broadcaster.close()
+        sentinel = await asyncio.wait_for(waiter, timeout=1)
+        self.assertIsNone(sentinel)
+
+    async def test_close_replaces_stale_frame_with_sentinel(self):
+        # A slow client with an undelivered frame still gets the sentinel.
+        async def capture():
+            return None
+
+        broadcaster = FrameBroadcaster(capture)
+        queue = await broadcaster.subscribe(30, cached_max_age=0)
+        queue.put_nowait(object())  # simulate an unconsumed frame
+        await broadcaster.close()
+        self.assertIsNone(queue.get_nowait())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,23 +76,32 @@ $(document).ready(function () {
   }
 
   // Function to send message
+  const SEND_TIMEOUT_MS = 4000;
+  const UNREACHABLE_MSG =
+    "Rover unreachable - it may be offline or the mission has ended";
+
   function sendMessage(json) {
     if (!window.rtmReady) {
       return Promise.reject(new Error("RTM client is not connected"));
     }
     const message = JSON.stringify(json);
-    return rtmClient
-      .sendMessageToPeer(
-        {
-          text: message,
-        },
-        botUid
-      )
+    const send = rtmClient.sendMessageToPeer({ text: message }, botUid);
+    // Agora waits 10s for a peer ACK; when the bot left the channel that is
+    // far too slow for a control loop. Race a shorter deadline and swallow
+    // the late Agora rejection so it doesn't spam the console.
+    send.catch(() => undefined);
+    let timer;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(UNREACHABLE_MSG)), SEND_TIMEOUT_MS);
+    });
+    return Promise.race([send, deadline])
       .then(() => undefined)
       .catch((err) => {
-        console.warn("Error sending message:", err);
-        throw err;
-      });
+        const text = String((err && err.message) || err);
+        console.warn("Error sending message:", text);
+        throw /timed out|timeout/i.test(text) ? new Error(UNREACHABLE_MSG) : err;
+      })
+      .finally(() => clearTimeout(timer));
   }
 
   // Make the function globally accessible

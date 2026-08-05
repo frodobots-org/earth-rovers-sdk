@@ -125,16 +125,19 @@ async def get_camera_frame(
 ) -> tuple[Optional[str], Optional[float]]:
     """Return a shared fresh frame and its capture timestamp."""
     if FORMAT == "jpeg" and QUALITY == FEED_QUALITY:
-        frame = await feed_broadcasters[view].get_frame(
-            max_age=1 / 30, timeout=5, fps=30
-        )
+        broadcaster = feed_broadcasters[view]
+        frame = await broadcaster.get_frame(max_age=1 / 30, timeout=5, fps=30)
         if frame:
             return frame.base64_data, frame.captured_at
+        if broadcaster.last_error:
+            raise HTTPException(status_code=503, detail=broadcaster.last_error)
         return None, None
 
     # Preserve explicit png/webp v2 configurations. The default and fastest
     # path is JPEG and shares the feed broadcaster above.
     packet = await browser_service.configured_frame(view)
+    if packet and packet.get("error"):
+        raise HTTPException(status_code=503, detail=packet["error"])
     if not packet or not packet.get("data_url"):
         return None, None
     return packet["data_url"].split(",", 1)[1], float(packet["timestamp"])
@@ -169,9 +172,10 @@ async def feed(view: str = "front", fps: int = 15):
         first_frame = await asyncio.wait_for(queue.get(), timeout=5)
     except asyncio.TimeoutError as exc:
         await broadcaster.unsubscribe(queue)
-        raise HTTPException(
-            status_code=503, detail=f"{view} camera is not ready"
-        ) from exc
+        detail = f"{view} camera is not ready"
+        if broadcaster.last_error:
+            detail += f": {broadcaster.last_error}"
+        raise HTTPException(status_code=503, detail=detail) from exc
     except asyncio.CancelledError:
         await broadcaster.unsubscribe(queue)
         raise
@@ -181,7 +185,9 @@ async def feed(view: str = "front", fps: int = 15):
         last_sent = 0.0
         try:
             frame = first_frame
-            while True:
+            # A None frame is the broadcaster's end-of-stream sentinel
+            # (mission ended / server shutting down): finish the response.
+            while frame is not None:
                 now = time.monotonic()
                 if now - last_sent < min_interval * 0.9:
                     frame = await queue.get()
@@ -616,9 +622,10 @@ async def control(request: Request):
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
+        reason = browser_service.last_error or str(e).split("\n", 1)[0]
         detail = "Failed to send control command"
-        if browser_service.last_error:
-            detail += f": {browser_service.last_error}"
+        if reason:
+            detail += f": {reason}"
         raise HTTPException(status_code=500, detail=detail) from e
 
 
@@ -733,13 +740,36 @@ async def checkpoint_reached(request: Request):
                 ),
             },
         )
+    global auth_response_data, checkpoints_list_data
+    next_sequence = response_data.get("next_checkpoint_sequence", "")
+    sequences = [
+        cp.get("sequence")
+        for cp in checkpoints_list_data.get("checkpoints_list", [])
+        if isinstance(cp.get("sequence"), int)
+    ]
+    try:
+        past_last = bool(sequences) and int(next_sequence) > max(sequences)
+    except (TypeError, ValueError):
+        past_last = False
+    mission_completed = bool(sequences) and (not next_sequence or past_last)
+
+    if mission_completed:
+        # The backend ends the ride after the last checkpoint, which kills
+        # the feed and makes the bot unreachable. Drop the local session so
+        # /status reports it and /start-mission re-authenticates cleanly.
+        auth_response_data = {}
+        checkpoints_list_data = {}
+        await asyncio.gather(
+            *(broadcaster.close() for broadcaster in feed_broadcasters.values())
+        )
+        await browser_service.close()
+
     return JSONResponse(
         status_code=200,
         content={
             "message": "Checkpoint reached successfully",
-            "next_checkpoint_sequence": response_data.get(
-                "next_checkpoint_sequence", ""
-            ),
+            "next_checkpoint_sequence": next_sequence,
+            "mission_completed": mission_completed,
         },
     )
 

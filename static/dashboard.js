@@ -426,6 +426,11 @@
   }
 
   function sendCommand(command) {
+    if (!missionStarted) {
+      // No ride, no rover: transmitting would only surface a 400/timeout.
+      pendingCommand = null;
+      return;
+    }
     // Latest wins, but delivery remains ordered. In particular, a stop waits
     // behind an in-flight motion command instead of racing it over HTTP/RTM.
     pendingCommand = command;
@@ -493,6 +498,18 @@
     }
     // Exactly one zero command so the rover stops promptly.
     sendCommand({ linear: 0, angular: 0, lamp: lampState });
+  }
+
+  // Halt the drive loop WITHOUT transmitting: for when the ride is already
+  // over and the rover is gone — a stop command would only produce an error.
+  function clearDriveState() {
+    if (driveTimer) {
+      clearInterval(driveTimer);
+      driveTimer = null;
+    }
+    held.forward = held.back = held.left = held.right = false;
+    pendingCommand = null;
+    refreshPads();
   }
 
   function setHeld(dir, value) {
@@ -807,6 +824,35 @@
     });
   }
 
+  // The backend ends the ride once the last checkpoint is scanned: the feed
+  // drops and the bot stops listening. Reflect that instead of erroring.
+  function missionCompleted() {
+    missionStarted = false;
+    clearDriveState();
+    document
+      .querySelectorAll(".pad, #lamp-btn, #speak-btn, #checkpoint-btn")
+      .forEach(function (control) {
+        control.disabled = true;
+      });
+    var maxSequence = checkpoints.reduce(function (acc, cp) {
+      return Math.max(acc, cp.sequence);
+    }, 0);
+    renderCheckpoints(maxSequence + 1); // everything shows as done
+    renderMissionAction();
+    setPlaceholder("Mission completed 🎉", {
+      sub:
+        "All checkpoints scanned. The ride has ended and the rover " +
+        "disconnected — start a new mission whenever you're ready.",
+      startButton: !!DASH.missionSlug,
+    });
+    // The feed is dead either way; don't wait for an Agora unpublish event
+    // that may never arrive to reveal the completion message.
+    $("front-placeholder").classList.remove("hidden");
+    $("rear-player").classList.add("hidden");
+    $("ph-mission-btn").disabled = false;
+    feedback("mission completed");
+  }
+
   $("checkpoint-btn").addEventListener("click", function () {
     var btn = this;
     btn.disabled = true;
@@ -825,16 +871,21 @@
         });
       })
       .then(function (body) {
-        feedback("checkpoint reached");
-        if (body.next_checkpoint_sequence) {
-          renderCheckpoints(parseInt(body.next_checkpoint_sequence, 10));
+        if (body.mission_completed) {
+          missionCompleted();
+        } else {
+          feedback("checkpoint reached");
+          if (body.next_checkpoint_sequence) {
+            renderCheckpoints(parseInt(body.next_checkpoint_sequence, 10));
+          }
         }
       })
       .catch(function (err) {
         feedback(String(err.message || err), true);
       })
       .finally(function () {
-        btn.disabled = false;
+        // Stay disabled when the mission just completed.
+        if (missionStarted) btn.disabled = false;
       });
   });
 

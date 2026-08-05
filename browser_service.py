@@ -69,21 +69,9 @@ class BrowserService:
             if self._playwright is None:
                 self._playwright = await async_playwright().start()
 
-            # Playwright manages its own Chromium; CHROME_EXECUTABLE_PATH
-            # remains an override (e.g. real Chrome for H.264 streams).
-            executable_path = os.getenv("CHROME_EXECUTABLE_PATH") or None
-            if not executable_path and not os.path.exists(
-                self._playwright.chromium.executable_path
-            ):
-                raise RuntimeError(
-                    "Playwright's Chromium is not installed on this machine."
-                    " Run: python -m playwright install chromium"
-                    " (or set CHROME_EXECUTABLE_PATH to a browser binary)"
-                )
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                executable_path=executable_path,
-                args=[
+            launch_kwargs = {
+                "headless": True,
+                "args": [
                     "--ignore-certificate-errors",
                     "--no-sandbox",
                     "--autoplay-policy=no-user-gesture-required",
@@ -91,7 +79,40 @@ class BrowserService:
                     "--disable-application-cache",
                     "--disk-cache-size=0",
                 ],
-            )
+            }
+            executable_path = os.getenv("CHROME_EXECUTABLE_PATH") or None
+            if executable_path:
+                self._browser = await self._playwright.chromium.launch(
+                    executable_path=executable_path, **launch_kwargs
+                )
+                logger.info("Using browser from CHROME_EXECUTABLE_PATH")
+            else:
+                # Prefer installed Google Chrome: it ships the H.264/AAC
+                # codecs some rover streams need; Playwright's open-source
+                # Chromium does not and decodes those streams as 0x0.
+                try:
+                    self._browser = await self._playwright.chromium.launch(
+                        channel="chrome", **launch_kwargs
+                    )
+                    logger.info("Using installed Google Chrome (all codecs)")
+                except PlaywrightError:
+                    if not os.path.exists(
+                        self._playwright.chromium.executable_path
+                    ):
+                        raise RuntimeError(
+                            "No usable browser found. Run: python -m"
+                            " playwright install chromium (or install Google"
+                            " Chrome, or set CHROME_EXECUTABLE_PATH)"
+                        )
+                    self._browser = await self._playwright.chromium.launch(
+                        **launch_kwargs
+                    )
+                    logger.info(
+                        "Using Playwright's bundled Chromium (no Google"
+                        " Chrome found). If video frames stay empty, the"
+                        " stream may need H.264: install Chrome or set"
+                        " CHROME_EXECUTABLE_PATH to a codec-capable browser"
+                    )
             self._context = await self._browser.new_context(
                 viewport=self._viewport,
                 extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},

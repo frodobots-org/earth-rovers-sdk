@@ -475,9 +475,12 @@ Successful Response (Code: 200)
 ```JSON
 {
     "message": "Checkpoint reached successfully",
-    "next_checkpoint_sequence": 2
+    "next_checkpoint_sequence": 2,
+    "mission_completed": false
 }
 ```
+
+When the last checkpoint is scanned, `mission_completed` is `true` and the ride ends: the backend disconnects the rover, so the video feed stops and further `/control` commands fail with "Rover unreachable". The SDK clears its session automatically — call `POST /start-mission` to begin a new ride.
 
 Unsuccessful Response (Code: 400)
 
@@ -669,6 +672,22 @@ Example Response:
 - v3.3: Improved control speed.
 - v3.2: Added the ability to control the zoom level of the map.
 - v3.1: Ability to retrieve rear camera frame and map screenshot. Bug fixes.
+
+## Troubleshooting
+
+**"camera frame is not available" / `IndexSizeError: getImageData ... source width is 0` / black or empty frames**
+
+The video track is subscribed but no frames are decoding — almost always a **missing H.264 codec**. Some bots publish H.264, which Playwright's open-source Chromium cannot decode. The SDK prefers an installed Google Chrome automatically (it ships all codecs); if Chrome isn't available it falls back to the bundled Chromium and this problem can appear.
+
+Fixes, in order of preference:
+
+1. Install Google Chrome — the SDK picks it up automatically on next start.
+2. On platforms without Chrome builds (e.g. Jetson / arm64 Linux): `sudo apt install chromium-browser`, then set `CHROME_EXECUTABLE_PATH=/usr/bin/chromium-browser` in `.env` (distro Chromium builds include H.264).
+3. Docker: the image uses the bundled Chromium; if your bot streams H.264, install `chromium` in the image and set `CHROME_EXECUTABLE_PATH=/usr/bin/chromium`.
+
+**"Executable doesn't exist at ..." on startup** — run `python -m playwright install chromium` in the same Python environment, and re-run it after upgrading the `playwright` package.
+
+**Video gets laggy/frozen after a few seconds** — usually network-related between you and the bot (distant regions, weak bot signal), not the SDK; check `signal_level` in `/data` and try a lower `fps` on `/feed`.
 
 ## Contributions
 

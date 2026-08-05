@@ -61,6 +61,7 @@ class FrameBroadcaster:
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
         self._latest: Optional[Frame] = None
+        self.last_error: Optional[str] = None
 
     @property
     def latest(self) -> Optional[Frame]:
@@ -114,12 +115,21 @@ class FrameBroadcaster:
     async def close(self):
         task = None
         async with self._lock:
+            clients = list(self._clients)
             self._clients.clear()
             self._latest = None
             if self._task:
                 task = self._task
                 self._task = None
                 task.cancel()
+        # Wake every waiting stream client with an end-of-stream sentinel;
+        # otherwise generators blocked on queue.get() would hang forever.
+        for queue in clients:
+            if queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(None)
         if task:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -129,6 +139,10 @@ class FrameBroadcaster:
 
     async def _build_frame(self, result: CaptureResult) -> Optional[Frame]:
         if isinstance(result, dict):
+            if result.get("error"):
+                # The page diagnosed the failure (e.g. missing H.264 codec) —
+                # surface its message instead of a generic "not available".
+                raise RuntimeError(result["error"])
             data_url = result.get("data_url")
             captured_at = float(result.get("timestamp") or time.time())
         else:
@@ -156,6 +170,7 @@ class FrameBroadcaster:
                 if frame is None:
                     raise RuntimeError("camera frame is not available")
                 failures = 0
+                self.last_error = None
                 self._latest = frame
                 for queue in list(self._clients):
                     if queue.full():
@@ -167,6 +182,7 @@ class FrameBroadcaster:
                 raise
             except Exception as exc:
                 failures += 1
+                self.last_error = str(exc).split("\n", 1)[0]
                 if failures in (1, 5) or failures % 30 == 0:
                     logger.warning("Feed capture failing (%s): %s", failures, exc)
 
