@@ -78,6 +78,23 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         sentinel = await asyncio.wait_for(waiter, timeout=1)
         self.assertIsNone(sentinel)
 
+    async def test_lock_is_rebound_when_the_event_loop_changes(self):
+        # Broadcasters are module-level singletons created at import time;
+        # their lock must rebind to the loop actually serving requests.
+        async def capture():
+            return None
+
+        broadcaster = FrameBroadcaster(capture)
+        broadcaster._lock = asyncio.Lock()
+        broadcaster._lock_loop = object()  # simulates a dead import-time loop
+        stale = broadcaster._lock
+
+        lock = broadcaster._get_lock()
+        self.assertIsNot(lock, stale)
+        self.assertIs(broadcaster._get_lock(), lock)
+        queue = await broadcaster.subscribe(10, cached_max_age=0)
+        await broadcaster.unsubscribe(queue)
+
     async def test_close_replaces_stale_frame_with_sentinel(self):
         # A slow client with an undelivered frame still gets the sentinel.
         async def capture():

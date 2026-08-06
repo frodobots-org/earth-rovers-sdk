@@ -70,5 +70,27 @@ class BrowserRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.is_ready)
 
 
+class LockLoopBindingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lock_is_rebound_when_the_event_loop_changes(self):
+        # The service is constructed at import time, before hypercorn's loop
+        # exists. On Python 3.9 a Lock made then is bound to the wrong loop
+        # and raises "attached to a different loop" under contention.
+        import asyncio
+
+        from browser_service import BrowserService
+
+        service = BrowserService()
+        service._lock = asyncio.Lock()
+        service._lock_loop = object()  # simulates a dead import-time loop
+        stale = service._lock
+
+        lock = service._get_lock()
+        self.assertIsNot(lock, stale)
+        # Stable within the same running loop
+        self.assertIs(service._get_lock(), lock)
+        async with service._get_lock():
+            pass  # must be acquirable on this loop
+
+
 if __name__ == "__main__":
     unittest.main()

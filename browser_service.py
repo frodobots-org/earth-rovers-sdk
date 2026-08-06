@@ -36,11 +36,23 @@ class BrowserService:
         self._context = None
         self._page = None
         self._ready = False
-        self._lock = asyncio.Lock()
+        self._lock = None
+        self._lock_loop = None
         self.last_error = None
         # Large enough for the legacy front/rear/map element captures without
         # paying for an 8.3-megapixel headless render surface on every frame.
         self._viewport = {"width": 1920, "height": 1200}
+
+    def _get_lock(self) -> asyncio.Lock:
+        # On Python 3.9 an asyncio.Lock binds to the loop present when it is
+        # constructed. This service is instantiated at import time — before
+        # hypercorn creates its serving loop — so the lock must be created
+        # (and recreated after a --reload loop swap) inside the running loop.
+        running_loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not running_loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = running_loop
+        return self._lock
 
     @property
     def is_ready(self) -> bool:
@@ -57,7 +69,7 @@ class BrowserService:
         # not serialize on the init lock once the page is up.
         if self.is_ready:
             return self._page
-        async with self._lock:
+        async with self._get_lock():
             if self.is_ready:
                 return self._page
             await self._teardown()
@@ -167,7 +179,7 @@ class BrowserService:
 
     async def _invalidate(self, failed_page):
         """Tear down only if the failed page is still the active generation."""
-        async with self._lock:
+        async with self._get_lock():
             if self._page is failed_page:
                 await self._teardown()
 
@@ -337,7 +349,7 @@ class BrowserService:
         """Force a relaunch on next use — rebuilds the page, the Agora
         connections, and the RTM session (for when RTM dies but the page
         itself is still healthy)."""
-        async with self._lock:
+        async with self._get_lock():
             await self._teardown()
 
     async def speak(self, audio_url: str):
@@ -350,7 +362,7 @@ class BrowserService:
         )
 
     async def close(self):
-        async with self._lock:
+        async with self._get_lock():
             await self._teardown()
             if self._playwright:
                 try:

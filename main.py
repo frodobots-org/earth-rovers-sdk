@@ -884,6 +884,15 @@ async def get_screenshot(view_types: str = "rear,map,front"):
             status_code=404, detail=f"Views not available: {', '.join(missing)}"
         )
 
+    # Documented behavior since v3: the images are also saved to screenshots/.
+    os.makedirs("screenshots", exist_ok=True)
+    for view, image in screenshots.items():
+        await asyncio.to_thread(
+            browser_service._write_file,
+            os.path.join("screenshots", f"{view}.png"),
+            image,
+        )
+
     response_content = {
         f"{view}_frame": base64.b64encode(image).decode("ascii")
         for view, image in screenshots.items()

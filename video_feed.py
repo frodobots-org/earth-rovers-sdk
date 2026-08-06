@@ -58,10 +58,21 @@ class FrameBroadcaster:
     def __init__(self, capture_fn: Callable[[], Awaitable[CaptureResult]]):
         self._capture_fn = capture_fn
         self._clients: dict[asyncio.Queue, int] = {}
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
+        self._lock_loop = None
         self._task: Optional[asyncio.Task] = None
         self._latest: Optional[Frame] = None
         self.last_error: Optional[str] = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        # Broadcasters are constructed at import time, before the serving
+        # event loop exists. On Python 3.9 a Lock binds to the construction-
+        # time loop, so create it lazily inside the running loop instead.
+        running_loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not running_loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = running_loop
+        return self._lock
 
     @property
     def latest(self) -> Optional[Frame]:
@@ -77,7 +88,7 @@ class FrameBroadcaster:
         self, fps: int, *, cached_max_age: float = 1.0
     ) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1)
-        async with self._lock:
+        async with self._get_lock():
             self._clients[queue] = fps
             cached = self.latest_if_fresh(max_age=cached_max_age)
             if cached:
@@ -88,7 +99,7 @@ class FrameBroadcaster:
 
     async def unsubscribe(self, queue: asyncio.Queue):
         task = None
-        async with self._lock:
+        async with self._get_lock():
             self._clients.pop(queue, None)
             if not self._clients and self._task:
                 task = self._task
@@ -114,7 +125,7 @@ class FrameBroadcaster:
 
     async def close(self):
         task = None
-        async with self._lock:
+        async with self._get_lock():
             clients = list(self._clients)
             self._clients.clear()
             self._latest = None
