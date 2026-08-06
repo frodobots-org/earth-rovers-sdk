@@ -21,12 +21,45 @@
 
 The SDK uses [Playwright](https://playwright.dev/python/), which downloads and manages its own Chromium — no separate browser install is required. To use a specific browser binary instead (e.g. real Google Chrome), set `CHROME_EXECUTABLE_PATH` in your `.env`.
 
-## Hardware Specs
+## The Earth Rover family
+
+The SDK works with every Earth Rover model. Rear-camera features (`/v2/rear`, `/feed?view=rear`, the dashboard PiP) activate automatically on bots that publish a rear stream.
+
+|  | MINI | MINI+ | ZERO |
+|---|---|---|---|
+|  | <img src="assets/mini-gif.gif" alt="Earth Rover MINI" width="240"> | <img src="assets/mini-plus-gif.gif" alt="Earth Rover MINI+" width="240"> | <img src="assets/zero-gif.gif" alt="Earth Rover ZERO" width="240"> |
+| Cameras | 1 (front) | 2 (front + rear) | 2 (front + rear) |
+| Front camera (web) | 1024×576 | 1024×576 (from 1080p) | 1024×576 |
+| Rear camera (web) | — | 480×270 (from 1080p) | ✓ |
+| Weight | — | 1.4 kg (car only) | — |
+| Size (L×W×H) | — | 250×190×195 mm | 375×288×560 mm |
+| Wheelbase | — | 160 mm | 200 mm |
+| Ground clearance | — | 45 mm | 45 mm |
+| Top speed | — | 4 km/h | — |
+| Range | — | 12 km | — |
+| Max slope | — | 18° | — |
+| Water resistance | — | IP34 | — |
+| Payload | — | — | up to 4 kg |
+| Notes | Same V6 chassis family as MINI+ | Turns on the spot, 2 motors / 4WD | More stable 4G, accurate GPS positioning |
+
+### MINI+ (V6.2, double camera)
+
+<img src="assets/mini_plus_dimensions.png" alt="MINI+ dimensions" width="560">
+
+- **Chassis**: 1.4 kg (car only), 95 mm wheels, two motors with four-wheel drive, turns on the spot, IP34, 18° max slope, 12 km range per charge, top speed 4 km/h.
+- **Cameras**: front and rear, GC2093 sensor, FOV D148° / H126° / V67°, effective focal length 2.72 mm, distortion < 20%. Web streams are downscaled from 1920×1080 to 1024×576 (front) and 480×270 (rear).
+- **IMU**: MPU6050 — telemetry reports every 2 s with 100 accelerometer samples, 1 gyroscope sample and 1 magnetometer sample per report (these arrive in `/data` as `accels`, `gyros`, `mags`).
+- Hardware sources, firmware and 3D-print files: [earth-rover-mini repository](https://github.com/frodobots-org/earth-rover-mini) · [Shop](https://shop.frodobots.com/collections/earth-rovers/products/earth-rover-mini-plus)
+
+### ZERO (V5.2)
 
 <div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="assets/v5.2.png" alt="Hardware Specifications" width="200">
+  <img src="assets/v5.2.png" alt="ZERO V5.2 dimensions" width="200">
   <img src="assets/axis.jpg" alt="Axis Camera" width="200">
 </div>
+
+- 375×288 mm footprint, 560 mm tall (580 mm to the top of the camera mast), 200 mm wheelbase, 45 mm ground clearance.
+- Front and rear cameras, carries up to 4 kg of payload, more stable 4G connectivity and accurate GPS positioning.
 
 For full details on the hardware specifications, please refer to the [Frodobots Hardware Specifications](https://docs.google.com/document/d/1Px-rNy0wQeG74mWcReiV4dEk5u4nfMPTVh-C4pXoieY).
 
