@@ -12,13 +12,18 @@ $(document).ready(function () {
   // Create an instance of an RTM channel
   const rtmChannel = rtmClient.createChannel(channelName);
 
-  // Event listener for connection state changes
-  rtmClient.on("ConnectionStateChange", (newState, reason) => {
+  // Event listener for connection state changes. NOTE: Agora RTM 1.x emits
+  // "ConnectionStateChanged" (with the trailing d) — the un-suffixed name is
+  // never fired and silently freezes rtmReady at its login value.
+  function handleConnectionState(newState, reason) {
     window.rtmReady = newState === "CONNECTED";
+    window.rtmAborted = newState === "ABORTED";
     console.log(
       "on connection state changed to " + newState + " reason: " + reason
     );
-  });
+  }
+  rtmClient.on("ConnectionStateChanged", handleConnectionState);
+  rtmClient.on("ConnectionStateChange", handleConnectionState); // belt & braces
 
   // Event listener for receiving a channel message
   rtmChannel.on("ChannelMessage", () => {
@@ -75,37 +80,88 @@ $(document).ready(function () {
       });
   }
 
-  // Function to send message
+  // --- Sending commands to the rover ---
   const SEND_TIMEOUT_MS = 4000;
   const UNREACHABLE_MSG =
     "Rover unreachable - it may be offline or the mission has ended";
 
-  function sendMessage(json) {
+  // Delivery observability: /status reads this via the browser service.
+  window.rtmStats = {
+    dispatched: 0,
+    delivered: 0,
+    failed: 0,
+    lastError: null,
+    lastDeliveredAt: null,
+  };
+
+  // Dispatch immediately and track the outcome asynchronously. Resolves true
+  // only when Agora confirms the PEER received it (hasPeerReceived).
+  function dispatchToRover(json) {
     if (!window.rtmReady) {
-      return Promise.reject(new Error("RTM client is not connected"));
+      window.rtmStats.failed += 1;
+      window.rtmStats.lastError = "RTM client is not connected";
+      throw new Error("RTM client is not connected");
     }
     const message = JSON.stringify(json);
-    const send = rtmClient.sendMessageToPeer({ text: message }, botUid);
-    // Agora waits 10s for a peer ACK; when the bot left the channel that is
-    // far too slow for a control loop. Race a shorter deadline and swallow
-    // the late Agora rejection so it doesn't spam the console.
-    send.catch(() => undefined);
+    window.rtmStats.dispatched += 1;
+    const result = rtmClient
+      .sendMessageToPeer({ text: message }, botUid)
+      .then((sendResult) => {
+        if (sendResult && sendResult.hasPeerReceived === false) {
+          throw new Error("rover did not receive the message (offline?)");
+        }
+        window.rtmStats.delivered += 1;
+        window.rtmStats.lastError = null;
+        window.rtmStats.lastDeliveredAt = Date.now() / 1000;
+        return true;
+      })
+      .catch((err) => {
+        window.rtmStats.failed += 1;
+        window.rtmStats.lastError = String((err && err.message) || err);
+        throw err;
+      });
+    result.catch(() => undefined); // observed via rtmStats; no unhandled spam
+    return result;
+  }
+
+  // Non-blocking send: returns as soon as the message is dispatched, so a
+  // control stream is never held behind a slow peer acknowledgement.
+  window.sendMessage = function (json) {
+    dispatchToRover(json); // throws synchronously only when RTM is down
+    return true;
+  };
+
+  // Confirmed send for safety-critical messages (watchdog stops): resolves
+  // true only on peer receipt, bounded by a deadline.
+  window.sendMessageAwait = function (json) {
+    const send = dispatchToRover(json);
     let timer;
     const deadline = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(UNREACHABLE_MSG)), SEND_TIMEOUT_MS);
+      timer = setTimeout(
+        () => reject(new Error(UNREACHABLE_MSG)),
+        SEND_TIMEOUT_MS
+      );
     });
     return Promise.race([send, deadline])
-      .then(() => undefined)
       .catch((err) => {
         const text = String((err && err.message) || err);
-        console.warn("Error sending message:", text);
         throw /timed out|timeout/i.test(text) ? new Error(UNREACHABLE_MSG) : err;
       })
       .finally(() => clearTimeout(timer));
-  }
+  };
 
-  // Make the function globally accessible
-  window.sendMessage = sendMessage;
+  // RTM health snapshot for the server.
+  window.rtmHealth = function () {
+    return {
+      ready: window.rtmReady === true,
+      aborted: window.rtmAborted === true,
+      dispatched: window.rtmStats.dispatched,
+      delivered: window.rtmStats.delivered,
+      failed: window.rtmStats.failed,
+      last_error: window.rtmStats.lastError,
+      last_delivered_at: window.rtmStats.lastDeliveredAt,
+    };
+  };
 
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);

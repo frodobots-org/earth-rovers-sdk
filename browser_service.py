@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -35,11 +36,23 @@ class BrowserService:
         self._context = None
         self._page = None
         self._ready = False
-        self._lock = asyncio.Lock()
+        self._lock = None
+        self._lock_loop = None
         self.last_error = None
         # Large enough for the legacy front/rear/map element captures without
         # paying for an 8.3-megapixel headless render surface on every frame.
         self._viewport = {"width": 1920, "height": 1200}
+
+    def _get_lock(self) -> asyncio.Lock:
+        # On Python 3.9 an asyncio.Lock binds to the loop present when it is
+        # constructed. This service is instantiated at import time — before
+        # hypercorn creates its serving loop — so the lock must be created
+        # (and recreated after a --reload loop swap) inside the running loop.
+        running_loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not running_loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = running_loop
+        return self._lock
 
     @property
     def is_ready(self) -> bool:
@@ -56,7 +69,7 @@ class BrowserService:
         # not serialize on the init lock once the page is up.
         if self.is_ready:
             return self._page
-        async with self._lock:
+        async with self._get_lock():
             if self.is_ready:
                 return self._page
             await self._teardown()
@@ -166,7 +179,7 @@ class BrowserService:
 
     async def _invalidate(self, failed_page):
         """Tear down only if the failed page is still the active generation."""
-        async with self._lock:
+        async with self._get_lock():
             if self._page is failed_page:
                 await self._teardown()
 
@@ -299,12 +312,45 @@ class BrowserService:
         )
 
     async def send_message(self, message: dict):
+        # Non-blocking dispatch: returns once the message is on the wire.
+        # Delivery is observed asynchronously via rtm_health().
         return await self._run(
             lambda page: page.evaluate(
                 "(message) => window.sendMessage(message)", message
             ),
             retry_on_disconnect=False,
         )
+
+    async def send_message_confirmed(self, message: dict) -> bool:
+        """Send and wait for the rover's receipt (hasPeerReceived)."""
+        result = await self._run(
+            lambda page: page.evaluate(
+                "async (message) => await window.sendMessageAwait(message)",
+                message,
+            ),
+            retry_on_disconnect=False,
+        )
+        return result is True
+
+    async def rtm_health(self) -> Optional[dict]:
+        if not self.is_ready:
+            return None
+        try:
+            return await self._run(
+                lambda page: page.evaluate(
+                    "() => window.rtmHealth ? window.rtmHealth() : null"
+                ),
+                retry_on_disconnect=False,
+            )
+        except Exception:
+            return None
+
+    async def reset(self):
+        """Force a relaunch on next use — rebuilds the page, the Agora
+        connections, and the RTM session (for when RTM dies but the page
+        itself is still healthy)."""
+        async with self._get_lock():
+            await self._teardown()
 
     async def speak(self, audio_url: str):
         return await self._run(
@@ -316,7 +362,7 @@ class BrowserService:
         )
 
     async def close(self):
-        async with self._lock:
+        async with self._get_lock():
             await self._teardown()
             if self._playwright:
                 try:

@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     warmup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await warmup_task
+    cancel_control_watchdog()
     await asyncio.gather(
         *(broadcaster.close() for broadcaster in feed_broadcasters.values())
     )
@@ -257,6 +258,7 @@ async def get_status():
             "browser_error": browser_service.last_error,
             "mission_started": bool(auth_response_data)
             or not os.getenv("MISSION_SLUG"),
+            "rtm": await browser_service.rtm_health(),
             **telemetry_hub.status(),
         }
     )
@@ -491,8 +493,13 @@ async def end_mission():
         "Authorization": f"Bearer {auth_header}",
     }
 
+    # Ending the remote ride destroys the command path. Do not proceed until
+    # the rover has positively received zero motion.
+    await _require_confirmed_stop("end the mission")
+
     try:
         await end_ride(headers, bot_slug, mission_slug)
+        cancel_control_watchdog()
         # Clear the stored auth and checkpoints data
         global auth_response_data, checkpoints_list_data
         auth_response_data = {}
@@ -601,9 +608,212 @@ async def control_legacy(request: Request):
     if not command:
         raise HTTPException(status_code=400, detail="Command not provided")
 
-    await asyncio.to_thread(RtmClient(auth_response_data).send_message, command)
+    arm_control_watchdog(command)
+    await _dispatch_legacy_control(command)
 
     return {"message": "Command sent successfully"}
+
+
+# Dead-man watchdog: the rover keeps executing its last command until a new
+# one arrives, so a broken command path after a motion command means a
+# runaway bot. The watchdog arms when a motion command is ACCEPTED (before
+# dispatch, covering ambiguous delivery) and, once confirmed deliveries are
+# stale for CONTROL_WATCHDOG_S, delivers a CONFIRMED stop (peer receipt) —
+# retrying and rebuilding the RTM session until the rover confirms it. Failed
+# traffic cannot refresh this deadline. CONTROL_WATCHDOG_S=0 disables it.
+CONTROL_WATCHDOG_S = float(os.getenv("CONTROL_WATCHDOG_S", "3"))
+WATCHDOG_RETRY_DELAY_S = 1.0
+WATCHDOG_RESET_EVERY = 3  # rebuild the browser/RTM session every N failures
+SAFETY_STOP_CONFIRM_TIMEOUT_S = float(
+    os.getenv("SAFETY_STOP_CONFIRM_TIMEOUT_S", "12")
+)
+
+_control_watchdog_task: Optional[asyncio.Task] = None
+_confirmed_stop_task: Optional[asyncio.Task] = None
+_confirmed_stop_generation = 0
+_control_dispatch_lock: Optional[asyncio.Lock] = None
+_control_dispatch_lock_loop = None
+
+
+def _command_is_moving(command) -> bool:
+    try:
+        return bool(
+            float(command.get("linear") or 0) or float(command.get("angular") or 0)
+        )
+    except (TypeError, ValueError, AttributeError):
+        return True  # unparseable command: assume motion, err on the safe side
+
+
+def cancel_control_watchdog():
+    global _control_watchdog_task, _confirmed_stop_task
+    if _control_watchdog_task and not _control_watchdog_task.done():
+        _control_watchdog_task.cancel()
+    if _confirmed_stop_task and not _confirmed_stop_task.done():
+        _confirmed_stop_task.cancel()
+    _control_watchdog_task = None
+    _confirmed_stop_task = None
+
+
+def _get_control_dispatch_lock() -> asyncio.Lock:
+    """Return a lock bound to the current application event loop."""
+    global _control_dispatch_lock, _control_dispatch_lock_loop
+    running_loop = asyncio.get_running_loop()
+    if (
+        _control_dispatch_lock is None
+        or _control_dispatch_lock_loop is not running_loop
+    ):
+        _control_dispatch_lock = asyncio.Lock()
+        _control_dispatch_lock_loop = running_loop
+    return _control_dispatch_lock
+
+
+def _confirmed_stop_pending() -> bool:
+    return bool(_confirmed_stop_task and not _confirmed_stop_task.done())
+
+
+async def _dispatch_browser_control(command):
+    """Order local dispatches and reject motion while a safety stop is pending."""
+    stop_generation = _confirmed_stop_generation
+    stop_pending_at_start = _confirmed_stop_pending()
+    async with _get_control_dispatch_lock():
+        stop_overtook_dispatch = stop_generation != _confirmed_stop_generation
+        if _command_is_moving(command) and (
+            stop_pending_at_start
+            or _confirmed_stop_pending()
+            or stop_overtook_dispatch
+        ):
+            raise RuntimeError("Motion rejected because a safety stop took priority")
+        return await browser_service.send_message(command)
+
+
+async def _dispatch_legacy_control(command):
+    """Keep a slow legacy REST motion ahead of its trailing safety stop."""
+    stop_generation = _confirmed_stop_generation
+    stop_pending_at_start = _confirmed_stop_pending()
+    async with _get_control_dispatch_lock():
+        stop_overtook_dispatch = stop_generation != _confirmed_stop_generation
+        if _command_is_moving(command) and (
+            stop_pending_at_start
+            or _confirmed_stop_pending()
+            or stop_overtook_dispatch
+        ):
+            raise RuntimeError("Motion rejected because a safety stop took priority")
+        return await asyncio.to_thread(
+            RtmClient(auth_response_data).send_message, command
+        )
+
+
+def arm_control_watchdog(command):
+    """Start monitoring a drive without letting failed traffic reset its timer.
+
+    The monitor follows Agora's confirmed-delivery timestamp. Healthy streams
+    therefore keep it alive, while synchronously or asynchronously failed
+    requests cannot postpone the safety deadline.
+    """
+    if CONTROL_WATCHDOG_S <= 0 or not _command_is_moving(command):
+        return
+    global _control_watchdog_task
+    if _control_watchdog_task and not _control_watchdog_task.done():
+        return
+    lamp = command.get("lamp") or 0 if isinstance(command, dict) else 0
+    _control_watchdog_task = asyncio.create_task(
+        _control_watchdog(lamp, time.time())
+    )
+
+
+async def _recent_delivery_delay(armed_at: float) -> Optional[float]:
+    """Return how long a recently confirmed control delivery remains fresh."""
+    health = await browser_service.rtm_health()
+    if not health:
+        return None
+    try:
+        delivered_at = float(health.get("last_delivered_at"))
+    except (TypeError, ValueError):
+        return None
+    if delivered_at < armed_at:
+        return None
+    age = max(0.0, time.time() - delivered_at)
+    remaining = CONTROL_WATCHDOG_S - age
+    return remaining if remaining > 0 else None
+
+
+def _ensure_confirmed_stop(lamp=0) -> asyncio.Task:
+    """Return the one shared stop-delivery task for this safety event."""
+    global _confirmed_stop_task, _confirmed_stop_generation
+    if not _confirmed_stop_task or _confirmed_stop_task.done():
+        _confirmed_stop_generation += 1
+        _confirmed_stop_task = asyncio.create_task(_deliver_confirmed_stop(lamp))
+    return _confirmed_stop_task
+
+
+async def _deliver_confirmed_stop(lamp) -> bool:
+    stop_command = {"linear": 0, "angular": 0, "lamp": lamp}
+    attempt = 0
+    delay = WATCHDOG_RETRY_DELAY_S
+    while auth_response_data:
+        attempt += 1
+        try:
+            async with _get_control_dispatch_lock():
+                if await browser_service.send_message_confirmed(stop_command):
+                    logger.warning(
+                        "Safety stop confirmed by rover (attempt %s)", attempt
+                    )
+                    return True
+                raise RuntimeError("rover did not confirm the stop")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Safety stop attempt %s failed: %s",
+                attempt,
+                str(e).split("\n", 1)[0],
+            )
+            if attempt % WATCHDOG_RESET_EVERY == 0:
+                logger.warning("Rebuilding the browser/RTM session to recover")
+                async with _get_control_dispatch_lock():
+                    with contextlib.suppress(Exception):
+                        await browser_service.reset()
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 5.0)
+    logger.info("Safety stop abandoned because the mission session was cleared")
+    return False
+
+
+async def _require_confirmed_stop(reason: str, lamp=0):
+    """Block destructive lifecycle transitions until the rover confirms zero."""
+    task = _ensure_confirmed_stop(lamp)
+    try:
+        confirmed = await asyncio.wait_for(
+            asyncio.shield(task), timeout=SAFETY_STOP_CONFIRM_TIMEOUT_S
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot {reason}: rover has not confirmed the safety stop",
+        ) from exc
+    if not confirmed:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot {reason}: mission ended before the safety stop was confirmed",
+        )
+
+
+async def _control_watchdog(lamp, armed_at: float):
+    delay = CONTROL_WATCHDOG_S
+    while True:
+        await asyncio.sleep(delay)
+        delay = await _recent_delivery_delay(armed_at)
+        if delay is None:
+            break
+    logger.warning(
+        "Dead-man watchdog: no confirmed control delivery for %.1fs -"
+        " delivering safety stop",
+        CONTROL_WATCHDOG_S,
+    )
+    if not auth_response_data:
+        logger.info("Watchdog safety stop skipped: mission session cleared")
+        return
+    await asyncio.shield(_ensure_confirmed_stop(lamp))
 
 
 @app.post("/control")
@@ -617,8 +827,11 @@ async def control(request: Request):
     if not command:
         raise HTTPException(status_code=400, detail="Command not provided")
 
+    # Arm BEFORE dispatch: if the send times out ambiguously the rover may
+    # still have received the motion command — the watchdog must cover it.
+    arm_control_watchdog(command)
     try:
-        await browser_service.send_message(command)
+        await _dispatch_browser_control(command)
         return {"message": "Command sent successfully"}
     except Exception as e:
         logger.error("Error sending control command: %s", str(e))
@@ -671,6 +884,15 @@ async def get_screenshot(view_types: str = "rear,map,front"):
             status_code=404, detail=f"Views not available: {', '.join(missing)}"
         )
 
+    # Documented behavior since v3: the images are also saved to screenshots/.
+    os.makedirs("screenshots", exist_ok=True)
+    for view, image in screenshots.items():
+        await asyncio.to_thread(
+            browser_service._write_file,
+            os.path.join("screenshots", f"{view}.png"),
+            image,
+        )
+
     response_content = {
         f"{view}_frame": base64.b64encode(image).decode("ascii")
         for view, image in screenshots.items()
@@ -692,8 +914,22 @@ async def get_data():
     return JSONResponse(content=data)
 
 
+def _pending_checkpoint_sequences() -> list[int]:
+    sequences = sorted(
+        cp.get("sequence")
+        for cp in checkpoints_list_data.get("checkpoints_list", [])
+        if isinstance(cp.get("sequence"), int)
+    )
+    try:
+        latest = int(checkpoints_list_data.get("latest_scanned_checkpoint", 0))
+    except (TypeError, ValueError):
+        latest = 0
+    return [sequence for sequence in sequences if sequence > latest]
+
+
 @app.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
+    global auth_response_data, checkpoints_list_data
     await need_start_mission()
 
     bot_slug = os.getenv("BOT_SLUG")
@@ -724,6 +960,15 @@ async def checkpoint_reached(request: Request):
         "longitude": longitude,
     }
 
+    # The backend ends the ride as part of accepting the final checkpoint.
+    # Predict that transition from the cached mission progress and require a
+    # confirmed zero while RTM is still available. With missing progress data,
+    # be conservative because we cannot prove this is a non-final checkpoint.
+    pending_sequences = _pending_checkpoint_sequences()
+    checkpoint_may_complete = len(pending_sequences) <= 1
+    if checkpoint_may_complete:
+        await _require_confirmed_stop("complete the final checkpoint")
+
     status, response_data = await external_request(
         "POST",
         FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
@@ -740,7 +985,6 @@ async def checkpoint_reached(request: Request):
                 ),
             },
         )
-    global auth_response_data, checkpoints_list_data
     next_sequence = response_data.get("next_checkpoint_sequence", "")
     sequences = [
         cp.get("sequence")
@@ -753,10 +997,18 @@ async def checkpoint_reached(request: Request):
         past_last = False
     mission_completed = bool(sequences) and (not next_sequence or past_last)
 
+    if pending_sequences:
+        # Keep the cached progress current so the next request can identify the
+        # final checkpoint before the backend tears down its RTM session.
+        checkpoints_list_data["latest_scanned_checkpoint"] = pending_sequences[0]
+
     if mission_completed:
         # The backend ends the ride after the last checkpoint, which kills
         # the feed and makes the bot unreachable. Drop the local session so
         # /status reports it and /start-mission re-authenticates cleanly.
+        # _require_confirmed_stop ran before the backend call for the final
+        # checkpoint. It is now safe to tear down all local safety tasks.
+        cancel_control_watchdog()
         auth_response_data = {}
         checkpoints_list_data = {}
         await asyncio.gather(

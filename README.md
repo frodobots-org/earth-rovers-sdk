@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v6.0
+# Earth Rovers SDK v6.1
 
 ## Requirements
 
@@ -21,12 +21,45 @@
 
 The SDK uses [Playwright](https://playwright.dev/python/), which downloads and manages its own Chromium — no separate browser install is required. To use a specific browser binary instead (e.g. real Google Chrome), set `CHROME_EXECUTABLE_PATH` in your `.env`.
 
-## Hardware Specs
+## The Earth Rover family
+
+The SDK works with every Earth Rover model. Rear-camera features (`/v2/rear`, `/feed?view=rear`, the dashboard PiP) activate automatically on bots that publish a rear stream.
+
+|  | MINI | MINI+ | ZERO |
+|---|---|---|---|
+|  | <img src="assets/mini-gif.gif" alt="Earth Rover MINI" width="240"> | <img src="assets/mini-plus-gif.gif" alt="Earth Rover MINI+" width="240"> | <img src="assets/zero-gif.gif" alt="Earth Rover ZERO" width="240"> |
+| Cameras | 1 (front) | 2 (front + rear) | 2 (front + rear) |
+| Front camera (web) | 1024×576 | 1024×576 (from 1080p) | 1024×576 |
+| Rear camera (web) | — | 480×270 (from 1080p) | ✓ |
+| Weight | — | 1.4 kg (car only) | — |
+| Size (L×W×H) | — | 250×190×195 mm | 375×288×560 mm |
+| Wheelbase | — | 160 mm | 200 mm |
+| Ground clearance | — | 45 mm | 45 mm |
+| Top speed | — | 4 km/h | — |
+| Range | — | 12 km | — |
+| Max slope | — | 18° | — |
+| Water resistance | — | IP34 | — |
+| Payload | — | — | up to 4 kg |
+| Notes | Same V6 chassis family as MINI+ | Turns on the spot, 2 motors / 4WD | More stable 4G, accurate GPS positioning |
+
+### MINI+ (V6.2, double camera)
+
+<img src="assets/mini_plus_dimensions.png" alt="MINI+ dimensions" width="560">
+
+- **Chassis**: 1.4 kg (car only), 95 mm wheels, two motors with four-wheel drive, turns on the spot, IP34, 18° max slope, 12 km range per charge, top speed 4 km/h.
+- **Cameras**: front and rear, GC2093 sensor, FOV D148° / H126° / V67°, effective focal length 2.72 mm, distortion < 20%. Web streams are downscaled from 1920×1080 to 1024×576 (front) and 480×270 (rear).
+- **IMU**: MPU6050 — telemetry reports every 2 s with 100 accelerometer samples, 1 gyroscope sample and 1 magnetometer sample per report (these arrive in `/data` as `accels`, `gyros`, `mags`).
+- Hardware sources, firmware and 3D-print files: [earth-rover-mini repository](https://github.com/frodobots-org/earth-rover-mini) · [Shop](https://shop.frodobots.com/collections/earth-rovers/products/earth-rover-mini-plus)
+
+### ZERO (V5.2)
 
 <div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 20px;">
-  <img src="assets/v5.2.png" alt="Hardware Specifications" width="200">
+  <img src="assets/v5.2.png" alt="ZERO V5.2 dimensions" width="200">
   <img src="assets/axis.jpg" alt="Axis Camera" width="200">
 </div>
+
+- 375×288 mm footprint, 560 mm tall (580 mm to the top of the camera mast), 200 mm wheelbase, 45 mm ground clearance.
+- Front and rear cameras, carries up to 4 kg of payload, more stable 4G connectivity and accurate GPS positioning.
 
 For full details on the hardware specifications, please refer to the [Frodobots Hardware Specifications](https://docs.google.com/document/d/1Px-rNy0wQeG74mWcReiV4dEk5u4nfMPTVh-C4pXoieY).
 
@@ -98,6 +131,12 @@ This SDK is meant to control the bot and at the same time monitor its status. Th
 ### POST /control
 
 With this endpoint you can send linear and angular values to move the bot, and control the lamp. The linear and angular values are between -1 and 1. The lamp value is 0 (off) or 1 (on).
+
+> **Important — the rover executes its last command until a new one arrives.** A single `{"linear": 1}` keeps the bot driving indefinitely. Always stream commands continuously while moving (10 Hz is typical) and send `{"linear": 0, "angular": 0}` to stop.
+>
+> **Delivery semantics (v6.1)**: a `200` means the command was **dispatched** to the rover's messaging channel — it does not wait for the rover's acknowledgement, so the endpoint stays fast for control loops. Delivery health (messages dispatched/delivered/failed, last error) is visible in `GET /status` under `rtm`.
+>
+> **Dead-man watchdog (v6.1)**: the watchdog arms when a motion command is accepted (even if delivery is uncertain), then follows Agora's confirmed-delivery timestamp rather than raw incoming requests. If no command is confirmed within `CONTROL_WATCHDOG_S` seconds (default **3**), the SDK sends a stop and keeps retrying — rebuilding the browser/RTM session if needed — until the rover **confirms receipt**. Failed retry traffic therefore cannot suppress the deadline. This protects against controller crashes and command-path drops mid-drive; it cannot help if the **rover itself** loses connectivity (that requires a firmware-side failsafe). Streaming clients should set `CONTROL_WATCHDOG_S=0.5`–`1`; `0` disables it.
 
 ```bash
 curl --location 'http://localhost:8000/control' \
@@ -480,7 +519,7 @@ Successful Response (Code: 200)
 }
 ```
 
-When the last checkpoint is scanned, `mission_completed` is `true` and the ride ends: the backend disconnects the rover, so the video feed stops and further `/control` commands fail with "Rover unreachable". The SDK clears its session automatically — call `POST /start-mission` to begin a new ride.
+When the last checkpoint is scanned, the SDK first requires the rover to confirm a zero-motion command. Only then is the checkpoint reported and the ride allowed to end. If the stop cannot be confirmed within `SAFETY_STOP_CONFIRM_TIMEOUT_S` (default 12 seconds), the endpoint returns 503 without reporting the final checkpoint, while stop recovery continues. On success, `mission_completed` is `true`, the SDK clears its session automatically, and `POST /start-mission` begins a new ride.
 
 Unsuccessful Response (Code: 400)
 
@@ -612,6 +651,14 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.6.1:
+
+  - **Safety: dead-man control watchdog.** The rover keeps executing its last command until a new one arrives, so a broken command path after a motion command meant a runaway bot. The watchdog arms when motion is accepted and, once confirmed deliveries go stale for `CONTROL_WATCHDOG_S` (default 3s, `0` disables), delivers a stop and retries — rebuilding the RTM session if needed — until the rover confirms receipt. Failed incoming traffic cannot refresh the deadline.
+  - **Fixed RTM disconnect tracking**: the SDK listened for `ConnectionStateChange` but Agora emits `ConnectionStateChanged` — session drops were invisible
+  - **Non-blocking control dispatch**: `/control` returns as soon as the command is on the wire instead of blocking up to 4s on the rover's acknowledgement; delivery stats (including Agora's `hasPeerReceived`, previously discarded) are exposed in `GET /status` under `rtm`
+  - `/end-mission` and final-checkpoint completion require a confirmed stop before destroying the rover's command session
+  - Documented the command-persistence behavior and the recommended continuous-streaming pattern for `/control`
 
 - v.6.0:
 

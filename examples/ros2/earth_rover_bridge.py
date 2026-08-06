@@ -42,7 +42,9 @@ from std_msgs.msg import Float32
 
 CONTROL_RATE_HZ = 10.0
 CMD_VEL_TIMEOUT_S = 0.5  # no cmd_vel for this long -> send stop
-CONTROL_HTTP_TIMEOUT_S = 0.5
+# /control dispatches without waiting for the rover's acknowledgement, so
+# responses are fast; 1s leaves margin without stalling the 10 Hz loop.
+CONTROL_HTTP_TIMEOUT_S = 1.0
 
 
 class EarthRoverBridge(Node):
@@ -117,8 +119,9 @@ class EarthRoverBridge(Node):
             )
             response.raise_for_status()
             if quiet:
-                # Only a confirmed HTTP success counts as stopped. A failed
-                # stop is retried on every control tick until acknowledged.
+                # A successful HTTP response means the stop was dispatched.
+                # The SDK watchdog independently tracks peer confirmation and
+                # retries zero if this asynchronous delivery later fails.
                 with self._cmd_lock:
                     if (
                         self._last_cmd_at == last_cmd_at
