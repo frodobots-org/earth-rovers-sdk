@@ -84,8 +84,7 @@ def open_csv(path):
 
 
 def poll_v2(args, stats: Stats, writer):
-    """Fixed-rate polling with deadline pacing (a late request does not shift
-    the schedule, matching how a ROS timer fires)."""
+    """Fixed-rate polling with deadline pacing and missed-tick dropping."""
     endpoint = "/v2/front" if args.mode == "v2_front" else "/v2/screenshot"
     frame_key = "front_frame"
     url = args.sdk_url.rstrip("/") + endpoint
@@ -109,6 +108,10 @@ def poll_v2(args, stats: Stats, writer):
                     print(f"Image (SDK): {elapsed:.6f}", flush=True)
                 stats.record(elapsed, frame_timestamp)
             else:
+                # Error responses are still completed requests and must count
+                # toward latency percentiles; excluding them can hide the exact
+                # slow-failure spikes this probe is intended to detect.
+                stats.record(elapsed)
                 stats.record_error(status)
                 detail = response.text[:120].replace("\n", " ")
                 print(
@@ -118,6 +121,7 @@ def poll_v2(args, stats: Stats, writer):
                 )
         except requests.RequestException as exc:
             elapsed = time.monotonic() - started
+            stats.record(elapsed)
             stats.record_error(type(exc).__name__)
             print(f"Image (SDK): {elapsed:.6f}  [EXC] {exc}", flush=True)
         if writer:
@@ -128,7 +132,11 @@ def poll_v2(args, stats: Stats, writer):
         if sleep > 0:
             time.sleep(sleep)
         else:
-            deadline = time.monotonic()  # fell behind: reset, don't burst
+            # Fell behind: drop missed ticks and wait a full interval. Starting
+            # the next request immediately would be a one-request burst and can
+            # return the same fresh cached frame as the slow request.
+            deadline = time.monotonic() + interval
+            time.sleep(interval)
 
 
 def stream_feed(args, stats: Stats, writer):

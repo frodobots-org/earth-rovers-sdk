@@ -22,7 +22,7 @@ from browser_service import FEED_QUALITY, FORMAT, QUALITY, BrowserService
 from rtm_client import RtmClient
 from telemetry_hub import TelemetryHub
 from tts_service import generate_speech
-from video_feed import FrameBroadcaster
+from video_feed import FrameBroadcaster, FrameCaptureError
 
 load_dotenv()
 
@@ -133,9 +133,12 @@ async def get_camera_frame(
     """Return a shared fresh frame and its capture timestamp."""
     if FORMAT == "jpeg" and QUALITY == FEED_QUALITY:
         broadcaster = feed_broadcasters[view]
-        frame = await broadcaster.get_frame(
-            max_age=1 / 30, timeout=V2_FRAME_TIMEOUT_S, fps=30
-        )
+        try:
+            frame = await broadcaster.get_frame(
+                max_age=1 / 30, timeout=V2_FRAME_TIMEOUT_S, fps=30
+            )
+        except FrameCaptureError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if frame:
             return frame.base64_data, frame.captured_at
         if broadcaster.last_error:
@@ -144,7 +147,14 @@ async def get_camera_frame(
 
     # Preserve explicit png/webp v2 configurations. The default and fastest
     # path is JPEG and shares the feed broadcaster above.
-    packet = await browser_service.configured_frame(view)
+    try:
+        packet = await asyncio.wait_for(
+            browser_service.configured_frame(view), timeout=V2_FRAME_TIMEOUT_S
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"{view} camera capture timed out"
+        ) from exc
     if packet and packet.get("error"):
         raise HTTPException(status_code=503, detail=packet["error"])
     if not packet or not packet.get("data_url"):

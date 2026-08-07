@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import video_feed
-from video_feed import FrameBroadcaster
+from video_feed import FrameBroadcaster, FrameCaptureError
 
 
 JPEG_DATA_URL = "data:image/jpeg;base64," + base64.b64encode(
@@ -157,7 +157,7 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(broadcaster.loop_running)
         self.assertIsNone(broadcaster._task)
 
-    async def test_failing_capture_fails_fast_not_after_backoff(self):
+    async def test_failing_capture_notifies_snapshot_before_backoff(self):
         # The recovery backoff belongs to the background loop. A request is
         # bounded by its own timeout — never by backoff sleeps (which used
         # to stretch a poll to 2-5 s before returning empty).
@@ -167,15 +167,52 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         broadcaster = FrameBroadcaster(capture)
         try:
             started = time.monotonic()
-            frame = await broadcaster.get_frame(max_age=1 / 30, timeout=0.5)
+            with self.assertRaises(FrameCaptureError) as ctx:
+                await broadcaster.get_frame(max_age=1 / 30, timeout=0.5)
             elapsed = time.monotonic() - started
-            self.assertIsNone(frame)
-            self.assertLess(elapsed, 1.0)
+            self.assertLess(elapsed, 0.2)
             self.assertGreaterEqual(broadcaster.failures_total, 1)
+            self.assertEqual(str(ctx.exception), "camera frame is not available")
             self.assertEqual(
                 broadcaster.last_error, "camera frame is not available"
             )
         finally:
+            await broadcaster.close()
+
+    async def test_snapshot_during_recovery_does_not_join_backoff(self):
+        async def capture():
+            return None
+
+        broadcaster = FrameBroadcaster(capture)
+        try:
+            with self.assertRaises(FrameCaptureError):
+                await broadcaster.get_frame(max_age=1 / 30, timeout=1)
+
+            started = time.monotonic()
+            with self.assertRaises(FrameCaptureError):
+                await broadcaster.get_frame(max_age=1 / 30, timeout=1)
+            self.assertLess(time.monotonic() - started, 0.05)
+        finally:
+            await broadcaster.close()
+
+    async def test_feed_client_stays_subscribed_across_capture_failure(self):
+        calls = 0
+
+        async def capture():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return {"data_url": JPEG_DATA_URL, "timestamp": time.time()}
+
+        broadcaster = FrameBroadcaster(capture)
+        queue = await broadcaster.subscribe(30, cached_max_age=0)
+        try:
+            frame = await asyncio.wait_for(queue.get(), timeout=1)
+            self.assertEqual(frame.jpeg, b"\xff\xd8test-frame\xff\xd9")
+            self.assertEqual(broadcaster.failures_total, 1)
+        finally:
+            await broadcaster.unsubscribe(queue)
             await broadcaster.close()
 
     async def test_close_during_linger_stops_loop_promptly(self):

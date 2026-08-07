@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -5,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import main
+from video_feed import FrameCaptureError
 
 
 class ScreenshotPersistenceTest(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +46,12 @@ class StubBroadcaster:
         return None
 
 
+class FailingBroadcaster(StubBroadcaster):
+    async def get_frame(self, **kwargs):
+        self.get_frame_kwargs = kwargs
+        raise FrameCaptureError("renderer unavailable")
+
+
 class CameraFrameFailFastTest(unittest.IsolatedAsyncioTestCase):
     async def test_v2_uses_short_timeout_and_surfaces_capture_error(self):
         stub = StubBroadcaster(last_error="camera frame is not available")
@@ -70,6 +78,30 @@ class CameraFrameFailFastTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.exception.status_code, 404)
         finally:
             main.auth_response_data = {}
+
+    async def test_capture_failure_is_immediate_503(self):
+        stub = FailingBroadcaster()
+        with patch.dict(main.feed_broadcasters, {"front": stub}):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.get_camera_frame("front")
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.detail, "renderer unavailable")
+
+    async def test_nondefault_capture_path_is_bounded(self):
+        async def capture(_view):
+            await asyncio.sleep(1)
+
+        with (
+            patch.object(main, "FORMAT", "png"),
+            patch.object(main, "V2_FRAME_TIMEOUT_S", 0.05),
+            patch.object(main.browser_service, "configured_frame", capture),
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.get_camera_frame("front")
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.detail, "front camera capture timed out")
 
 
 if __name__ == "__main__":

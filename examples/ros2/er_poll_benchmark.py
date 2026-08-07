@@ -196,6 +196,10 @@ class ErPollBenchmark(Node):
                             f"No image data in response ({elapsed:.6f}s)"
                         )
                 else:
+                    # A failed HTTP response still consumed a polling tick.
+                    # Include it in latency percentiles so slow failures cannot
+                    # disappear from the benchmark summary.
+                    self.stats.record(elapsed)
                     self.stats.record_error(status)
                     self.get_logger().error(
                         f"No image data in response "
@@ -203,6 +207,7 @@ class ErPollBenchmark(Node):
                     )
             except requests.RequestException as exc:
                 elapsed = time.monotonic() - started
+                self.stats.record(elapsed)
                 self.stats.record_error(type(exc).__name__)
                 self.get_logger().error(f"Request failed ({elapsed:.6f}s): {exc}")
             self._write_csv(elapsed, status, frame_timestamp)
@@ -212,7 +217,11 @@ class ErPollBenchmark(Node):
             if wait > 0:
                 time.sleep(wait)
             else:
-                deadline = time.monotonic()  # fell behind: reset, don't burst
+                # Drop missed ticks. An immediate retry after a slow request can
+                # read that request's still-fresh cached frame and create a
+                # duplicate publication.
+                deadline = time.monotonic() + interval
+                time.sleep(interval)
 
     # ---------------------------------------------------------------- feed
 
@@ -269,7 +278,12 @@ class ErPollBenchmark(Node):
 
     def destroy_node(self):
         self._running = False
-        self.get_logger().info(f"[final] {self.stats.summary()}")
+        summary = f"[final] {self.stats.summary()}"
+        if rclpy.ok():
+            self.get_logger().info(summary)
+        else:
+            # SIGINT can invalidate rosout before destroy_node() runs.
+            print(summary, flush=True)
         if self._csv_handle:
             with self._csv_lock:
                 self._csv_handle.close()

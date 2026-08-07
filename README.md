@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v6.1
+# Earth Rovers SDK v6.2
 
 ## Requirements
 
@@ -677,6 +677,13 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.6.2:
+
+  - **Reliable `/v2` polling for ROS 2**: the shared camera capture stays warm between snapshot requests, so steady 10 Hz pollers no longer restart capture on every tick
+  - Capture failures return an immediate, actionable `503` while recovery backoff continues in the background; snapshot callers never wait inside that backoff
+  - `/v2` capture is bounded by `V2_FRAME_TIMEOUT_S` for every configured image format, and `/status` exposes per-camera capture health and failure counters
+  - Added plain-Python and ROS 2 Humble polling benchmarks with complete latency accounting (including failed requests), duplicate-frame detection, and missed-tick dropping
 
 - v.6.1:
 

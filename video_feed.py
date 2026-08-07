@@ -37,6 +37,15 @@ class Frame:
         return self.data_url.split(",", 1)[1]
 
 
+class FrameCaptureError(RuntimeError):
+    """A snapshot capture failed while its caller was waiting."""
+
+
+@dataclass(frozen=True)
+class _CaptureFailure:
+    message: str
+
+
 CaptureResult = Union[str, dict, None]
 
 
@@ -66,6 +75,7 @@ class FrameBroadcaster:
     def __init__(self, capture_fn: Callable[[], Awaitable[CaptureResult]]):
         self._capture_fn = capture_fn
         self._clients: dict[asyncio.Queue, int] = {}
+        self._failure_waiters: set[asyncio.Queue] = set()
         self._lock: Optional[asyncio.Lock] = None
         self._lock_loop = None
         self._task: Optional[asyncio.Task] = None
@@ -112,12 +122,18 @@ class FrameBroadcaster:
         self._linger_fps = max(self._linger_fps, fps)
 
     async def subscribe(
-        self, fps: int, *, cached_max_age: float = 1.0
+        self,
+        fps: int,
+        *,
+        cached_max_age: float = 1.0,
+        notify_capture_failure: bool = False,
     ) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         async with self._get_lock():
             self._note_demand(fps)
             self._clients[queue] = fps
+            if notify_capture_failure:
+                self._failure_waiters.add(queue)
             cached = self.latest_if_fresh(max_age=cached_max_age)
             if cached:
                 queue.put_nowait(cached)
@@ -129,6 +145,7 @@ class FrameBroadcaster:
         task = None
         async with self._get_lock():
             self._clients.pop(queue, None)
+            self._failure_waiters.discard(queue)
             # Within the linger window the loop stays warm for the next
             # subscriber or poller; it shuts itself down once demand expires.
             if (
@@ -150,9 +167,20 @@ class FrameBroadcaster:
         cached = self.latest_if_fresh(max_age)
         if cached:
             return cached
-        queue = await self.subscribe(fps, cached_max_age=max_age)
+        # A running loop with an error is sleeping/retrying in the background.
+        # Snapshot callers should skip this tick instead of waiting inside that
+        # backoff. If the loop is cold, subscribe below so a new capture attempt
+        # can start even when last_error came from an earlier loop generation.
+        if self.loop_running and self.last_error:
+            raise FrameCaptureError(self.last_error)
+        queue = await self.subscribe(
+            fps, cached_max_age=max_age, notify_capture_failure=True
+        )
         try:
-            return await asyncio.wait_for(queue.get(), timeout=timeout)
+            result = await asyncio.wait_for(queue.get(), timeout=timeout)
+            if isinstance(result, _CaptureFailure):
+                raise FrameCaptureError(result.message)
+            return result
         except asyncio.TimeoutError:
             return None
         finally:
@@ -163,6 +191,7 @@ class FrameBroadcaster:
         async with self._get_lock():
             clients = list(self._clients)
             self._clients.clear()
+            self._failure_waiters.clear()
             self._latest = None
             self._demand_until = 0.0
             self._linger_fps = 0
@@ -246,6 +275,13 @@ class FrameBroadcaster:
                 failures += 1
                 self.failures_total += 1
                 self.last_error = str(exc).split("\n", 1)[0]
+                # Snapshot callers should skip this tick immediately. Keep
+                # streaming clients subscribed while the loop performs its
+                # recovery backoff in the background.
+                failure = _CaptureFailure(self.last_error)
+                for queue in list(self._failure_waiters):
+                    with contextlib.suppress(asyncio.QueueFull):
+                        queue.put_nowait(failure)
                 if failures in (1, 5) or failures % 30 == 0:
                     logger.warning("Feed capture failing (%s): %s", failures, exc)
 
