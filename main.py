@@ -75,6 +75,12 @@ FRODOBOTS_API_URL = os.getenv(
     "FRODOBOTS_API_URL", "https://frodobots-web-api.onrender.com/api/v1"
 )
 
+# How long /v2/* waits for a fresh frame before failing. Kept short on
+# purpose: with the warm capture loop a healthy camera answers in tens of
+# milliseconds, so this budget only matters as "wait for recovery" during a
+# transient capture blip — better a fast 404/503 than a multi-second stall.
+V2_FRAME_TIMEOUT_S = float(os.getenv("V2_FRAME_TIMEOUT_S", "2"))
+
 
 # In-memory storage for the response
 auth_response_data = {}
@@ -127,7 +133,9 @@ async def get_camera_frame(
     """Return a shared fresh frame and its capture timestamp."""
     if FORMAT == "jpeg" and QUALITY == FEED_QUALITY:
         broadcaster = feed_broadcasters[view]
-        frame = await broadcaster.get_frame(max_age=1 / 30, timeout=5, fps=30)
+        frame = await broadcaster.get_frame(
+            max_age=1 / 30, timeout=V2_FRAME_TIMEOUT_S, fps=30
+        )
         if frame:
             return frame.base64_data, frame.captured_at
         if broadcaster.last_error:
@@ -252,6 +260,16 @@ async def ws_data(websocket: WebSocket):
 
 @app.get("/status")
 async def get_status():
+    video = {
+        view: {
+            "loop_running": broadcaster.loop_running,
+            "latest_frame_age_s": broadcaster.latest_age_seconds,
+            "captures_total": broadcaster.captures_total,
+            "failures_total": broadcaster.failures_total,
+            "last_error": broadcaster.last_error,
+        }
+        for view, broadcaster in feed_broadcasters.items()
+    }
     return JSONResponse(
         content={
             "browser_ready": browser_service.is_ready,
@@ -259,6 +277,7 @@ async def get_status():
             "mission_started": bool(auth_response_data)
             or not os.getenv("MISSION_SLUG"),
             "rtm": await browser_service.rtm_health(),
+            "video": video,
             **telemetry_hub.status(),
         }
     )

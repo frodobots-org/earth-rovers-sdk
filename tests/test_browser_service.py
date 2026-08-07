@@ -70,6 +70,49 @@ class BrowserRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.is_ready)
 
 
+class RearCameraCacheTest(unittest.IsolatedAsyncioTestCase):
+    # /v2/screenshot consults has_rear_camera() on every poll; the answer
+    # must come from cache, not a page.evaluate round trip per request.
+
+    def _service(self, result):
+        service = BrowserService()
+        service._page = FakePage()
+        service._browser = FakeBrowser()
+        service._ready = True
+        service.run_calls = 0
+
+        async def run(fn, **kwargs):
+            service.run_calls += 1
+            return result
+
+        service._run = run
+        return service
+
+    async def test_positive_result_is_cached_until_teardown(self):
+        service = self._service(True)
+        self.assertTrue(await service.has_rear_camera())
+        self.assertTrue(await service.has_rear_camera())
+        self.assertEqual(service.run_calls, 1)
+
+        await service._teardown()  # relaunch must re-detect capability
+        self.assertTrue(await service.has_rear_camera())
+        self.assertEqual(service.run_calls, 2)
+
+    async def test_negative_result_expires_quickly(self):
+        import time
+
+        service = self._service(False)
+        self.assertFalse(await service.has_rear_camera())
+        self.assertFalse(await service.has_rear_camera())
+        self.assertEqual(service.run_calls, 1)
+
+        # The rear track can subscribe late after the Agora join, so a
+        # negative answer only holds for a short TTL.
+        service._rear_camera = (False, time.monotonic() - 1)
+        self.assertFalse(await service.has_rear_camera())
+        self.assertEqual(service.run_calls, 2)
+
+
 class LockLoopBindingTest(unittest.IsolatedAsyncioTestCase):
     async def test_lock_is_rebound_when_the_event_loop_changes(self):
         # The service is constructed at import time, before hypercorn's loop

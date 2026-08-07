@@ -34,5 +34,43 @@ class ScreenshotPersistenceTest(unittest.IsolatedAsyncioTestCase):
                 main.auth_response_data = {}
 
 
+class StubBroadcaster:
+    def __init__(self, last_error=None):
+        self.last_error = last_error
+        self.get_frame_kwargs = None
+
+    async def get_frame(self, **kwargs):
+        self.get_frame_kwargs = kwargs
+        return None
+
+
+class CameraFrameFailFastTest(unittest.IsolatedAsyncioTestCase):
+    async def test_v2_uses_short_timeout_and_surfaces_capture_error(self):
+        stub = StubBroadcaster(last_error="camera frame is not available")
+        with patch.dict(main.feed_broadcasters, {"front": stub}):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.get_camera_frame("front")
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.detail, "camera frame is not available")
+        # Fail fast: a poll is bounded by the short v2 budget, not the old 5s.
+        self.assertEqual(
+            stub.get_frame_kwargs["timeout"], main.V2_FRAME_TIMEOUT_S
+        )
+
+    async def test_front_endpoint_404s_when_frame_missing_without_error(self):
+        main.auth_response_data = {"BOT_UID": "bot"}
+        try:
+            with (
+                patch.dict(os.environ, {"MISSION_SLUG": ""}),
+                patch.dict(main.feed_broadcasters, {"front": StubBroadcaster()}),
+            ):
+                with self.assertRaises(main.HTTPException) as ctx:
+                    await main.get_front_frame()
+            self.assertEqual(ctx.exception.status_code, 404)
+        finally:
+            main.auth_response_data = {}
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import base64
 import binascii
 import contextlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Union
@@ -13,6 +14,13 @@ import numpy as np
 logger = logging.getLogger("video_feed")
 
 JPEG_QUALITY = 85
+
+# How long the capture loop keeps running after the last subscriber leaves.
+# Snapshot pollers (ROS querying /v2/* at 10 Hz) subscribe for a single frame
+# at a time; without a linger every poll would pay loop startup — and any
+# transient capture failure would run its recovery backoff inside the
+# request — instead of hitting a warm latest-frame cache.
+IDLE_LINGER_S = float(os.getenv("FEED_IDLE_LINGER_S", "10"))
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,11 @@ class FrameBroadcaster:
         self._lock_loop = None
         self._task: Optional[asyncio.Task] = None
         self._latest: Optional[Frame] = None
+        self._demand_until = 0.0
+        self._linger_fps = 0
         self.last_error: Optional[str] = None
+        self.captures_total = 0
+        self.failures_total = 0
 
     def _get_lock(self) -> asyncio.Lock:
         # Broadcasters are constructed at import time, before the serving
@@ -84,11 +96,27 @@ class FrameBroadcaster:
             return frame
         return None
 
+    @property
+    def loop_running(self) -> bool:
+        return bool(self._task and not self._task.done())
+
+    @property
+    def latest_age_seconds(self) -> Optional[float]:
+        frame = self._latest
+        if frame is None:
+            return None
+        return time.monotonic() - frame.captured_monotonic
+
+    def _note_demand(self, fps: int):
+        self._demand_until = time.monotonic() + IDLE_LINGER_S
+        self._linger_fps = max(self._linger_fps, fps)
+
     async def subscribe(
         self, fps: int, *, cached_max_age: float = 1.0
     ) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         async with self._get_lock():
+            self._note_demand(fps)
             self._clients[queue] = fps
             cached = self.latest_if_fresh(max_age=cached_max_age)
             if cached:
@@ -101,7 +129,13 @@ class FrameBroadcaster:
         task = None
         async with self._get_lock():
             self._clients.pop(queue, None)
-            if not self._clients and self._task:
+            # Within the linger window the loop stays warm for the next
+            # subscriber or poller; it shuts itself down once demand expires.
+            if (
+                not self._clients
+                and self._task
+                and time.monotonic() >= self._demand_until
+            ):
                 task = self._task
                 self._task = None
                 task.cancel()
@@ -112,6 +146,7 @@ class FrameBroadcaster:
     async def get_frame(
         self, *, max_age: float = 0.1, timeout: float = 5.0, fps: int = 30
     ) -> Optional[Frame]:
+        self._note_demand(fps)
         cached = self.latest_if_fresh(max_age)
         if cached:
             return cached
@@ -129,6 +164,8 @@ class FrameBroadcaster:
             clients = list(self._clients)
             self._clients.clear()
             self._latest = None
+            self._demand_until = 0.0
+            self._linger_fps = 0
             if self._task:
                 task = self._task
                 self._task = None
@@ -146,7 +183,11 @@ class FrameBroadcaster:
                 await task
 
     def _capture_fps(self) -> int:
-        return max(self._clients.values(), default=1)
+        # A snapshot poller subscribes only for one frame at a time, so its
+        # rate lives in _linger_fps rather than _clients: keep capturing at
+        # the demanded cadence for the whole linger window.
+        linger = self._linger_fps if time.monotonic() < self._demand_until else 0
+        return max(max(self._clients.values(), default=1), linger)
 
     async def _build_frame(self, result: CaptureResult) -> Optional[Frame]:
         if isinstance(result, dict):
@@ -175,6 +216,15 @@ class FrameBroadcaster:
     async def _capture_loop(self):
         failures = 0
         while True:
+            async with self._get_lock():
+                # Self-shutdown once nothing has wanted frames for a while.
+                # Done under the same lock subscribe() uses to restart the
+                # task, so a subscriber can never race a dying loop.
+                if not self._clients and time.monotonic() >= self._demand_until:
+                    if self._task is asyncio.current_task():
+                        self._task = None
+                        self._linger_fps = 0
+                    return
             started = time.monotonic()
             try:
                 frame = await self._build_frame(await self._capture_fn())
@@ -182,6 +232,7 @@ class FrameBroadcaster:
                     raise RuntimeError("camera frame is not available")
                 failures = 0
                 self.last_error = None
+                self.captures_total += 1
                 self._latest = frame
                 for queue in list(self._clients):
                     if queue.full():
@@ -193,6 +244,7 @@ class FrameBroadcaster:
                 raise
             except Exception as exc:
                 failures += 1
+                self.failures_total += 1
                 self.last_error = str(exc).split("\n", 1)[0]
                 if failures in (1, 5) or failures % 30 == 0:
                     logger.warning("Feed capture failing (%s): %s", failures, exc)
