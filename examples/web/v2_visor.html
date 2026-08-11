@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Earth Rovers /v2 Visor</title>
+    <style>
+      :root {
+        --surface: #0b1220;
+        --panel: #111a2c;
+        --panel-edge: #1e2a42;
+        --ink: #e8edf6;
+        --ink-2: #9fb0c9;
+        --ink-3: #64748b;
+        --accent: #7aa7ff;
+        --good: #34d399;
+        --warn: #fbbf24;
+        --bad: #f87171;
+        --drop: #334155;
+        font-size: 16px;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      body {
+        background: var(--surface);
+        color: var(--ink);
+        font: 400 1rem/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+        min-height: 100vh;
+        padding: 20px;
+      }
+      header {
+        display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+      h1 { font-size: 1.15rem; font-weight: 600; letter-spacing: 0.01em; }
+      .sub { color: var(--ink-2); font-size: 0.85rem; }
+      .controls {
+        display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .controls input, .controls select {
+        background: var(--panel); color: var(--ink);
+        border: 1px solid var(--panel-edge); border-radius: 8px;
+        padding: 7px 10px; font-size: 0.85rem;
+      }
+      .controls input#url { width: 230px; }
+      .controls input#rate { width: 64px; }
+      button {
+        background: var(--accent); color: #0a1020; border: 0;
+        border-radius: 8px; padding: 8px 18px; font-size: 0.9rem;
+        font-weight: 600; cursor: pointer;
+      }
+      button.stop { background: var(--bad); }
+      .layout { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+      .video-panel {
+        position: relative; background: var(--panel);
+        border: 1px solid var(--panel-edge); border-radius: 12px;
+        overflow: hidden; flex: 1 1 560px; max-width: 860px;
+      }
+      .video-panel img#frame { display: block; width: 100%; min-height: 320px; }
+      .video-panel .badge {
+        position: absolute; top: 10px; left: 10px;
+        background: rgba(10, 16, 32, 0.75); border-radius: 8px;
+        padding: 4px 10px; font-size: 0.8rem; color: var(--ink-2);
+        display: flex; gap: 8px; align-items: center;
+      }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--drop); }
+      .dot.live { background: var(--good); }
+      .dot.err { background: var(--bad); }
+      img#rear {
+        position: absolute; right: 10px; bottom: 10px; width: 24%;
+        border: 1px solid var(--panel-edge); border-radius: 8px; display: none;
+      }
+      .side { flex: 1 1 340px; min-width: 320px; display: grid; gap: 12px; }
+      .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+      .tile {
+        background: var(--panel); border: 1px solid var(--panel-edge);
+        border-radius: 12px; padding: 10px 12px;
+      }
+      .tile .label {
+        font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--ink-3);
+      }
+      .tile .value {
+        font-size: 1.45rem; font-weight: 650; font-variant-numeric: tabular-nums;
+      }
+      .tile .value small { font-size: 0.8rem; font-weight: 500; color: var(--ink-2); }
+      .tile .value.good { color: var(--good); }
+      .tile .value.bad { color: var(--bad); }
+      .panel {
+        background: var(--panel); border: 1px solid var(--panel-edge);
+        border-radius: 12px; padding: 12px;
+      }
+      .panel h2 {
+        font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--ink-3); font-weight: 600; margin-bottom: 8px;
+        display: flex; justify-content: space-between;
+      }
+      .panel h2 .legend { color: var(--ink-2); text-transform: none; letter-spacing: 0; }
+      .legend b { font-weight: 600; }
+      .legend .sw {
+        display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+        margin: 0 4px 0 10px; vertical-align: baseline;
+      }
+      #ticks { display: flex; flex-wrap: wrap; gap: 3px; }
+      #ticks span {
+        width: 11px; height: 11px; border-radius: 3px; background: var(--drop);
+      }
+      #spark { width: 100%; height: 90px; display: block; cursor: crosshair; }
+      #tip {
+        position: fixed; pointer-events: none; display: none;
+        background: #1a2740; border: 1px solid var(--panel-edge);
+        border-radius: 7px; padding: 5px 9px; font-size: 0.78rem;
+        color: var(--ink); z-index: 10; font-variant-numeric: tabular-nums;
+      }
+      .drive {
+        display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+        margin-top: 12px;
+      }
+      .pad {
+        display: grid; grid-template-columns: repeat(3, 46px);
+        grid-template-rows: repeat(2, 40px); gap: 5px;
+      }
+      .pad button {
+        background: var(--panel); color: var(--ink);
+        border: 1px solid var(--panel-edge); border-radius: 9px;
+        font-size: 1rem; font-weight: 600; padding: 0; cursor: pointer;
+        user-select: none; -webkit-user-select: none; touch-action: none;
+      }
+      .pad button:active, .pad button.on {
+        background: var(--accent); color: #0a1020; border-color: var(--accent);
+      }
+      .pad #fwd { grid-column: 2; }
+      .pad #left { grid-column: 1; grid-row: 2; }
+      .pad #back { grid-column: 2; grid-row: 2; }
+      .pad #right { grid-column: 3; grid-row: 2; }
+      button#estop {
+        background: var(--bad); color: #0a1020; border-radius: 9px;
+        height: 40px; padding: 0 18px; font-weight: 700;
+      }
+      .drive .speed { display: flex; align-items: center; gap: 8px; }
+      .drive input[type="range"] { width: 120px; accent-color: var(--accent); }
+      .drive .status { font-size: 0.8rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+      .drive .keys { font-size: 0.75rem; color: var(--ink-3); }
+      kbd {
+        background: var(--panel); border: 1px solid var(--panel-edge);
+        border-radius: 4px; padding: 1px 5px; font-size: 0.72rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Earth Rovers /v2 Visor</h1>
+      <span class="sub">fixed-rate polling probe — every square is one request</span>
+    </header>
+
+    <div class="controls">
+      <input id="url" value="http://localhost:8000" title="SDK base URL" />
+      <select id="endpoint">
+        <option value="/v2/front" selected>/v2/front</option>
+        <option value="/v2/screenshot">/v2/screenshot</option>
+      </select>
+      <input id="rate" type="number" value="10" min="1" max="30" title="Poll rate (Hz)" />
+      <span class="sub">Hz</span>
+      <button id="go">Start</button>
+    </div>
+
+    <div class="layout">
+      <div class="video-panel">
+        <img id="frame" alt="live front camera frame" />
+        <div class="badge"><span class="dot" id="dot"></span><span id="badge-text">idle</span></div>
+        <img id="rear" alt="rear camera frame" />
+      </div>
+
+      <div class="drive" id="drive" style="flex-basis: 100%; order: 3;">
+        <div class="pad">
+          <button id="fwd" title="forward (W / ↑)">▲</button>
+          <button id="left" title="turn left (A / ←)">◀</button>
+          <button id="back" title="backward (S / ↓)">▼</button>
+          <button id="right" title="turn right (D / →)">▶</button>
+        </div>
+        <button id="estop" title="Space">STOP</button>
+        <div class="speed">
+          <span class="sub">speed</span>
+          <input id="speed" type="range" min="0.1" max="1" step="0.1" value="0.5" />
+          <span class="sub" id="speed-val">0.5</span>
+        </div>
+        <div class="status" id="ctrl-status">controls idle</div>
+        <div class="keys">drive with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows — hold to move, release to stop</div>
+      </div>
+
+      <div class="side">
+        <div class="tiles">
+          <div class="tile"><div class="label">Achieved rate</div>
+            <div class="value" id="t-hz">–<small> Hz</small></div></div>
+          <div class="tile"><div class="label">Last request</div>
+            <div class="value" id="t-last">–<small> ms</small></div></div>
+          <div class="tile"><div class="label">Frame age</div>
+            <div class="value" id="t-age">–<small> ms</small></div></div>
+          <div class="tile"><div class="label">p50 / p99</div>
+            <div class="value" id="t-pct">–</div></div>
+          <div class="tile"><div class="label">Max</div>
+            <div class="value" id="t-max">–<small> ms</small></div></div>
+          <div class="tile"><div class="label">Frames</div>
+            <div class="value good" id="t-n">0</div></div>
+          <div class="tile"><div class="label">Errors</div>
+            <div class="value" id="t-err">0</div></div>
+          <div class="tile"><div class="label">Duplicates</div>
+            <div class="value" id="t-dup">0</div></div>
+          <div class="tile"><div class="label">Uptime</div>
+            <div class="value" id="t-up">0<small> s</small></div></div>
+        </div>
+
+        <div class="panel">
+          <h2>Last 120 requests
+            <span class="legend"><span class="sw" style="background:var(--good)"></span>ok
+              <span class="sw" style="background:var(--warn)"></span>&gt;250 ms
+              <span class="sw" style="background:var(--bad)"></span>error</span>
+          </h2>
+          <div id="ticks"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Request latency — last 300 <span class="legend" id="spark-now"></span></h2>
+          <svg id="spark" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+    </div>
+    <div id="tip"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const SLOW_MS = 250, TICKS = 120, SPARK = 300;
+
+      let running = false;
+      let samples = [], history = [], lastTs = null, startedAt = 0;
+      let frames = 0, errors = 0, dups = 0, recent = [];
+
+      const pct = (arr, f) => {
+        if (!arr.length) return null;
+        const s = [...arr].sort((a, b) => a - b);
+        return s[Math.min(s.length - 1, Math.max(0, Math.round(f * (s.length - 1))))];
+      };
+      const fmt = (v) => (v == null ? "–" : v < 100 ? v.toFixed(1) : Math.round(v));
+
+      function pushTick(kind) {
+        const strip = $("ticks");
+        const cell = document.createElement("span");
+        cell.style.background =
+          kind === "ok" ? "var(--good)" : kind === "slow" ? "var(--warn)" : "var(--bad)";
+        cell.title = kind;
+        strip.appendChild(cell);
+        while (strip.children.length > TICKS) strip.removeChild(strip.firstChild);
+      }
+
+      function renderStats() {
+        const now = performance.now();
+        recent = recent.filter((t) => now - t < 5000);
+        $("t-hz").innerHTML = (recent.length / 5).toFixed(1) + "<small> Hz</small>";
+        $("t-pct").textContent = fmt(pct(samples, 0.5)) + " / " + fmt(pct(samples, 0.99));
+        $("t-max").innerHTML = fmt(pct(samples, 1)) + "<small> ms</small>";
+        $("t-n").textContent = frames;
+        $("t-err").textContent = errors;
+        $("t-err").className = "value" + (errors ? " bad" : "");
+        $("t-dup").textContent = dups;
+        $("t-dup").className = "value" + (dups ? " bad" : "");
+        $("t-up").innerHTML = Math.round((now - startedAt) / 1000) + "<small> s</small>";
+        drawSpark();
+      }
+
+      function drawSpark() {
+        const svg = $("spark");
+        const w = svg.clientWidth, h = svg.clientHeight;
+        svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+        if (history.length < 2) { svg.innerHTML = ""; return; }
+        const max = Math.max(60, ...history.map((d) => d.ms));
+        const x = (i) => (i / (SPARK - 1)) * (w - 2) + 1;
+        const y = (v) => h - 4 - (v / max) * (h - 12);
+        const start = SPARK - history.length;
+        const line = history
+          .map((d, i) => `${i ? "L" : "M"}${x(start + i).toFixed(1)},${y(d.ms).toFixed(1)}`)
+          .join("");
+        const grid = y(SLOW_MS);
+        svg.innerHTML =
+          (SLOW_MS < max
+            ? `<line x1="0" x2="${w}" y1="${grid}" y2="${grid}" stroke="var(--panel-edge)" stroke-dasharray="3 4"/>
+               <text x="${w - 4}" y="${grid - 4}" fill="var(--ink-3)" font-size="10" text-anchor="end">250 ms</text>`
+            : "") +
+          `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>` +
+          history.filter((d) => d.err).map((d, _, __) => {
+            const i = history.indexOf(d);
+            return `<circle cx="${x(start + i)}" cy="${y(d.ms)}" r="3.5" fill="var(--bad)" stroke="var(--surface)" stroke-width="2"/>`;
+          }).join("");
+        $("spark-now").textContent = "last " + fmt(history[history.length - 1].ms) + " ms";
+      }
+
+      $("spark").addEventListener("mousemove", (ev) => {
+        if (!history.length) return;
+        const rect = ev.currentTarget.getBoundingClientRect();
+        const frac = (ev.clientX - rect.left) / rect.width;
+        const idx = Math.round(frac * (SPARK - 1)) - (SPARK - history.length);
+        const d = history[Math.max(0, Math.min(history.length - 1, idx))];
+        const tip = $("tip");
+        tip.style.display = "block";
+        tip.style.left = ev.clientX + 12 + "px";
+        tip.style.top = ev.clientY - 10 + "px";
+        tip.textContent = (d.err ? "error — " : "") + d.ms.toFixed(1) + " ms";
+      });
+      $("spark").addEventListener("mouseleave", () => ($("tip").style.display = "none"));
+
+      function record(ms, ok, ts, slow) {
+        if (ok) { samples.push(ms); if (samples.length > 3600) samples.shift(); }
+        history.push({ ms, err: !ok });
+        if (history.length > SPARK) history.shift();
+        pushTick(ok ? (slow ? "slow" : "ok") : "err");
+        $("t-last").innerHTML = fmt(ms) + "<small> ms</small>";
+        $("t-last").className = "value" + (!ok ? " bad" : slow ? "" : " good");
+      }
+
+      async function poll(base, endpoint) {
+        const started = performance.now();
+        try {
+          const res = await fetch(base + endpoint, { cache: "no-store" });
+          if (!running) return; // stopped while this poll was in flight
+          const ms = performance.now() - started;
+          if (!res.ok) {
+            errors++;
+            record(ms, false);
+            $("dot").className = "dot err";
+            $("badge-text").textContent = `HTTP ${res.status} — skipped tick (fail-fast)`;
+            return;
+          }
+          const body = await res.json();
+          const b64 = body.front_frame;
+          if (!b64) { errors++; record(ms, false); return; }
+          if (body.timestamp === lastTs) dups++;
+          lastTs = body.timestamp;
+          frames++;
+          recent.push(performance.now());
+          $("frame").src = "data:image/jpeg;base64," + b64;
+          if (body.rear_frame) {
+            $("rear").style.display = "block";
+            $("rear").src = "data:image/jpeg;base64," + body.rear_frame;
+          }
+          const age = Date.now() / 1000 - body.timestamp;
+          $("t-age").innerHTML = fmt(age * 1000) + "<small> ms</small>";
+          record(ms, true, body.timestamp, ms > SLOW_MS);
+          $("dot").className = "dot live";
+          $("badge-text").textContent = "live — " + new Date(body.timestamp * 1000).toLocaleTimeString();
+        } catch (e) {
+          errors++;
+          record(performance.now() - started, false);
+          $("dot").className = "dot err";
+          $("badge-text").textContent = "unreachable: " + e.message;
+        }
+      }
+
+      // A Web Worker drives the tick: window timers are throttled to 1 Hz in
+      // background/occluded tabs, which would silently drop the poll rate.
+      const ticker = new Worker(
+        URL.createObjectURL(
+          new Blob(
+            ["let t=null;onmessage=(e)=>{clearInterval(t);if(e.data>0)t=setInterval(()=>postMessage(0),e.data);};"],
+            { type: "text/javascript" }
+          )
+        )
+      );
+      let busy = false;
+      ticker.onmessage = async () => {
+        if (!running || busy) return; // a poll still in flight: drop this tick
+        busy = true;
+        try {
+          await poll($("url").value.replace(/\/+$/, ""), $("endpoint").value);
+          renderStats();
+        } finally {
+          busy = false;
+        }
+      };
+
+      function loop() {
+        ticker.postMessage(1000 / Number($("rate").value || 10));
+      }
+
+      // ---- drive controls: latest-wins at 10 Hz, stop on release ----------
+      // Same contract as the ROS bridge: while input is active the newest
+      // command is POSTed to /control at a fixed rate (keeps the SDK's
+      // dead-man watchdog fed); releasing everything sends an explicit stop.
+      const CTRL_HZ = 10;
+      const held = new Set();
+      let stopSent = true, ctrlErrors = 0;
+
+      const ctrlTicker = new Worker(
+        URL.createObjectURL(
+          new Blob(
+            ["let t=null;onmessage=(e)=>{clearInterval(t);if(e.data>0)t=setInterval(()=>postMessage(0),e.data);};"],
+            { type: "text/javascript" }
+          )
+        )
+      );
+      ctrlTicker.postMessage(1000 / CTRL_HZ);
+
+      function currentCommand() {
+        const speed = Number($("speed").value);
+        const linear = ((held.has("fwd") ? 1 : 0) - (held.has("back") ? 1 : 0)) * speed;
+        const angular = ((held.has("left") ? 1 : 0) - (held.has("right") ? 1 : 0)) * speed;
+        return { linear: Number(linear.toFixed(2)), angular: Number(angular.toFixed(2)) };
+      }
+
+      let ctrlBusy = false;
+      async function sendControl(command) {
+        if (ctrlBusy) return;
+        ctrlBusy = true;
+        const started = performance.now();
+        try {
+          const res = await fetch($("url").value.replace(/\/+$/, "") + "/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command }),
+          });
+          const ms = performance.now() - started;
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          // Only a *delivered* zero counts as stopped; a dropped/failed stop
+          // keeps stopSent false so the ticker retries it until it lands.
+          stopSent = !(command.linear || command.angular);
+          $("ctrl-status").textContent =
+            (command.linear || command.angular
+              ? `driving  lin ${command.linear}  ang ${command.angular}`
+              : "stopped") + `  —  /control ${ms.toFixed(0)} ms`;
+        } catch (e) {
+          ctrlErrors++;
+          $("ctrl-status").textContent = `/control failed (${ctrlErrors}): ${e.message}`;
+        } finally {
+          ctrlBusy = false;
+        }
+      }
+
+      ctrlTicker.onmessage = () => {
+        const cmd = currentCommand();
+        if (cmd.linear || cmd.angular) sendControl(cmd);
+        else if (!stopSent) sendControl({ linear: 0, angular: 0 });
+      };
+
+      function setHeld(dir, on) {
+        if (on) held.add(dir); else held.delete(dir);
+        $(dir).classList.toggle("on", on);
+        sendControl(currentCommand());
+      }
+
+      for (const dir of ["fwd", "back", "left", "right"]) {
+        const el = $(dir);
+        el.addEventListener("pointerdown", (e) => { e.preventDefault(); setHeld(dir, true); });
+        for (const ev of ["pointerup", "pointerleave", "pointercancel"])
+          el.addEventListener(ev, () => setHeld(dir, false));
+      }
+      $("estop").addEventListener("click", () => {
+        held.clear();
+        for (const d of ["fwd", "back", "left", "right"]) $(d).classList.remove("on");
+        sendControl({ linear: 0, angular: 0 });
+      });
+      $("speed").addEventListener("input", () => ($("speed-val").textContent = $("speed").value));
+
+      const KEYMAP = {
+        KeyW: "fwd", ArrowUp: "fwd",
+        KeyS: "back", ArrowDown: "back",
+        KeyA: "left", ArrowLeft: "left",
+        KeyD: "right", ArrowRight: "right",
+      };
+      window.addEventListener("keydown", (e) => {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+        if (e.code === "Space") { e.preventDefault(); $("estop").click(); return; }
+        const dir = KEYMAP[e.code];
+        if (!dir || e.repeat) return;
+        e.preventDefault();
+        setHeld(dir, true);
+      });
+      window.addEventListener("keyup", (e) => {
+        const dir = KEYMAP[e.code];
+        if (!dir) return;
+        setHeld(dir, false);
+      });
+      // Never leave the last motion command active if the page goes away.
+      window.addEventListener("pagehide", () => {
+        navigator.sendBeacon(
+          $("url").value.replace(/\/+$/, "") + "/control",
+          new Blob([JSON.stringify({ command: { linear: 0, angular: 0 } })], {
+            type: "application/json",
+          })
+        );
+      });
+
+      $("go").addEventListener("click", () => {
+        running = !running;
+        $("go").textContent = running ? "Stop" : "Start";
+        $("go").className = running ? "stop" : "";
+        if (running) {
+          samples = []; history = []; recent = [];
+          frames = errors = dups = 0; lastTs = null;
+          startedAt = performance.now();
+          $("ticks").innerHTML = "";
+          loop();
+        } else {
+          ticker.postMessage(0);
+          $("dot").className = "dot";
+          $("badge-text").textContent = "stopped";
+        }
+      });
+    </script>
+  </body>
+</html>
