@@ -36,6 +36,22 @@ Requires a ROS2 distro (Humble or newer recommended) with `rclpy` and
 pip install requests websocket-client opencv-python
 ```
 
+### No ROS on your machine? (macOS / Windows)
+
+Native ROS2 isn't practical outside Linux — use the provided Docker image
+instead. The SDK server stays on the host; the container reaches it at
+`host.docker.internal`:
+
+```bash
+docker build -t er-ros2 examples/ros2
+docker run -it --rm -v "$PWD/examples/ros2:/ws" er-ros2 \
+  python3 /ws/earth_rover_bridge.py --ros-args \
+    -p sdk_url:=http://host.docker.internal:8000
+```
+
+(Don't use `--network host` on macOS/Windows — Docker runs in a VM there, so
+host networking doesn't reach the host's `localhost`.)
+
 ## Run
 
 1. Start the SDK (and the mission, if you use one):
@@ -71,3 +87,42 @@ cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15")
 while True:
     ok, frame = cap.read()
 ```
+
+## Polling `/v2` from ROS — known-good pattern
+
+Prefer `/feed` (above) for continuous video: frames are pushed as they're
+captured, with no per-frame HTTP overhead. If your pipeline needs
+request/response polling instead, `/v2/front` at a steady rate is supported —
+the SDK keeps the capture loop warm between polls — as long as the client
+follows three rules:
+
+1. **Reuse one `requests.Session()`** (connection reuse; no TCP+TLS handshake
+   per frame).
+2. **Pace with a deadline, not `sleep(interval)`**, so a slow request doesn't
+   shift the schedule.
+3. **Treat 404/503 as "skip this tick"**: during a transient camera blip the
+   SDK fails fast (within `V2_FRAME_TIMEOUT_S`, default 2 s) rather than
+   stalling; the next polls succeed once capture recovers.
+
+`er_poll_benchmark.py` in this directory implements exactly that and doubles
+as a diagnostic: it logs each request's wall time (`Image (SDK): <seconds>`),
+publishes the frames as `sensor_msgs/CompressedImage`, and prints rolling
+p50/p90/p99/max latency summaries with error counts:
+
+```bash
+# poll /v2/front at 10 Hz (inside the Docker container: use host.docker.internal)
+python3 er_poll_benchmark.py --ros-args \
+  -p sdk_url:=http://localhost:8000 -p mode:=v2_front -p rate_hz:=10.0
+
+# same measurement for the MJPEG feed (inter-frame arrival gaps)
+python3 er_poll_benchmark.py --ros-args \
+  -p sdk_url:=http://localhost:8000 -p mode:=feed -p feed_fps:=15
+
+# dump per-request rows for before/after comparison
+python3 er_poll_benchmark.py --ros-args \
+  -p sdk_url:=http://localhost:8000 -p csv_path:=/ws/latency.csv
+```
+
+If you see latency spikes with this node, check `GET /status` → `video`:
+`failures_total` climbing and `last_error` tell you the server-side capture
+(not your client or ROS) is the bottleneck.

@@ -39,6 +39,10 @@ class BrowserService:
         self._lock = None
         self._lock_loop = None
         self.last_error = None
+        # has_rear_camera() cache: (value, monotonic expiry). A positive
+        # result holds for the page's lifetime; a negative one only briefly,
+        # since the rear track can subscribe late after the Agora join.
+        self._rear_camera: Optional[tuple[bool, float]] = None
         # Large enough for the legacy front/rear/map element captures without
         # paying for an 8.3-megapixel headless render surface on every frame.
         self._viewport = {"width": 1920, "height": 1200}
@@ -167,6 +171,7 @@ class BrowserService:
 
     async def _teardown(self):
         self._ready = False
+        self._rear_camera = None
         for target in (self._page, self._context, self._browser):
             if target:
                 try:
@@ -267,14 +272,21 @@ class BrowserService:
 
     async def has_rear_camera(self) -> bool:
         # Capability comes from reality, not BOT_TYPE: the rover either
-        # publishes a rear video track (uid 1001) or it doesn't.
-        result = await self._run(
-            lambda page: page.evaluate(
-                "() => !!(typeof remoteUsers !== 'undefined'"
-                " && remoteUsers[1001] && remoteUsers[1001].videoTrack)"
+        # publishes a rear video track (uid 1001) or it doesn't. Cached so
+        # frame polling doesn't pay a page round trip on every request.
+        cached = self._rear_camera
+        if cached and (cached[0] or time.monotonic() < cached[1]):
+            return cached[0]
+        result = bool(
+            await self._run(
+                lambda page: page.evaluate(
+                    "() => !!(typeof remoteUsers !== 'undefined'"
+                    " && remoteUsers[1001] && remoteUsers[1001].videoTrack)"
+                )
             )
         )
-        return bool(result)
+        self._rear_camera = (result, time.monotonic() + 5)
+        return result
 
     async def front(self) -> str:
         return await self._run(

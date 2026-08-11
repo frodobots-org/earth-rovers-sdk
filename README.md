@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v6.1
+# Earth Rovers SDK v6.2
 
 ## Requirements
 
@@ -84,6 +84,11 @@ IMAGE_QUALITY=0.8
 IMAGE_FORMAT=jpeg
 # Dedicated MJPEG feed quality (always JPEG; default: 0.8)
 FEED_JPEG_QUALITY=0.8
+# Seconds the shared capture loop stays warm after the last /feed client or
+# /v2 snapshot poll (default: 10)
+# FEED_IDLE_LINGER_S=10
+# Seconds /v2/* waits for a fresh frame before failing fast (default: 2)
+# V2_FRAME_TIMEOUT_S=2
 # TTS Provider: "edge" (free, default) or "gemini"
 TTS_PROVIDER=edge
 # API key (required for gemini only)
@@ -249,7 +254,11 @@ Example Response:
 
 This endpoint returns fresh cached camera frames as base64 with their actual capture timestamps. The rear camera is detected automatically: if the bot publishes a rear stream (e.g. Mini+, Zero), the response includes `rear_frame`; single-camera bots return only the front. The legacy `timestamp` field is the newest capture, while `front_timestamp` and `rear_timestamp` identify each frame precisely.
 
+Polling this endpoint at a steady rate (e.g. 10 Hz from a ROS node) is fully supported: the shared capture loop stays warm between polls (`FEED_IDLE_LINGER_S`, default 10 s), so each request returns a fresh, distinct frame in tens of milliseconds. If a fresh frame can't be produced within `V2_FRAME_TIMEOUT_S` (default 2 s) the endpoint fails fast — 503 with the capture error when known, 404 otherwise — instead of stalling; keep polling and it recovers as soon as the camera does.
+
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
+
+> **Performance trap**: `/v2/*` shares the warm frame cache with `/feed` only in the default configuration (`IMAGE_FORMAT=jpeg` with `IMAGE_QUALITY` equal to `FEED_JPEG_QUALITY`). Setting a different format or quality silently switches `/v2/*` to an uncached per-request capture path, which is significantly slower under polling. If you poll for frames, keep the defaults.
 
 ```bash
 curl --location 'http://localhost:8000/v2/screenshot'
@@ -381,13 +390,30 @@ Sample Response:
   "browser_ready": true,
   "mission_started": true,
   "ingest_connected": true,
-  "telemetry_age_s": 0.42
+  "telemetry_age_s": 0.42,
+  "video": {
+    "front": {
+      "loop_running": true,
+      "latest_frame_age_s": 0.03,
+      "captures_total": 18240,
+      "failures_total": 2,
+      "last_error": null
+    },
+    "rear": {
+      "loop_running": false,
+      "latest_frame_age_s": null,
+      "captures_total": 0,
+      "failures_total": 0,
+      "last_error": null
+    }
+  }
 }
 ```
 
 - `browser_ready`: the headless browser is connected to the rover's channel
 - `ingest_connected`: telemetry is flowing from the rover into the SDK
 - `telemetry_age_s`: seconds since the last telemetry message (`null` if none yet)
+- `video.<camera>`: frame-capture pipeline health per camera — whether the shared capture loop is currently running, the age of the newest cached frame, capture/failure counters since startup, and the most recent capture error (`null` when healthy). Useful for correlating client-side frame latency spikes with server-side capture failures.
 
 ### WS /ws/data
 
@@ -651,6 +677,13 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.6.2:
+
+  - **Reliable `/v2` polling for ROS 2**: the shared camera capture stays warm between snapshot requests, so steady 10 Hz pollers no longer restart capture on every tick
+  - Capture failures return an immediate, actionable `503` while recovery backoff continues in the background; snapshot callers never wait inside that backoff
+  - `/v2` capture is bounded by `V2_FRAME_TIMEOUT_S` for every configured image format, and `/status` exposes per-camera capture health and failure counters
+  - Added plain-Python and ROS 2 Humble polling benchmarks with complete latency accounting (including failed requests), duplicate-frame detection, and missed-tick dropping
 
 - v.6.1:
 

@@ -22,7 +22,7 @@ from browser_service import FEED_QUALITY, FORMAT, QUALITY, BrowserService
 from rtm_client import RtmClient
 from telemetry_hub import TelemetryHub
 from tts_service import generate_speech
-from video_feed import FrameBroadcaster
+from video_feed import FrameBroadcaster, FrameCaptureError
 
 load_dotenv()
 
@@ -74,6 +74,12 @@ app.add_middleware(
 FRODOBOTS_API_URL = os.getenv(
     "FRODOBOTS_API_URL", "https://frodobots-web-api.onrender.com/api/v1"
 )
+
+# How long /v2/* waits for a fresh frame before failing. Kept short on
+# purpose: with the warm capture loop a healthy camera answers in tens of
+# milliseconds, so this budget only matters as "wait for recovery" during a
+# transient capture blip — better a fast 404/503 than a multi-second stall.
+V2_FRAME_TIMEOUT_S = float(os.getenv("V2_FRAME_TIMEOUT_S", "2"))
 
 
 # In-memory storage for the response
@@ -127,7 +133,12 @@ async def get_camera_frame(
     """Return a shared fresh frame and its capture timestamp."""
     if FORMAT == "jpeg" and QUALITY == FEED_QUALITY:
         broadcaster = feed_broadcasters[view]
-        frame = await broadcaster.get_frame(max_age=1 / 30, timeout=5, fps=30)
+        try:
+            frame = await broadcaster.get_frame(
+                max_age=1 / 30, timeout=V2_FRAME_TIMEOUT_S, fps=30
+            )
+        except FrameCaptureError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if frame:
             return frame.base64_data, frame.captured_at
         if broadcaster.last_error:
@@ -136,7 +147,14 @@ async def get_camera_frame(
 
     # Preserve explicit png/webp v2 configurations. The default and fastest
     # path is JPEG and shares the feed broadcaster above.
-    packet = await browser_service.configured_frame(view)
+    try:
+        packet = await asyncio.wait_for(
+            browser_service.configured_frame(view), timeout=V2_FRAME_TIMEOUT_S
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"{view} camera capture timed out"
+        ) from exc
     if packet and packet.get("error"):
         raise HTTPException(status_code=503, detail=packet["error"])
     if not packet or not packet.get("data_url"):
@@ -252,6 +270,16 @@ async def ws_data(websocket: WebSocket):
 
 @app.get("/status")
 async def get_status():
+    video = {
+        view: {
+            "loop_running": broadcaster.loop_running,
+            "latest_frame_age_s": broadcaster.latest_age_seconds,
+            "captures_total": broadcaster.captures_total,
+            "failures_total": broadcaster.failures_total,
+            "last_error": broadcaster.last_error,
+        }
+        for view, broadcaster in feed_broadcasters.items()
+    }
     return JSONResponse(
         content={
             "browser_ready": browser_service.is_ready,
@@ -259,6 +287,7 @@ async def get_status():
             "mission_started": bool(auth_response_data)
             or not os.getenv("MISSION_SLUG"),
             "rtm": await browser_service.rtm_health(),
+            "video": video,
             **telemetry_hub.status(),
         }
     )
