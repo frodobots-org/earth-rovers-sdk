@@ -140,6 +140,7 @@
       .drive .speed { display: flex; align-items: center; gap: 8px; }
       .drive input[type="range"] { width: 120px; accent-color: var(--accent); }
       .drive .status { font-size: 0.8rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+      .srv { font-size: 0.85rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
       .drive .keys { font-size: 0.75rem; color: var(--ink-3); }
       kbd {
         background: var(--panel); border: 1px solid var(--panel-edge);
@@ -158,8 +159,10 @@
       <select id="endpoint">
         <option value="/v2/front" selected>/v2/front</option>
         <option value="/v2/screenshot">/v2/screenshot</option>
+        <option value="feed">/feed (MJPEG)</option>
       </select>
-      <input id="rate" type="number" value="10" min="1" max="30" title="Poll rate (Hz)" />
+      <input id="rate" type="number" value="10" min="1" max="30"
+             title="Poll rate (Hz) — in /feed mode: requested stream fps" />
       <span class="sub">Hz</span>
       <button id="go">Start</button>
     </div>
@@ -192,7 +195,7 @@
         <div class="tiles">
           <div class="tile"><div class="label">Achieved rate</div>
             <div class="value" id="t-hz">–<small> Hz</small></div></div>
-          <div class="tile"><div class="label">Last request</div>
+          <div class="tile"><div class="label" id="t-last-label">Last request</div>
             <div class="value" id="t-last">–<small> ms</small></div></div>
           <div class="tile"><div class="label">Frame age</div>
             <div class="value" id="t-age">–<small> ms</small></div></div>
@@ -222,6 +225,11 @@
         <div class="panel">
           <h2>Request latency — last 300 <span class="legend" id="spark-now"></span></h2>
           <svg id="spark" preserveAspectRatio="none"></svg>
+        </div>
+
+        <div class="panel">
+          <h2>SDK pipeline (server side) <span class="legend" id="srv-err" style="color:var(--bad)"></span></h2>
+          <div class="srv" id="srv-stats">start polling to sample /status</div>
         </div>
       </div>
     </div>
@@ -367,6 +375,7 @@
       let busy = false;
       ticker.onmessage = async () => {
         if (!running || busy) return; // a poll still in flight: drop this tick
+        if ($("endpoint").value === "feed") return; // stream mode: no polling
         busy = true;
         try {
           await poll($("url").value.replace(/\/+$/, ""), $("endpoint").value);
@@ -376,8 +385,101 @@
         }
       };
 
+      // ---- /feed (MJPEG) mode: consume the multipart stream and measure ---
+      // inter-frame arrival gaps — the same thing OpenCV/ROS sees. Each JPEG
+      // part is rendered, so this is a fair pushed-vs-polled comparison.
+      const CRLF2 = new Uint8Array([13, 10, 13, 10]);
+      const BOUNDARY = new TextEncoder().encode("--frame");
+      let feedAbort = null, feedPrev = null, feedObjUrl = null;
+
+      function indexOfBytes(haystack, needle, from) {
+        outer: for (let i = from; i <= haystack.length - needle.length; i++) {
+          for (let j = 0; j < needle.length; j++)
+            if (haystack[i + j] !== needle[j]) continue outer;
+          return i;
+        }
+        return -1;
+      }
+
+      function onFeedFrame(jpeg) {
+        const now = performance.now();
+        frames++;
+        recent.push(now);
+        if (feedPrev !== null) {
+          const gap = now - feedPrev;
+          record(gap, true, null, gap > SLOW_MS);
+        }
+        feedPrev = now;
+        const url = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+        $("frame").src = url;
+        if (feedObjUrl) URL.revokeObjectURL(feedObjUrl);
+        feedObjUrl = url;
+        $("t-n").textContent = frames;
+        renderStats();
+      }
+
+      async function feedLoop() {
+        const base = $("url").value.replace(/\/+$/, "");
+        const fps = Math.max(1, Math.min(30, Number($("rate").value || 15)));
+        while (running) {
+          feedAbort = new AbortController();
+          feedPrev = null;
+          try {
+            const res = await fetch(`${base}/feed?view=front&fps=${fps}`, {
+              signal: feedAbort.signal, cache: "no-store",
+            });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            $("dot").className = "dot live";
+            $("badge-text").textContent = `live — MJPEG stream @ ${fps} fps`;
+            const reader = res.body.getReader();
+            let buffer = new Uint8Array(0);
+            while (running) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const merged = new Uint8Array(buffer.length + value.length);
+              merged.set(buffer); merged.set(value, buffer.length);
+              buffer = merged;
+              while (true) {
+                const start = indexOfBytes(buffer, BOUNDARY, 0);
+                if (start < 0) break;
+                const next = indexOfBytes(buffer, BOUNDARY, start + BOUNDARY.length);
+                if (next < 0) {
+                  if (start > 0) buffer = buffer.slice(start);
+                  break;
+                }
+                const part = buffer.slice(start, next);
+                buffer = buffer.slice(next);
+                const headerEnd = indexOfBytes(part, CRLF2, 0);
+                if (headerEnd < 0) continue;
+                let jpeg = part.slice(headerEnd + 4);
+                let end = jpeg.length;
+                while (end && (jpeg[end - 1] === 13 || jpeg[end - 1] === 10)) end--;
+                if (end > 0) onFeedFrame(jpeg.slice(0, end));
+              }
+            }
+            if (running) throw new Error("stream ended");
+          } catch (e) {
+            if (!running) break;
+            errors++;
+            pushTick("err");
+            $("t-err").textContent = errors;
+            $("t-err").className = "value bad";
+            $("dot").className = "dot err";
+            $("badge-text").textContent = "feed reconnecting: " + e.message;
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+      }
+
       function loop() {
-        ticker.postMessage(1000 / Number($("rate").value || 10));
+        if ($("endpoint").value === "feed") {
+          $("t-last-label").textContent = "Frame gap";
+          $("t-age").innerHTML = "–";
+          feedLoop();
+        } else {
+          $("t-last-label").textContent = "Last request";
+          ticker.postMessage(1000 / Number($("rate").value || 10));
+        }
       }
 
       // ---- drive controls: latest-wins at 10 Hz, stop on release ----------
@@ -487,18 +589,56 @@
         );
       });
 
+      // ---- server-side pipeline health via /status ------------------------
+      // Distinguishes where a stall lives: capture fps collapsing = the SDK's
+      // page can't produce frames (host/renderer/stream); capture fps fine
+      // while client latency spikes = HTTP/consumer side.
+      let statusTimer = null, lastStatusSample = null;
+      async function pollStatus() {
+        try {
+          const res = await fetch($("url").value.replace(/\/+$/, "") + "/status");
+          const s = await res.json();
+          if (!s.video) {
+            $("srv-stats").textContent =
+              "this SDK has no video stats — running a build older than v6.2";
+            return;
+          }
+          const v = s.video.front || {};
+          const now = performance.now();
+          let fps = "–";
+          if (lastStatusSample && v.captures_total != null) {
+            const delta = v.captures_total - lastStatusSample.captures;
+            fps = Math.max(0, delta / ((now - lastStatusSample.at) / 1000)).toFixed(1);
+          }
+          lastStatusSample = { captures: v.captures_total, at: now };
+          const age = v.latest_frame_age_s;
+          $("srv-stats").textContent =
+            `capture ${fps} fps · server frame age ` +
+            (age == null ? "–" : `${(age * 1000).toFixed(0)} ms`) +
+            ` · capture failures ${v.failures_total ?? "–"}` +
+            ` · loop ${v.loop_running ? "running" : "stopped"}`;
+          $("srv-err").textContent = v.last_error || "";
+        } catch (e) {
+          $("srv-stats").textContent = "status unavailable: " + e.message;
+        }
+      }
+
       $("go").addEventListener("click", () => {
         running = !running;
         $("go").textContent = running ? "Stop" : "Start";
         $("go").className = running ? "stop" : "";
         if (running) {
           samples = []; history = []; recent = [];
-          frames = errors = dups = 0; lastTs = null;
+          frames = errors = dups = 0; lastTs = null; lastStatusSample = null;
           startedAt = performance.now();
           $("ticks").innerHTML = "";
           loop();
+          pollStatus();
+          statusTimer = setInterval(pollStatus, 3000);
         } else {
           ticker.postMessage(0);
+          feedAbort?.abort();
+          clearInterval(statusTimer);
           $("dot").className = "dot";
           $("badge-text").textContent = "stopped";
         }
