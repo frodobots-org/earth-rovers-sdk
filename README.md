@@ -12,7 +12,7 @@
 
 2. Complete your Bot activation.
 
-3. After completing your bot activation. Get your SDK Access token in [here](https://my.frodobots.com/owner/settings).
+3. After completing your bot activation, get your SDK Access token and bot slug from the same page: [my.frodobots.com/owner/settings](https://my.frodobots.com/owner/settings). These become `SDK_API_TOKEN` and `BOT_SLUG` in your `.env` — they must belong to the same account, or every SDK request fails with "Bot not found".
 
 ## Software Requirements
 
@@ -70,8 +70,32 @@ More details about the bot sensors and actuators can be found [here](https://col
 1. Write once your .env variables provided by Frodobots team your SDK API key and the name of the bot you've got.
 
 ```bash
+# Your personal SDK access token, from https://my.frodobots.com/owner/settings
+# (Settings -> SDK Access Token, after completing bot activation).
 SDK_API_TOKEN=
+# The slug of the bot this token owns, also from that same settings page. Must
+# belong to the account SDK_API_TOKEN was issued for, or every request fails
+# with "Bot not found" / "Bot unavailable for SDK".
 BOT_SLUG=
+# Shared secret this server requires on every API call (Authorization: Bearer
+# ..., or ?key= for clients that can't set a header, like the dashboard page,
+# /feed, and WebSockets). Not a FrodoBots credential — pick any long random
+# string yourself, e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+# Leaving it unset still works — the server generates one at startup and logs
+# it — but that value changes every restart, so set one explicitly here for
+# anything beyond a quick local test, and definitely before exposing port
+# 8000 on a LAN/Docker host — it's the only thing gating a real rover's
+# controls at that point.
+ROVER_API_KEY=
+# Cross-origin browser JS (fetch/XHR from a page on a different origin) is
+# denied by default. Leave unset unless you're serving a frontend from
+# somewhere other than this server itself — e.g. examples/web/*.html need
+# their serving origin listed here (comma-separated), or the browser blocks
+# their requests with a valid key. Serve them with a local static server
+# (`python3 -m http.server 5500` from examples/web/) rather than opening the
+# file directly — browsers send Origin: null for file:// pages, which most
+# CORS setups (including ALLOWED_ORIGINS matching) can't allowlist reliably.
+# ALLOWED_ORIGINS=http://localhost:5500
 # Optional: use a specific browser binary instead of Playwright's Chromium
 # CHROME_EXECUTABLE_PATH=
 # Default value is MAP_ZOOM_LEVEL=18 https://wiki.openstreetmap.org/wiki/Zoom_levels
@@ -112,7 +136,7 @@ playwright install chromium
 hypercorn main:app --reload
 ```
 
-4. Open the dashboard at http://localhost:8000 to watch the live stream, follow the rover on the map, monitor telemetry and drive the bot.
+4. Open the dashboard at `http://localhost:8000/?key=YOUR_ROVER_API_KEY` (the key the server logged on startup, or the one you set) to watch the live stream, follow the rover on the map, monitor telemetry and drive the bot. Every other endpoint needs the same key sent as `-H "Authorization: Bearer $ROVER_API_KEY"`.
 
 ## Dashboard
 
@@ -145,6 +169,7 @@ With this endpoint you can send linear and angular values to move the bot, and c
 
 ```bash
 curl --location 'http://localhost:8000/control' \
+  -H "Authorization: Bearer $ROVER_API_KEY" \
 --header 'Content-Type: application/json' \
 --data '{
     "command": { "linear": 1, "angular": 1, "lamp": 0 }
@@ -170,7 +195,7 @@ Example response:
 With this endpoint you can retrieve the latest data from the bot. (e.g. battery level, position, etc.)
 
 ```bash
-curl --location 'http://localhost:8000/data'
+curl --location 'http://localhost:8000/data' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -223,7 +248,7 @@ This endpoint captures the requested views and returns each image as base64. The
 This endpoint accepts a list of view types as a query parameter (view_types). Valid view types are rear, map, and front. If no view types are provided, it will return all three by default.
 
 ```bash
-curl --location 'http://localhost:8000/screenshot?view_types=rear,map,front'
+curl --location 'http://localhost:8000/screenshot?view_types=rear,map,front' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -238,7 +263,7 @@ Example Response:
 ```
 
 ```bash
-curl --location 'http://localhost:8000/screenshot?view_types=rear'
+curl --location 'http://localhost:8000/screenshot?view_types=rear' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -261,7 +286,7 @@ You can parametrize the image quality between 0.1 and 1.0, and the format betwee
 > **Performance trap**: `/v2/*` shares the warm frame cache with `/feed` only in the default configuration (`IMAGE_FORMAT=jpeg` with `IMAGE_QUALITY` equal to `FEED_JPEG_QUALITY`). Setting a different format or quality silently switches `/v2/*` to an uncached per-request capture path, which is significantly slower under polling. If you poll for frames, keep the defaults.
 
 ```bash
-curl --location 'http://localhost:8000/v2/screenshot'
+curl --location 'http://localhost:8000/v2/screenshot' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -283,7 +308,7 @@ This endpoint allows you to retrieve the latest frame emitted from the bot's fro
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
 ```bash
-curl --location 'http://localhost:8000/v2/front'
+curl --location 'http://localhost:8000/v2/front' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -302,7 +327,7 @@ This endpoint allows you to retrieve the latest frame emitted from the bot's rea
 You can parametrize the image quality between 0.1 and 1.0, and the format between jpeg, png and webp, using the IMAGE_QUALITY and IMAGE_FORMAT environment variables.
 
 ```bash
-curl --location 'http://localhost:8000/v2/rear'
+curl --location 'http://localhost:8000/v2/rear' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -324,6 +349,7 @@ Supports two TTS providers, configurable via environment variables:
 
 ```bash
 curl --location 'http://localhost:8000/speak' \
+  -H "Authorization: Bearer $ROVER_API_KEY" \
 --header 'Content-Type: application/json' \
 --data '{
     "text": "Hello, I am your rover"
@@ -355,15 +381,17 @@ Query params:
 - `view`: `front` (default) or `rear` (bots with a rear camera; 404 otherwise)
 - `fps`: 1–30 (default 15)
 
+Needs the API key. Clients that can't set a custom header (a browser tab, `cv2.VideoCapture`) pass it as `?key=` instead — the server accepts either on GET endpoints.
+
 ```bash
 # Watch it in a browser:
-open 'http://localhost:8000/feed?view=front&fps=15'
+open 'http://localhost:8000/feed?view=front&fps=15&key=YOUR_ROVER_API_KEY'
 ```
 
 ```python
 # Or consume it from OpenCV / ROS2:
 import cv2
-cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15")
+cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15&key=YOUR_ROVER_API_KEY")
 ok, frame = cap.read()
 ```
 
@@ -380,7 +408,7 @@ Lightweight health endpoint for the SDK pipeline — no side effects, safe to po
 Sample Request:
 
 ```bash
-curl --location 'http://localhost:8000/status'
+curl --location 'http://localhost:8000/status' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Sample Response:
@@ -417,7 +445,7 @@ Sample Response:
 
 ### WS /ws/data
 
-WebSocket stream of telemetry for real-time consumers (the dashboard uses it). On connect you receive a `snapshot` message with the latest telemetry (or `data: null` if none yet), then a `telemetry` message per rover update and a `status` heartbeat every 5 seconds:
+WebSocket stream of telemetry for real-time consumers (the dashboard uses it). Browser `WebSocket` clients can't set custom headers, so pass the API key as a query param — the same `?key=` used everywhere else: `ws://localhost:8000/ws/data?key=YOUR_ROVER_API_KEY`. On connect you receive a `snapshot` message with the latest telemetry (or `data: null` if none yet), then a `telemetry` message per rover update and a `status` heartbeat every 5 seconds:
 
 ```json
 { "type": "snapshot", "data": { ... }, "ingest_connected": true, "telemetry_age_s": 0.1 }
@@ -448,7 +476,7 @@ Lists the available missions for the bot you are connected to (the one set in `B
 `Note: Missions are only listed for remote bots (the deployed Earth Rovers you drive remotely). Personal bots do not have missions, so this endpoint will return an empty list for them.`
 
 ```bash
-curl --location 'http://localhost:8000/missions'
+curl --location 'http://localhost:8000/missions' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -468,7 +496,7 @@ Example Response:
 ### POST /start-mission
 
 ```bash
-curl --location --request POST 'http://localhost:8000/start-mission'
+curl --location --request POST 'http://localhost:8000/start-mission' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Successful Response (Code: 200)
@@ -494,7 +522,7 @@ Unsuccessful Response (Code: 400)
 With this endpoint you can retrieve the list of checkpoints for the mission. And the latest checkpoint that was scanned by the bot. If you scan the first checkpoint, the latest_scanned_checkpoint will be 1. If you scan the last checkpoint, the latest_scanned_checkpoint will be the highest sequence number and the mission will be completed.
 
 ```bash
-curl --location 'http://localhost:8000/checkpoints-list'
+curl --location 'http://localhost:8000/checkpoints-list' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -531,6 +559,7 @@ With this endpoint you can send the checkpoint that was scanned by the bot.
 
 ```bash
 curl -X POST 'http://localhost:8000/checkpoint-reached' \
+  -H "Authorization: Bearer $ROVER_API_KEY" \
 --header 'Content-Type: application/json' \
 --data '{}'
 ```
@@ -567,7 +596,7 @@ In case you get stucked and don't want to lose your progress, you can use the /s
 `⚠️  This endpoint should only be used in case of emergency. If you run this endpoint you will lose all your progress during the mission.`
 
 ```bash
-curl --location --request POST 'http://localhost:8000/end-mission'
+curl --location --request POST 'http://localhost:8000/end-mission' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -583,7 +612,7 @@ Example Response:
 With this endpoint you can retrieve the missions history of the bot you've been riding.
 
 ```bash
-curl --location 'http://localhost:8000/missions-history'
+curl --location 'http://localhost:8000/missions-history' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:
@@ -614,7 +643,7 @@ The Interventions API allows you to manage interventions during bot rides. An in
 Start a new intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
 
 ```bash
-curl -X POST 'http://localhost:8000/interventions/start'
+curl -X POST 'http://localhost:8000/interventions/start' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Successful Response (Code: 200)
@@ -631,7 +660,7 @@ Successful Response (Code: 200)
 End an active intervention for the current bot ride. The bot's current position (latitude and longitude) will be automatically recorded.
 
 ```bash
-curl -X POST 'http://localhost:8000/interventions/end'
+curl -X POST 'http://localhost:8000/interventions/end' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Successful Response (Code: 200)
@@ -655,7 +684,7 @@ Unsuccessful Response (Code: 400)
 Retrieve the history of interventions for the current bot.
 
 ```bash
-curl --location 'http://localhost:8000/interventions/history'
+curl --location 'http://localhost:8000/interventions/history' -H "Authorization: Bearer $ROVER_API_KEY"
 ```
 
 Example Response:

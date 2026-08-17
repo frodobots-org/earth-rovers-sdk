@@ -80,6 +80,14 @@ class BrowserService:
             await self._launch()
             return self._page
 
+    def _sdk_page_url(self) -> str:
+        import main as _main
+
+        if "key=" in SDK_PAGE_URL:
+            return SDK_PAGE_URL
+        separator = "&" if "?" in SDK_PAGE_URL else "?"
+        return f"{SDK_PAGE_URL}{separator}key={_main.ROVER_API_KEY}"
+
     async def _launch(self):
         self._ready = False
         try:
@@ -135,7 +143,9 @@ class BrowserService:
                 extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
             self._page = await self._context.new_page()
-            await self._page.goto(SDK_PAGE_URL, wait_until="domcontentloaded")
+            await self._page.goto(
+                self._sdk_page_url(), wait_until="domcontentloaded"
+            )
             await self._page.click("#join")
             # Control and telemetry must remain available when a camera is
             # offline. Wait for RTM readiness, not for a video DOM element.
