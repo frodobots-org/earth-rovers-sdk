@@ -104,13 +104,23 @@ async def external_request(method: str, url: str, **kwargs) -> tuple[int, dict]:
     """Use pooled async HTTP so rover hot paths never block the event loop."""
 
     async def perform(session: aiohttp.ClientSession):
-        if os.getenv("DEBUG") == "true":
+        debug = os.getenv("DEBUG") == "true"
+        if debug:
             logger.info("External %s %s", method.upper(), url)
         async with session.request(method, url, **kwargs) as response:
             try:
                 body = await response.json(content_type=None)
             except (aiohttp.ContentTypeError, json.JSONDecodeError):
                 body = {"error": await response.text()}
+
+            if debug and response.status >= 400:
+                logger.error(
+                    "External %s %s failed: %s %s",
+                    method.upper(),
+                    url,
+                    response.status,
+                    body,
+                )
             return response.status, body
 
     try:
