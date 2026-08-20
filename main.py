@@ -22,7 +22,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Literal, Optional
 
@@ -83,6 +83,11 @@ _allowed_origins = [
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+if "*" in _allowed_origins or "null" in _allowed_origins:
+    raise SystemExit(
+        'ALLOWED_ORIGINS must list explicit trusted origins; "*" and "null" '
+        "are not allowed on a rover control server."
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -113,11 +118,20 @@ INGEST_TOKEN = secrets.token_urlsafe(32)
 # operator doesn't set one, generate a per-run key rather than defaulting to
 # open access, and log it so it can still be retrieved.
 _PLACEHOLDER_API_KEY = "change-me-to-a-long-random-value"
+_MIN_API_KEY_LENGTH = 32
 ROVER_API_KEY = os.getenv("ROVER_API_KEY")
 if ROVER_API_KEY == _PLACEHOLDER_API_KEY:
     raise SystemExit(
         "ROVER_API_KEY is still set to the docker-compose.yml placeholder "
         f'("{_PLACEHOLDER_API_KEY}") - set it to a real secret before starting.'
+    )
+if ROVER_API_KEY and (
+    len(ROVER_API_KEY) < _MIN_API_KEY_LENGTH or ROVER_API_KEY.strip() != ROVER_API_KEY
+):
+    raise SystemExit(
+        "ROVER_API_KEY must be at least 32 characters and must not have "
+        "leading or trailing whitespace. Generate one with: "
+        'python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
     )
 if not ROVER_API_KEY:
     ROVER_API_KEY = secrets.token_urlsafe(32)
@@ -132,23 +146,29 @@ def _valid_api_key(supplied: str) -> bool:
     return bool(supplied) and hmac.compare_digest(supplied, ROVER_API_KEY)
 
 
-def _key_from_query_or_cookie(request: Request) -> str:
-    """Shared by / and /sdk: the two routes a browser *navigates* to rather
-    than fetches, so neither can carry a custom header -- ?key= on first
-    load, the rover_key cookie (set by GET /) on every load after."""
-    return request.query_params.get("key") or request.cookies.get("rover_key", "")
+def _key_from_headers(request: Request) -> str:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header[:7].lower() == "bearer ":
+        return auth_header[len("Bearer ") :]
+    return request.headers.get("X-API-Key", "")
+
+
+def _key_from_browser_request(request: Request) -> str:
+    """Browser navigations can use the HttpOnly dashboard session cookie.
+
+    Machine-facing API routes deliberately do not accept this cookie, which
+    keeps a cross-site form or fetch from inheriting control authority.
+    """
+    return _key_from_headers(request) or request.cookies.get("rover_key", "")
 
 
 async def require_api_key(request: Request) -> None:
-    auth_header = request.headers.get("Authorization", "")
-    supplied = (
-        auth_header[len("Bearer ") :]
-        if auth_header[:7].lower() == "bearer "
-        else request.headers.get("X-API-Key", "")
-    )
-    # Fall back to ?key=, since some GET clients can't set custom headers
-    # (OpenCV's VideoCapture consuming /feed, a browser <img> tag, curl | ffmpeg).
-    if not supplied:
+    supplied = _key_from_headers(request)
+    # Only the read-only MJPEG feed accepts a query token. OpenCV's
+    # VideoCapture and browser <img> elements cannot set custom headers.
+    # Never accept query credentials on a state-changing route: CORS does not
+    # stop a malicious page from sending a simple no-cors POST.
+    if not supplied and request.method == "GET" and request.url.path == "/feed":
         supplied = request.query_params.get("key", "")
     if not _valid_api_key(supplied):
         raise HTTPException(status_code=401, detail="Missing or invalid API key")
@@ -157,7 +177,7 @@ async def require_api_key(request: Request) -> None:
 # Every route below is protected by default (router-level dependency) so a new
 # endpoint can't ship open by forgetting a per-route Depends(). Only /, /sdk,
 # /static and the two WebSocket routes opt out below, each with its own
-# explicit check.
+# explicit check. /session is the header-authenticated dashboard login.
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
@@ -324,9 +344,8 @@ async def ws_ingest(websocket: WebSocket):
 @app.websocket("/ws/data")
 async def ws_data(websocket: WebSocket):
     # Live telemetry (position, speed) for a real rover: gate it behind the
-    # same shared secret as everything else, as ?key= (same query param name
-    # as the rest of the API) since browser WebSocket clients can't set
-    # custom headers.
+    # same shared secret as everything else, as ?key= since browser WebSocket
+    # clients can't set custom headers.
     if not _valid_api_key(websocket.query_params.get("key", "")):
         await websocket.close(code=4401)
         return
@@ -665,16 +684,75 @@ async def render_index_html(is_spectator: bool):
     return render_template("index.html", template_vars)
 
 
+_DASHBOARD_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Earth Rover SDK Login</title>
+  </head>
+  <body>
+    <main>
+      <h1>Earth Rover SDK</h1>
+      <p>Enter the ROVER_API_KEY configured for this server.</p>
+      <form id="login-form">
+        <label>API key <input id="api-key" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Open dashboard</button>
+        <p id="login-error" role="alert"></p>
+      </form>
+    </main>
+    <script>
+      document.getElementById("login-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var key = document.getElementById("api-key").value;
+        var response = await fetch("/session", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + key }
+        });
+        if (response.ok) location.replace("/");
+        else document.getElementById("login-error").textContent = "Invalid API key";
+      });
+    </script>
+  </body>
+</html>
+"""
+
+
+def _harden_browser_response(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _set_dashboard_cookie(response: Response, request: Request, key: str) -> None:
+    response.set_cookie(
+        "rover_key",
+        key,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        max_age=2592000,
+        path="/",
+    )
+
+
+@app.post("/session")
+async def create_dashboard_session(request: Request):
+    supplied_key = _key_from_headers(request)
+    if not _valid_api_key(supplied_key):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
+    response = Response(status_code=204)
+    _set_dashboard_cookie(response, request, supplied_key)
+    return _harden_browser_response(response)
+
+
 @app.get("/")
 async def get_index(request: Request):
-    supplied_key = _key_from_query_or_cookie(request)
+    supplied_key = _key_from_browser_request(request)
     if not _valid_api_key(supplied_key):
-        return HTMLResponse(
-            content=(
-                "<h1>Unauthorized</h1>"
-                "<p>Open this page with <code>?key=YOUR_ROVER_API_KEY</code>.</p>"
-            ),
-            status_code=401,
+        return _harden_browser_response(
+            HTMLResponse(content=_DASHBOARD_LOGIN_HTML, status_code=401)
         )
 
     # The dashboard renders even when the mission hasn't started or auth
@@ -708,32 +786,20 @@ async def get_index(request: Request):
         "dashboard_config": json.dumps(dashboard_config).replace("</", "<\\/")
     }
     response = render_template("dashboard.html", template_vars)
-    # httponly: the page's own JS already gets the key from window.DASH.apiKey
-    # (templated server-side above) — the cookie only needs to survive reloads,
-    # not be readable by script.
-    response.set_cookie(
-        "rover_key",
-        supplied_key,
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        max_age=2592000,
-    )
-    return response
+    # The cookie only authenticates browser navigations. API requests still
+    # carry an explicit header, so cross-site requests cannot inherit control.
+    _set_dashboard_cookie(response, request, supplied_key)
+    return _harden_browser_response(response)
 
 
 @app.get("/sdk")
 async def sdk(request: Request):
-    supplied_key = _key_from_query_or_cookie(request)
+    supplied_key = _key_from_browser_request(request)
     if not _valid_api_key(supplied_key):
-        return HTMLResponse(
-            content=(
-                "<h1>Unauthorized</h1>"
-                "<p>Open this page with <code>?key=YOUR_ROVER_API_KEY</code>.</p>"
-            ),
-            status_code=401,
+        return _harden_browser_response(
+            HTMLResponse(content="<h1>Unauthorized</h1>", status_code=401)
         )
-    return await render_index_html(is_spectator=False)
+    return _harden_browser_response(await render_index_html(is_spectator=False))
 
 
 @router.post("/control-legacy")

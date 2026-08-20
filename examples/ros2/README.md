@@ -85,7 +85,7 @@ ros2 topic echo /earth_rover/gps
 ```python
 import cv2
 # cv2.VideoCapture can't set custom headers, so pass the key as ?key= (the
-# server accepts either a header or a query param on GET endpoints).
+# server accepts query authentication only on the read-only /feed endpoint).
 cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15&key=YOUR_ROVER_API_KEY")
 while True:
     ok, frame = cap.read()

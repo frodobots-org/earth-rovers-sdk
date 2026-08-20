@@ -78,9 +78,10 @@ SDK_API_TOKEN=
 # with "Bot not found" / "Bot unavailable for SDK".
 BOT_SLUG=
 # Shared secret this server requires on every API call (Authorization: Bearer
-# ..., or ?key= for clients that can't set a header, like the dashboard page,
-# /feed, and WebSockets). Not a FrodoBots credential — pick any long random
-# string yourself, e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+# ...). The read-only /feed endpoint and /ws/data also accept ?key= because
+# some streaming clients cannot set a header. Not a FrodoBots credential — it
+# must be at least 32 characters; generate a random value, e.g.
+# `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
 # Leaving it unset still works — the server generates one at startup and logs
 # it — but that value changes every restart, so set one explicitly here for
 # anything beyond a quick local test, and definitely before exposing port
@@ -136,7 +137,13 @@ playwright install chromium
 hypercorn main:app --reload
 ```
 
-4. Open the dashboard at `http://localhost:8000/?key=YOUR_ROVER_API_KEY` (the key the server logged on startup, or the one you set) to watch the live stream, follow the rover on the map, monitor telemetry and drive the bot. Every other endpoint needs the same key sent as `-H "Authorization: Bearer $ROVER_API_KEY"`.
+4. Open the dashboard at `http://localhost:8000` and enter the key the server logged on startup (or the one you set). The login exchanges it for an HttpOnly, same-site dashboard cookie, so the control secret does not appear in browser history or access logs. Machine API calls need the key sent as `-H "Authorization: Bearer $ROVER_API_KEY"`.
+
+### Docker network exposure
+
+The image binds to `127.0.0.1` by default. `docker-compose.yml` opts into the container interface internally but publishes port 8000 only on host loopback (`127.0.0.1:8000`). Replace its `ROVER_API_KEY` placeholder before starting it.
+
+To make a rover server reachable from the LAN, both changes must be explicit: set `ROVER_BIND_HOST=0.0.0.0` inside the container and publish `8000:8000` (or a specific trusted host address). Only do this with a strong `ROVER_API_KEY` and appropriate network firewalling.
 
 ## Dashboard
 
@@ -381,7 +388,7 @@ Query params:
 - `view`: `front` (default) or `rear` (bots with a rear camera; 404 otherwise)
 - `fps`: 1–30 (default 15)
 
-Needs the API key. Clients that can't set a custom header (a browser tab, `cv2.VideoCapture`) pass it as `?key=` instead — the server accepts either on GET endpoints.
+Needs the API key. Clients that can't set a custom header (a browser tab, `cv2.VideoCapture`) pass it as `?key=` instead. Query authentication is accepted only on this read-only `/feed` endpoint; state-changing endpoints always require a header.
 
 ```bash
 # Watch it in a browser:
@@ -445,7 +452,7 @@ Sample Response:
 
 ### WS /ws/data
 
-WebSocket stream of telemetry for real-time consumers (the dashboard uses it). Browser `WebSocket` clients can't set custom headers, so pass the API key as a query param — the same `?key=` used everywhere else: `ws://localhost:8000/ws/data?key=YOUR_ROVER_API_KEY`. On connect you receive a `snapshot` message with the latest telemetry (or `data: null` if none yet), then a `telemetry` message per rover update and a `status` heartbeat every 5 seconds:
+WebSocket stream of telemetry for real-time consumers (the dashboard uses it). Browser `WebSocket` clients can't set custom headers, so pass the API key as a query parameter: `ws://localhost:8000/ws/data?key=YOUR_ROVER_API_KEY`. Query credentials are limited to this WebSocket and the read-only `/feed` endpoint. On connect you receive a `snapshot` message with the latest telemetry (or `data: null` if none yet), then a `telemetry` message per rover update and a `status` heartbeat every 5 seconds:
 
 ```json
 { "type": "snapshot", "data": { ... }, "ingest_connected": true, "telemetry_age_s": 0.1 }

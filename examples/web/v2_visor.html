@@ -246,11 +246,9 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const SLOW_MS = 250, TICKS = 120, SPARK = 300;
-      // Shared API key gate: sent as a header on plain fetch() calls, and as
-      // a ?key= query param for consumers that can't set headers (MJPEG
-      // <img>-style pulls, sendBeacon).
+      // Shared API key gate. State-changing requests always use a header;
+      // query-string credentials are reserved for the read-only MJPEG feed.
       const authHeaders = () => ($("key").value ? { Authorization: "Bearer " + $("key").value } : {});
-      const withKey = (url) => ($("key").value ? url + (url.includes("?") ? "&" : "?") + "key=" + encodeURIComponent($("key").value) : url);
 
       let running = false;
       let samples = [], history = [], lastTs = null, startedAt = 0;
@@ -594,12 +592,12 @@
       });
       // Never leave the last motion command active if the page goes away.
       window.addEventListener("pagehide", () => {
-        navigator.sendBeacon(
-          withKey($("url").value.replace(/\/+$/, "") + "/control"),
-          new Blob([JSON.stringify({ command: { linear: 0, angular: 0 } })], {
-            type: "application/json",
-          })
-        );
+        fetch($("url").value.replace(/\/+$/, "") + "/control", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+          body: JSON.stringify({ command: { linear: 0, angular: 0 } }),
+          keepalive: true,
+        }).catch(() => {});
       });
 
       // ---- server-side pipeline health via /status ------------------------

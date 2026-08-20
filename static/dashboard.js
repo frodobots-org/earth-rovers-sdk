@@ -142,13 +142,6 @@
 
   renderMissionAction();
 
-  // Plain <a> navigation, not fetch — these bypass apiFetch's Authorization
-  // header entirely, so they need the key riding in the URL instead.
-  ["footer-data", "footer-status"].forEach(function (id) {
-    var link = $(id);
-    if (link && DASH.apiKey) link.href += "?key=" + encodeURIComponent(DASH.apiKey);
-  });
-
   if (!missionStarted) {
     document.querySelectorAll(".pad, #lamp-btn, #speak-btn, #checkpoint-btn").forEach(function (control) {
       control.disabled = true;

@@ -11,15 +11,6 @@
   <body>
     <script>
       window.DASH = {{ dashboard_config }};
-      // The key only needs to ride in the URL for the very first load — the
-      // server just set a cookie for reloads. Drop it from the address bar,
-      // browser history and any Referer header sent from here on.
-      if (window.DASH.apiKey && location.search.includes("key=")) {
-        var params = new URLSearchParams(location.search);
-        params.delete("key");
-        var rest = params.toString();
-        history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
-      }
     </script>
 
     <header class="topbar">
@@ -245,8 +236,8 @@
 
     <footer class="footer">
       <a href="/sdk">SDK page</a>
-      <a id="footer-data" href="/data">/data</a>
-      <a id="footer-status" href="/status">/status</a>
+      <span>/data</span>
+      <span>/status</span>
     </footer>
 
     <script src="/static/vendor/leaflet/leaflet.js"></script>
