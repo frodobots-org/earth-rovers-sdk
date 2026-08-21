@@ -79,34 +79,23 @@ class ExternalRequestTest(unittest.IsolatedAsyncioTestCase):
         mock_logger.error.assert_not_called()
 
 
-class BackendErrorDetailTest(unittest.TestCase):
-    def _detail(self, response_data, fallback="fallback", debug=True):
-        env = {"DEBUG": "true"} if debug else {"DEBUG": "false"}
-        with patch.dict(os.environ, env):
-            return main._backend_error_detail(response_data, fallback)
+class SdkErrorDetailTest(unittest.TestCase):
+    def test_maps_401_to_user_not_found(self):
+        self.assertEqual(main._sdk_error_detail(401, "fallback"), "User not found")
 
-    def test_uses_backend_error_message_in_debug(self):
-        detail = self._detail({"error": "Bot is currently in use by another user"})
-        self.assertEqual(detail, "Bot is currently in use by another user")
-
-    def test_uses_backend_detail_message_in_debug(self):
-        self.assertEqual(self._detail({"detail": "Mission not found"}), "Mission not found")
-
-    def test_hides_backend_message_without_debug(self):
-        detail = self._detail(
-            {"error": "Bot is currently in use by another user"}, debug=False
+    def test_maps_403_to_bot_unavailable(self):
+        self.assertEqual(
+            main._sdk_error_detail(403, "fallback"), "Bot unavailable for SDK"
         )
-        self.assertEqual(detail, "fallback")
 
-    def test_falls_back_when_no_message(self):
-        self.assertEqual(self._detail({}), "fallback")
-        self.assertEqual(self._detail(None), "fallback")
+    def test_uses_fallback_for_other_statuses(self):
+        self.assertEqual(main._sdk_error_detail(422, "fallback"), "fallback")
+        self.assertEqual(main._sdk_error_detail(404, "fallback"), "fallback")
+        self.assertEqual(main._sdk_error_detail(500, "fallback"), "fallback")
 
-    def test_falls_back_when_error_is_not_a_plain_string(self):
-        self.assertEqual(self._detail({"error": {"mission": ["blank"]}}), "fallback")
-
-    def test_falls_back_when_error_is_blank(self):
-        self.assertEqual(self._detail({"error": "  "}), "fallback")
+    def test_never_returns_raw_backend_text(self):
+        # The mapping is keyed on status only, so backend internals can't leak.
+        self.assertEqual(main._sdk_error_detail(422, "generic"), "generic")
 
 
 if __name__ == "__main__":

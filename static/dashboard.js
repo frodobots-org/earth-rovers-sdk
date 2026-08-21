@@ -37,6 +37,16 @@
     return $("front-placeholder").classList.contains("hidden");
   }
 
+  // Guidance under an error title. "Fix the issue and try again" is wrong when
+  // nothing on this side can be fixed (e.g. someone else is driving the bot),
+  // so map those cases to a "wait" message.
+  function problemSubtitle(message) {
+    if (message === "Bot unavailable for SDK") {
+      return "Another user is using this bot — try again shortly.";
+    }
+    return "Fix the issue and try again.";
+  }
+
   // Problems go where the user is looking: big and centered when the video
   // area is empty, a slim overlay strip when video is playing.
   function reportProblem(message, isError) {
@@ -46,7 +56,7 @@
       showBootNotice("", false);
       setPlaceholder(message, {
         tone: isError ? "error" : "warn",
-        sub: isError ? "Fix the issue and try again." : "",
+        sub: isError ? problemSubtitle(message) : "",
         startButton: !missionStarted && !!DASH.missionSlug,
       });
     }
@@ -910,10 +920,15 @@
 
   function initVideo() {
     if (!DASH.appid || !DASH.rtcToken) {
-      if (missionStarted) {
-        setPlaceholder("Video unavailable", {
+      if (DASH.bootNotice && !/start-mission/i.test(DASH.bootNotice)) {
+        // Auth/token failed (e.g. the bot is in use or its status is invalid).
+        // Keep the real reason instead of overwriting it with a generic
+        // "Video unavailable" message.
+        reportProblem(DASH.bootNotice, true);
+      } else if (missionStarted) {
+        setPlaceholder("Bot unavailable for SDK", {
           tone: "warn",
-          sub: "No spectator token configured for this session.",
+          sub: "Couldn't get a video feed for this session — the bot may be offline or in use.",
         });
       }
       // Not started: the placeholder already shows the mission empty state.
