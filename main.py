@@ -85,6 +85,7 @@ V2_FRAME_TIMEOUT_S = float(os.getenv("V2_FRAME_TIMEOUT_S", "2"))
 # In-memory storage for the response
 auth_response_data = {}
 checkpoints_list_data = {}
+mission_completion_data = None
 auth_lock = None
 auth_lock_loop = None
 INGEST_TOKEN = secrets.token_urlsafe(32)
@@ -303,6 +304,49 @@ async def get_status():
     )
 
 
+def _mission_progress_snapshot() -> dict:
+    """Return local mission progress without another backend request."""
+    sequences = sorted(
+        cp.get("sequence")
+        for cp in checkpoints_list_data.get("checkpoints_list", [])
+        if isinstance(cp.get("sequence"), int)
+    )
+    latest = checkpoints_list_data.get("latest_scanned_checkpoint")
+
+    if mission_completion_data is not None:
+        latest = mission_completion_data.get("latest_scanned_checkpoint")
+
+    try:
+        latest_number = int(latest) if latest is not None else 0
+    except (TypeError, ValueError):
+        latest_number = 0
+    next_sequence = next(
+        (sequence for sequence in sequences if sequence > latest_number), None
+    )
+
+    return {
+        "mission_started": bool(auth_response_data)
+        or not os.getenv("MISSION_SLUG"),
+        "mission_completed": mission_completion_data is not None,
+        "latest_scanned_checkpoint": latest,
+        "next_checkpoint_sequence": None
+        if mission_completion_data is not None
+        else next_sequence,
+    }
+
+
+def _publish_mission_progress():
+    telemetry_hub.broadcast(
+        {"type": "mission_progress", "data": _mission_progress_snapshot()}
+    )
+
+
+@app.get("/mission-progress")
+async def get_mission_progress():
+    """Cheap polling endpoint for dashboards watching external controllers."""
+    return JSONResponse(content=_mission_progress_snapshot())
+
+
 async def auth_common():
     global auth_lock, auth_lock_loop, auth_response_data
     if auth_response_data:
@@ -510,6 +554,7 @@ async def auth():
 
 @app.post("/start-mission")
 async def start_mission():
+    global mission_completion_data
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -523,6 +568,8 @@ async def start_mission():
         await auth()
     if not checkpoints_list_data:
         await get_checkpoints_list()
+    mission_completion_data = None
+    _publish_mission_progress()
     return JSONResponse(
         status_code=200,
         content={
@@ -560,9 +607,11 @@ async def end_mission():
         await end_ride(headers, bot_slug, mission_slug)
         cancel_control_watchdog()
         # Clear the stored auth and checkpoints data
-        global auth_response_data, checkpoints_list_data
+        global auth_response_data, checkpoints_list_data, mission_completion_data
         auth_response_data = {}
         checkpoints_list_data = {}
+        mission_completion_data = None
+        _publish_mission_progress()
         await asyncio.gather(
             *(broadcaster.close() for broadcaster in feed_broadcasters.values())
         )
@@ -988,7 +1037,7 @@ def _pending_checkpoint_sequences() -> list[int]:
 
 @app.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
-    global auth_response_data, checkpoints_list_data
+    global auth_response_data, checkpoints_list_data, mission_completion_data
     await need_start_mission()
 
     bot_slug = os.getenv("BOT_SLUG")
@@ -1062,6 +1111,9 @@ async def checkpoint_reached(request: Request):
         checkpoints_list_data["latest_scanned_checkpoint"] = pending_sequences[0]
 
     if mission_completed:
+        mission_completion_data = {
+            "latest_scanned_checkpoint": max(sequences) if sequences else None,
+        }
         # The backend ends the ride after the last checkpoint, which kills
         # the feed and makes the bot unreachable. Drop the local session so
         # /status reports it and /start-mission re-authenticates cleanly.
@@ -1070,10 +1122,13 @@ async def checkpoint_reached(request: Request):
         cancel_control_watchdog()
         auth_response_data = {}
         checkpoints_list_data = {}
+        _publish_mission_progress()
         await asyncio.gather(
             *(broadcaster.close() for broadcaster in feed_broadcasters.values())
         )
         await browser_service.close()
+    else:
+        _publish_mission_progress()
 
     return JSONResponse(
         status_code=200,
