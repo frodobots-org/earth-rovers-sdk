@@ -24,6 +24,7 @@ class MainConcurrencyTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         main.auth_response_data = {}
         main.checkpoints_list_data = {}
+        main.mission_completion_data = None
         main.auth_lock = None
         main.auth_lock_loop = None
 
@@ -111,6 +112,30 @@ class MainConcurrencyTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(feed.unsubscribed)
         self.assertIs(feed.assert_queue, feed.queue)
+
+    async def test_mission_progress_endpoint_uses_local_cache(self):
+        main.auth_response_data = TOKENS.copy()
+        main.checkpoints_list_data = {
+            "checkpoints_list": [
+                {"sequence": 1},
+                {"sequence": 2},
+                {"sequence": 3},
+            ],
+            "latest_scanned_checkpoint": 1,
+        }
+
+        with patch.dict(os.environ, {"MISSION_SLUG": "mission"}):
+            response = await main.get_mission_progress()
+
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "mission_started": True,
+                "mission_completed": False,
+                "latest_scanned_checkpoint": 1,
+                "next_checkpoint_sequence": 2,
+            },
+        )
 
 
 if __name__ == "__main__":

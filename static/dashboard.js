@@ -350,6 +350,9 @@
       if (msg.type === "snapshot" || msg.type === "telemetry") {
         if (msg.data) renderTelemetry(msg.data);
       }
+      if (msg.type === "mission_progress") {
+        applyMissionProgress(msg.data);
+      }
       if (msg.ingest_connected !== undefined) {
         setLed("led-rover", msg.ingest_connected ? "on" : "off");
       }
@@ -659,25 +662,43 @@
 
   /* --- Active mission tab --- */
 
+  var missionProgressTimer = null;
+
+  function applyMissionProgress(progress) {
+    if (!progress) return;
+    if (progress.mission_completed) {
+      if (missionStarted) missionCompleted();
+      return;
+    }
+
+    var nextSequence = progress.next_checkpoint_sequence;
+    if (
+      (nextSequence === null || nextSequence === undefined) &&
+      progress.latest_scanned_checkpoint !== null &&
+      progress.latest_scanned_checkpoint !== undefined
+    ) {
+      nextSequence = parseInt(progress.latest_scanned_checkpoint, 10) + 1;
+    }
+    if (nextSequence !== null && nextSequence !== undefined) {
+      renderCheckpoints(parseInt(nextSequence, 10));
+    }
+  }
+
+  function pollMissionProgress() {
+    fetch("/mission-progress")
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(applyMissionProgress)
+      .catch(function () {});
+  }
+
   if (checkpoints.length > 0) {
     $("active-mission-head").classList.remove("hidden");
     $("active-mission-slug").textContent = DASH.missionSlug || "mission";
     renderCheckpoints(null);
-
-    fetch("/checkpoints-list")
-      .then(function (r) {
-        return r.ok ? r.json() : null;
-      })
-      .then(function (body) {
-        if (
-          body &&
-          body.latest_scanned_checkpoint !== null &&
-          body.latest_scanned_checkpoint !== undefined
-        ) {
-          renderCheckpoints(parseInt(body.latest_scanned_checkpoint, 10) + 1);
-        }
-      })
-      .catch(function () {});
+    pollMissionProgress();
+    missionProgressTimer = setInterval(pollMissionProgress, 1000);
   } else {
     $("active-empty").classList.remove("hidden");
     $("checkpoint-btn").classList.add("hidden");
@@ -838,6 +859,8 @@
   // drops and the bot stops listening. Reflect that instead of erroring.
   function missionCompleted() {
     missionStarted = false;
+    clearInterval(missionProgressTimer);
+    missionProgressTimer = null;
     clearDriveState();
     document
       .querySelectorAll(".pad, #lamp-btn, #speak-btn, #checkpoint-btn")

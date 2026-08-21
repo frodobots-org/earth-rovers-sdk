@@ -176,6 +176,7 @@ class CheckpointSafetyTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         main.cancel_control_watchdog()
         main.auth_response_data = {"BOT_UID": "bot"}
+        main.mission_completion_data = None
         main.checkpoints_list_data = {
             "checkpoints_list": [
                 {"sequence": 1},
@@ -189,6 +190,7 @@ class CheckpointSafetyTest(unittest.IsolatedAsyncioTestCase):
         main.cancel_control_watchdog()
         main.auth_response_data = {}
         main.checkpoints_list_data = {}
+        main.mission_completion_data = None
 
     async def test_final_checkpoint_confirms_stop_before_backend_teardown(self):
         order = []
@@ -218,6 +220,15 @@ class CheckpointSafetyTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(order, ["stop", "checkpoint"])
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            main._mission_progress_snapshot(),
+            {
+                "mission_started": False,
+                "mission_completed": True,
+                "latest_scanned_checkpoint": 3,
+                "next_checkpoint_sequence": None,
+            },
+        )
 
     async def test_final_checkpoint_is_not_reported_without_confirmed_stop(self):
         external = AsyncMock()
@@ -270,6 +281,11 @@ class CheckpointSafetyTest(unittest.IsolatedAsyncioTestCase):
             main.checkpoints_list_data["latest_scanned_checkpoint"], 2
         )
         self.assertEqual(response.status_code, 200)
+        progress = main._mission_progress_snapshot()
+        self.assertTrue(progress["mission_started"])
+        self.assertFalse(progress["mission_completed"])
+        self.assertEqual(progress["latest_scanned_checkpoint"], 2)
+        self.assertEqual(progress["next_checkpoint_sequence"], 3)
 
 
 if __name__ == "__main__":
