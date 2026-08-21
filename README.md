@@ -682,7 +682,7 @@ Example Response:
 
   - Clearer, safe error messages when a session can't start. Known backend failures map to fixed, user-facing messages — `401` → `User not found` (bad SDK API key), `403` → `Bot unavailable for SDK` (bot in use) — and anything else falls back to a generic message. The mapping is keyed on the HTTP status, never the raw backend body, so backend internals are never exposed
   - With `DEBUG=true`, the real backend status and body are still logged server-side to help diagnose the underlying failure
-  - Dashboard: when a session can't start, the video panel shows that message (e.g. `Bot unavailable for SDK`) instead of the vague "Video unavailable / No spectator token configured for this session"
+  - Dashboard: when a session can't start, the video panel shows that message (e.g. `Bot unavailable for SDK`) instead of the vague "Video unavailable / No spectator token configured for this session". When the bot is in use, the hint reads "Another user is using this bot — try again shortly." rather than the misleading "Fix the issue and try again."
 
 - v.6.2:
 
