@@ -382,9 +382,12 @@ def get_env_tokens():
 
 
 def _backend_error_detail(response_data, fallback):
-    """Prefer the backend's own error message so the caller sees the real reason
-    (e.g. "Bot is currently in use by another user") instead of a generic one.
-    Falls back when the body has no plain-text error."""
+    """With DEBUG=true, surface the backend's own error message so a developer
+    sees the real reason (e.g. "Bot is currently in use by another user").
+    In normal operation return only the generic fallback, so backend internals
+    are never exposed to arbitrary callers."""
+    if os.getenv("DEBUG") != "true":
+        return fallback
     if isinstance(response_data, dict):
         message = response_data.get("error") or response_data.get("detail")
         if isinstance(message, str) and message.strip():
