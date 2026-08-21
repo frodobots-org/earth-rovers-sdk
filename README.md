@@ -4,7 +4,7 @@
   <br>
 </p>
 
-# Earth Rovers SDK v6.2
+# Earth Rovers SDK v6.3
 
 ## Requirements
 
@@ -677,6 +677,11 @@ Example Response:
 ```
 
 # Latest updates
+
+- v.6.3:
+
+  - Backend errors are no longer swallowed while debugging. With `DEBUG=true`, any non-2xx response from the FrodoBots API is logged with its real status and body, and the actual reason (e.g. `Bot is currently in use by another user`) is returned to the caller in the response `detail` instead of the generic `Bot unavailable for SDK`
+  - In normal operation (`DEBUG` unset) the generic message is kept, so backend internals are never exposed to arbitrary callers
 
 - v.6.2:
 

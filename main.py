@@ -104,13 +104,23 @@ async def external_request(method: str, url: str, **kwargs) -> tuple[int, dict]:
     """Use pooled async HTTP so rover hot paths never block the event loop."""
 
     async def perform(session: aiohttp.ClientSession):
-        if os.getenv("DEBUG") == "true":
+        debug = os.getenv("DEBUG") == "true"
+        if debug:
             logger.info("External %s %s", method.upper(), url)
         async with session.request(method, url, **kwargs) as response:
             try:
                 body = await response.json(content_type=None)
             except (aiohttp.ContentTypeError, json.JSONDecodeError):
                 body = {"error": await response.text()}
+
+            if debug and response.status >= 400:
+                logger.error(
+                    "External %s %s failed: %s %s",
+                    method.upper(),
+                    url,
+                    response.status,
+                    body,
+                )
             return response.status, body
 
     try:
@@ -371,6 +381,20 @@ def get_env_tokens():
     return None
 
 
+def _backend_error_detail(response_data, fallback):
+    """With DEBUG=true, surface the backend's own error message so a developer
+    sees the real reason (e.g. "Bot is currently in use by another user").
+    In normal operation return only the generic fallback, so backend internals
+    are never exposed to arbitrary callers."""
+    if os.getenv("DEBUG") != "true":
+        return fallback
+    if isinstance(response_data, dict):
+        message = response_data.get("error") or response_data.get("detail")
+        if isinstance(message, str) and message.strip():
+            return message
+    return fallback
+
+
 async def start_ride(headers, bot_slug, mission_slug):
     start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
     status, response_data = await external_request(
@@ -382,7 +406,7 @@ async def start_ride(headers, bot_slug, mission_slug):
     if status != 200:
         raise HTTPException(
             status_code=status,
-            detail="Bot unavailable for SDK",
+            detail=_backend_error_detail(response_data, "Bot unavailable for SDK"),
         )
     return response_data
 
@@ -396,7 +420,10 @@ async def end_ride(headers, bot_slug, mission_slug):
         json=end_ride_data,
     )
     if status != 200:
-        raise HTTPException(status_code=status, detail="Failed to end mission")
+        raise HTTPException(
+            status_code=status,
+            detail=_backend_error_detail(response_data, "Failed to end mission"),
+        )
     return response_data
 
 
@@ -406,7 +433,10 @@ async def retrieve_tokens(headers, bot_slug):
         "POST", FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data
     )
     if status != 200:
-        raise HTTPException(status_code=status, detail="Failed to retrieve tokens")
+        raise HTTPException(
+            status_code=status,
+            detail=_backend_error_detail(response_data, "Failed to retrieve tokens"),
+        )
     return response_data
 
 
