@@ -682,6 +682,7 @@ Example Response:
 
   - Backend errors are no longer swallowed while debugging. With `DEBUG=true`, any non-2xx response from the FrodoBots API is logged with its real status and body, and the actual reason (e.g. `Bot is currently in use by another user`) is returned to the caller in the response `detail` instead of the generic `Bot unavailable for SDK`
   - In normal operation (`DEBUG` unset) the generic message is kept, so backend internals are never exposed to arbitrary callers
+  - Dashboard: when a session can't start (e.g. the bot is in use by another user), the video panel now shows the real reason instead of overwriting it with the generic "No spectator token configured for this session"
 
 - v.6.2:
 
