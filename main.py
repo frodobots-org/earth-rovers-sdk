@@ -381,6 +381,17 @@ def get_env_tokens():
     return None
 
 
+def _backend_error_detail(response_data, fallback):
+    """Prefer the backend's own error message so the caller sees the real reason
+    (e.g. "Bot is currently in use by another user") instead of a generic one.
+    Falls back when the body has no plain-text error."""
+    if isinstance(response_data, dict):
+        message = response_data.get("error") or response_data.get("detail")
+        if isinstance(message, str) and message.strip():
+            return message
+    return fallback
+
+
 async def start_ride(headers, bot_slug, mission_slug):
     start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
     status, response_data = await external_request(
@@ -392,7 +403,7 @@ async def start_ride(headers, bot_slug, mission_slug):
     if status != 200:
         raise HTTPException(
             status_code=status,
-            detail="Bot unavailable for SDK",
+            detail=_backend_error_detail(response_data, "Bot unavailable for SDK"),
         )
     return response_data
 
@@ -406,7 +417,10 @@ async def end_ride(headers, bot_slug, mission_slug):
         json=end_ride_data,
     )
     if status != 200:
-        raise HTTPException(status_code=status, detail="Failed to end mission")
+        raise HTTPException(
+            status_code=status,
+            detail=_backend_error_detail(response_data, "Failed to end mission"),
+        )
     return response_data
 
 
@@ -416,7 +430,10 @@ async def retrieve_tokens(headers, bot_slug):
         "POST", FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data
     )
     if status != 200:
-        raise HTTPException(status_code=status, detail="Failed to retrieve tokens")
+        raise HTTPException(
+            status_code=status,
+            detail=_backend_error_detail(response_data, "Failed to retrieve tokens"),
+        )
     return response_data
 
 

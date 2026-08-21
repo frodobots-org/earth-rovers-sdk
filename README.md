@@ -680,7 +680,8 @@ Example Response:
 
 - v.6.3:
 
-  - Backend errors are no longer swallowed while debugging: with `DEBUG=true`, any non-2xx response from the FrodoBots API is logged with its real status and body, so a failed `/start-mission` shows the actual reason (e.g. `Bot is currently in use by another user`) instead of only the generic `Bot unavailable for SDK`
+  - The real backend error is now returned to the caller: `/start-mission` and the other API-backed endpoints surface the actual reason (e.g. `Bot is currently in use by another user`) in the response `detail` instead of the generic `Bot unavailable for SDK`, so it's clear why a mission couldn't start
+  - Backend errors are also no longer swallowed while debugging: with `DEBUG=true`, any non-2xx response from the FrodoBots API is logged with its real status and body
 
 - v.6.2:
 
