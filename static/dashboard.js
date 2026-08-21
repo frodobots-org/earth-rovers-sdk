@@ -910,10 +910,15 @@
 
   function initVideo() {
     if (!DASH.appid || !DASH.rtcToken) {
-      if (missionStarted) {
-        setPlaceholder("Video unavailable", {
+      if (DASH.bootNotice && !/start-mission/i.test(DASH.bootNotice)) {
+        // Auth/token failed (e.g. the bot is in use or its status is invalid).
+        // Keep the real reason instead of overwriting it with a generic
+        // "Video unavailable" message.
+        reportProblem(DASH.bootNotice, true);
+      } else if (missionStarted) {
+        setPlaceholder("Bot unavailable for SDK", {
           tone: "warn",
-          sub: "No spectator token configured for this session.",
+          sub: "Couldn't get a video feed for this session — the bot may be offline or in use.",
         });
       }
       // Not started: the placeholder already shows the mission empty state.
