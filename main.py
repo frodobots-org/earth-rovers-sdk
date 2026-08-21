@@ -381,17 +381,17 @@ def get_env_tokens():
     return None
 
 
-def _backend_error_detail(response_data, fallback):
-    """With DEBUG=true, surface the backend's own error message so a developer
-    sees the real reason (e.g. "Bot is currently in use by another user").
-    In normal operation return only the generic fallback, so backend internals
-    are never exposed to arbitrary callers."""
-    if os.getenv("DEBUG") != "true":
-        return fallback
-    if isinstance(response_data, dict):
-        message = response_data.get("error") or response_data.get("detail")
-        if isinstance(message, str) and message.strip():
-            return message
+def _sdk_error_detail(status, fallback):
+    """Map known backend failures to safe, user-facing messages. Keyed off the
+    HTTP status (not the raw body), so backend internals are never exposed and
+    the message stays stable if the backend rewords its errors.
+      401 -> the SDK API key didn't resolve to a user
+      403 -> the bot is in use / not permitted for SDK
+      other -> the caller's generic fallback"""
+    if status == 401:
+        return "User not found"
+    if status == 403:
+        return "Bot unavailable for SDK"
     return fallback
 
 
@@ -406,7 +406,7 @@ async def start_ride(headers, bot_slug, mission_slug):
     if status != 200:
         raise HTTPException(
             status_code=status,
-            detail=_backend_error_detail(response_data, "Bot unavailable for SDK"),
+            detail=_sdk_error_detail(status, "Bot unavailable for SDK"),
         )
     return response_data
 
@@ -422,7 +422,7 @@ async def end_ride(headers, bot_slug, mission_slug):
     if status != 200:
         raise HTTPException(
             status_code=status,
-            detail=_backend_error_detail(response_data, "Failed to end mission"),
+            detail=_sdk_error_detail(status, "Failed to end mission"),
         )
     return response_data
 
@@ -435,7 +435,7 @@ async def retrieve_tokens(headers, bot_slug):
     if status != 200:
         raise HTTPException(
             status_code=status,
-            detail=_backend_error_detail(response_data, "Failed to retrieve tokens"),
+            detail=_sdk_error_detail(status, "Bot unavailable for SDK"),
         )
     return response_data
 
