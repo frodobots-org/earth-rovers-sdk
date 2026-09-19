@@ -1,0 +1,45 @@
+# Secrets and local credentials must never enter an image layer.
+.env
+.env.*
+!.env.sample
+
+# Local browser profile — may hold an authenticated Agora/rover session.
+.chrome-profile/
+
+# Personal Openclaw workspace config (templates live in examples/openclaw/).
+.openclaw/
+/AGENTS.md
+/SOUL.md
+/IDENTITY.md
+/USER.md
+/TOOLS.md
+/HEARTBEAT.md
+/CLAUDE.md
+/MEMORY.md
+
+# Version control and editor state.
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.DS_Store
+
+# Python caches and local virtualenvs.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated run artifacts.
+screenshots/*.png
+static/*.mp3
+static/*.wav
+front.png
+node_modules/
+
+# Local-only handoff docs.
+/plans/
