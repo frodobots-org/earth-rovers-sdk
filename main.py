@@ -293,6 +293,11 @@ async def get_status():
     return JSONResponse(
         content={
             "browser_ready": browser_service.is_ready,
+            "identity": dict((auth_response_data or {}).get("ROVER_IDENTITY") or {}),
+            "sdk_version": "6.3-colosseum.1",
+            "configured_bot_slug": os.getenv("BOT_SLUG", ""),
+            "configured_mission_slug": os.getenv("MISSION_SLUG", ""),
+            "control_watchdog_s": CONTROL_WATCHDOG_S,
             "browser_error": browser_service.last_error,
             "mission_started": bool(auth_response_data)
             or not os.getenv("MISSION_SLUG"),
@@ -303,7 +308,7 @@ async def get_status():
     )
 
 
-async def auth_common():
+async def auth_common(*, evaluation=False):
     global auth_lock, auth_lock_loop, auth_response_data
     if auth_response_data:
         return auth_response_data
@@ -320,7 +325,7 @@ async def auth_common():
         if auth_response_data:
             return auth_response_data
         env_tokens = get_env_tokens()
-        if env_tokens:
+        if env_tokens and not evaluation:
             auth_response_data = env_tokens
             return auth_response_data
 
@@ -340,7 +345,7 @@ async def auth_common():
             "Authorization": f"Bearer {auth_header}",
         }
         if mission_slug:
-            response_data = await start_ride(headers, bot_slug, mission_slug)
+            response_data = await start_ride(headers, bot_slug, mission_slug, evaluation=True) if evaluation else await start_ride(headers, bot_slug, mission_slug)
         else:
             response_data = await retrieve_tokens(headers, bot_slug)
 
@@ -354,6 +359,7 @@ async def auth_common():
             "SPECTATOR_USERID": response_data.get("SPECTATOR_USERID"),
             "SPECTATOR_RTC_TOKEN": response_data.get("SPECTATOR_RTC_TOKEN"),
             "BOT_TYPE": response_data.get("BOT_TYPE", "mini"),
+            "ROVER_IDENTITY": response_data.get("ROVER_IDENTITY") or {},
         }
         return auth_response_data
 
@@ -395,8 +401,10 @@ def _sdk_error_detail(status, fallback):
     return fallback
 
 
-async def start_ride(headers, bot_slug, mission_slug):
+async def start_ride(headers, bot_slug, mission_slug, *, evaluation=False):
     start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
+    if evaluation:
+        start_ride_data['evaluation'] = True
     status, response_data = await external_request(
         "POST",
         FRODOBOTS_API_URL + "/sdk/start_ride",
@@ -509,7 +517,7 @@ async def auth():
 
 
 @app.post("/start-mission")
-async def start_mission():
+async def start_mission(evaluation: bool = False):
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -519,7 +527,12 @@ async def start_mission():
             detail=f"Missing required environment variables: {', '.join(missing_vars)}",
         )
 
-    if not auth_response_data:
+    if evaluation:
+        await auth_common(evaluation=True)
+        identity = auth_response_data.get('ROVER_IDENTITY') or {}
+        if not identity.get('ride_id') or identity.get('sdk_user_admin') or not identity.get('recording_enabled'):
+            raise HTTPException(status_code=409, detail='Evaluation requires exact ride identity, recording and a non-admin SDK user')
+    elif not auth_response_data:
         await auth()
     if not checkpoints_list_data:
         await get_checkpoints_list()
@@ -527,9 +540,20 @@ async def start_mission():
         status_code=200,
         content={
             "message": "Mission started successfully",
+            "identity": dict((auth_response_data or {}).get("ROVER_IDENTITY") or {}),
             "checkpoints_list": checkpoints_list_data,
         },
     )
+
+
+@app.post("/stop")
+async def stop_motion():
+    await need_start_mission()
+    await _require_confirmed_stop("stop without ending the ride")
+    return JSONResponse(content={
+        "stop_requested": True, "stop_confirmed": True,
+        "stationary_verified": False,
+    })
 
 
 @app.post("/end-mission")
