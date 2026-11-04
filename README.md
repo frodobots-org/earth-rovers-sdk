@@ -16,7 +16,7 @@
 
 ## Software Requirements
 
-- Python 3.9 or higher
+- Python 3.10 or higher (Python 3.12 is used by the Docker image)
 - Frodobots API key
 
 The SDK uses [Playwright](https://playwright.dev/python/), which downloads and manages its own Chromium — no separate browser install is required. To use a specific browser binary instead (e.g. real Google Chrome), set `CHROME_EXECUTABLE_PATH` in your `.env`.
@@ -784,3 +784,4 @@ Fixes, in order of preference:
 ## Join our Discord
 
 - [Frodobots Discord](https://discord.com/invite/AUegJCJwyb)
+
