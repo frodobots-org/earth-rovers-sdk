@@ -1,7 +1,7 @@
-fastapi==0.116.1
-starlette==0.47.3
+fastapi==0.135.4
+starlette==1.0.1
 hypercorn==0.17.3
-pydantic==2.8.2
+pydantic==2.14.2
 playwright==1.64.1
 wsproto==1.2.0
 python-dotenv==1.0.1
@@ -11,5 +11,6 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.4
 edge-tts>=6.1.0
 google-genai>=1.0.0
+
 
 
