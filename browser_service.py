@@ -89,7 +89,6 @@ class BrowserService:
             launch_kwargs = {
                 "headless": True,
                 "args": [
-                    "--ignore-certificate-errors",
                     "--no-sandbox",
                     "--autoplay-policy=no-user-gesture-required",
                     "--use-fake-ui-for-media-stream",
@@ -386,3 +385,4 @@ class BrowserService:
     # Backward-compatible alias
     async def close_browser(self):
         await self.close()
+
